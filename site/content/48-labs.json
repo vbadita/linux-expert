@@ -1,0 +1,121 @@
+{
+ "title": "Troubleshooting labs",
+ "labs": [
+  {
+   "id": "disk-full",
+   "title": "Disk full, but du finds only half of it",
+   "level": "intermediate",
+   "symptom": "A service reports `No space left on device` when it writes to `/mnt/labdisk`. You have a shell on the server. Find what is using the space and free it **without losing data**.",
+   "build": [
+    "sudo mkdir -p /mnt/labdisk",
+    "sudo mount -t tmpfs -o size=16m tmpfs /mnt/labdisk",
+    "sudo chown $(id -un): /mnt/labdisk",
+    "mkdir /mnt/labdisk/app /mnt/labdisk/backup",
+    "dd if=/dev/zero of=/mnt/labdisk/backup/old-dump.sql bs=1M count=6 status=none",
+    "dd if=/dev/zero of=/mnt/labdisk/app/app.log bs=1M count=9 status=none",
+    "(sleep 600 < /mnt/labdisk/app/app.log > /dev/null 2>&1 &)",
+    "rm /mnt/labdisk/app/app.log",
+    "dd if=/dev/zero of=/mnt/labdisk/app/cache.bin bs=1M count=100 status=none 2>/dev/null || true"
+   ],
+   "teardown": [
+    "lsof -t +aL1 /mnt/labdisk 2>/dev/null | xargs -r kill ; sudo umount -l /mnt/labdisk ; sudo rmdir /mnt/labdisk ; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** Writes fail with `No space left on device`. What do you run first?",
+     "choices": [
+      {
+       "cmd": "df -h /mnt/labdisk",
+       "verdict": "good",
+       "next": 1,
+       "note": "Good first move. It confirms the filesystem is 100% full and shows its size.",
+       "output": "Filesystem      Size  Used Avail Use% Mounted on\ntmpfs            16M   16M     0 100% /mnt/labdisk"
+      },
+      {
+       "cmd": "ls -la /mnt/labdisk",
+       "verdict": "ok",
+       "note": "Shows the top-level directories, but not how much space is used or free. Check `df` first.",
+       "output": "total 0\ndrwxrwxrwt. 4 opc  opc  80 Nov  7 21:54 .\ndrwxr-xr-x. 3 root root 21 Nov  7 21:54 ..\ndrwxr-xr-x. 2 opc  opc  60 Nov  7 21:54 app\ndrwxr-xr-x. 2 opc  opc  60 Nov  7 21:54 backup"
+      },
+      {
+       "cmd": "sudo reboot",
+       "verdict": "poor",
+       "explanationOnly": true,
+       "reason": "destructive on a real server, so it was not run",
+       "note": "A reboot interrupts every service and may not even help: files on disk stay. Never reboot before you know the cause."
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** `df` says the filesystem is full. What is using the space?",
+     "choices": [
+      {
+       "cmd": "du -sh /mnt/labdisk/*",
+       "verdict": "good",
+       "next": 2,
+       "note": "Right tool. But compare the sizes with the `Used` column of `df`. They do not match.",
+       "output": "1.0M\t/mnt/labdisk/app\n6.0M\t/mnt/labdisk/backup"
+      },
+      {
+       "cmd": "df -i /mnt/labdisk",
+       "verdict": "ok",
+       "note": "Checks inodes. This is the right idea when a disk is \"full\" but `df -h` shows free space. Here the blocks themselves are full, so this is not the cause.",
+       "output": "Filesystem     Inodes IUsed  IFree IUse% Mounted on\ntmpfs          722241     7 722234    1% /mnt/labdisk"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** `du` adds up to less than `df` reports. Which command finds the missing space?",
+     "choices": [
+      {
+       "cmd": "find /mnt/labdisk -type f -size +1M",
+       "verdict": "ok",
+       "note": "Finds files that still have a name. The missing space has no name any more, so `find` cannot see it.",
+       "output": "/mnt/labdisk/backup/old-dump.sql"
+      },
+      {
+       "cmd": "lsof -nP +aL1 /mnt/labdisk 2>/dev/null",
+       "verdict": "good",
+       "next": 3,
+       "note": "`+L1` lists open files with link count below 1: deleted files that a process still holds open. `+a` limits the list to this filesystem, `2>/dev/null` hides warnings about unreadable system mounts. The `NLINK 0` column and `(deleted)` mark the file. Its space is not freed until the process closes it.",
+       "output": "COMMAND     PID USER   FD   TYPE DEVICE SIZE/OFF NLINK NODE NAME\nsleep   3357970  opc    0r   REG  0,134  9437184     0    5 /mnt/labdisk/app/app.log (deleted)"
+      },
+      {
+       "cmd": "rm /mnt/labdisk/backup/old-dump.sql",
+       "verdict": "poor",
+       "explanationOnly": true,
+       "reason": "it would delete a backup, so it was not run",
+       "note": "Deleting the backup destroys data and does not fix the cause. Free space only after you know what holds it."
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** A deleted `app.log` (9 MB) is still open in a process. In real life you restart the service that holds it. Here the holder is a `sleep` process, and `lsof -t` prints just its PID. What do you do?",
+     "choices": [
+      {
+       "cmd": "lsof -t +aL1 /mnt/labdisk 2>/dev/null | xargs kill",
+       "verdict": "good",
+       "next": 4,
+       "note": "Ending the holder closes the file. The kernel then frees the blocks. On a real server, restart or reload the service so it reopens its log.",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** Verify the space is back.",
+     "choices": [
+      {
+       "cmd": "df -h /mnt/labdisk",
+       "verdict": "good",
+       "next": "done",
+       "note": "Space was freed with no data lost.",
+       "output": "Filesystem      Size  Used Avail Use% Mounted on\ntmpfs            16M  7.0M  9.0M  44% /mnt/labdisk"
+      }
+     ]
+    }
+   ],
+   "conclusion": "The log file was deleted, but a running process still had it open. A file's data is freed only when its **last name is removed and the last open file descriptor is closed**. `du` walks names, so it missed the file. `df` asks the filesystem, so it counted the blocks. `lsof +L1` finds exactly this case. See the inode and file descriptor modules for how it works underneath."
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

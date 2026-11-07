@@ -1,0 +1,25 @@
+[Unit]
+Description=Pull the Linux Expert course static site (branch "site", built and tested by CI)
+Documentation=https://github.com/vbadita/linux-expert
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/linux-site-sync
+User=linux-web
+Group=linux-web
+# Writable: only its own directory. Everything else read-only.
+ProtectSystem=strict
+ReadWritePaths=/srv/linux-expert
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

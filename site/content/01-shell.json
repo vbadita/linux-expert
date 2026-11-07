@@ -1,0 +1,363 @@
+{
+ "title": "The shell",
+ "lessons": [
+  {
+   "id": "how-bash-runs-a-command",
+   "title": "How bash reads, expands and runs a command",
+   "level": "beginner",
+   "goal": "Learn what bash does between you pressing Enter and a program starting: split into words, expand, then fork and exec.\n\nWhy it matters: most \"weird shell behaviour\" (a `*` that matches too much, a variable that splits, an error that ends up in the wrong file) is bash expanding **before** the program runs. When you can see the exact arguments a program receives, you can predict and fix these problems.",
+   "setup": {
+    "note": "Work in a scratch directory. Your outputs may differ in user name, PIDs and paths. The structure is the same.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "touch a.txt b.txt notes.md"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A command line is a list of words",
+     "text": "Bash splits the line into **words** at blanks. The first word is the command. The other words are its arguments.\n\nThe extra blanks are not part of any word. `echo` never sees them.",
+     "run": [
+      {
+       "cmd": "echo one    two     three",
+       "output": "one two three"
+      }
+     ]
+    },
+    {
+     "title": "A program that shows its arguments",
+     "text": "To see exactly what a program receives, we write one. `main` gets an array of strings, `argv`. This program prints every entry.\n\nSave it as `showargs.c`, then compile it.",
+     "code": {
+      "file": "showargs.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n\nint main(int argc, char *argv[]) {\n    printf(\"argc = %d\\n\", argc);\n    for (int i = 0; i < argc; i++)\n        printf(\"argv[%d] = [%s]\\n\", i, argv[i]);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o showargs showargs.c",
+       "output": ""
+      },
+      {
+       "cmd": "./showargs one    two     three",
+       "output": "argc = 4\nargv[0] = [./showargs]\nargv[1] = [one]\nargv[2] = [two]\nargv[3] = [three]"
+      }
+     ],
+     "under": "A process starts with its arguments as an array of strings in memory. The kernel copies them from the `execve` call (step 8). Programs never see your original line, only this array."
+    },
+    {
+     "title": "Globbing: bash expands * before the program starts",
+     "text": "`*.txt` is a pattern. Bash replaces it with the matching file names, sorted. The program receives the file names, not the pattern.",
+     "run": [
+      {
+       "cmd": "ls",
+       "output": "a.txt\nb.txt\nnotes.md\nshowargs\nshowargs.c"
+      },
+      {
+       "cmd": "./showargs *.txt",
+       "output": "argc = 3\nargv[0] = [./showargs]\nargv[1] = [a.txt]\nargv[2] = [b.txt]"
+      }
+     ]
+    },
+    {
+     "title": "Quotes stop expansion",
+     "text": "Inside quotes the pattern stays a literal string. A backslash does the same for one character.\n\nUse quotes whenever a value must reach the program unchanged.",
+     "run": [
+      {
+       "cmd": "./showargs \"*.txt\" '*.txt' \\*.txt",
+       "output": "argc = 4\nargv[0] = [./showargs]\nargv[1] = [*.txt]\nargv[2] = [*.txt]\nargv[3] = [*.txt]"
+      }
+     ]
+    },
+    {
+     "title": "Variables expand too, but not in single quotes",
+     "text": "Double quotes allow `$name` to expand but keep the result as **one** word. Single quotes stop all expansion.",
+     "run": [
+      {
+       "cmd": "name=world",
+       "output": ""
+      },
+      {
+       "cmd": "./showargs \"hello $name\" 'hello $name' hello $name",
+       "output": "argc = 5\nargv[0] = [./showargs]\nargv[1] = [hello world]\nargv[2] = [hello $name]\nargv[3] = [hello]\nargv[4] = [world]"
+      }
+     ],
+     "after": "The last argument has no quotes, so it expanded and then was split into two words. Unquoted expansions are split at blanks. This is the cause of many bugs with file names that contain spaces."
+    },
+    {
+     "title": "Builtin or program?",
+     "text": "Some commands are part of bash itself (**builtins**). Others are files on disk. `type` tells you which.",
+     "run": [
+      {
+       "cmd": "type cd echo ls",
+       "output": "cd is a shell builtin\necho is a shell builtin\nls is hashed (/usr/bin/ls)"
+      },
+      {
+       "cmd": "type -a echo",
+       "output": "echo is a shell builtin\necho is /usr/bin/echo"
+      }
+     ],
+     "under": "`cd` must be a builtin. The working directory belongs to the process. A child process cannot change its parent's directory, so only the shell itself can do it.\n\n`echo` exists twice: once as a builtin and once as `/usr/bin/echo`. Bash uses the builtin first."
+    },
+    {
+     "title": "How bash finds a program: PATH",
+     "text": "For a name without a slash, bash searches the directories in `$PATH`, left to right. The current directory is not in the list, so `showargs` is not found, but `./showargs` (a path with a slash) is.",
+     "run": [
+      {
+       "cmd": "echo \"$PATH\" | tr : '\\n'",
+       "output": "/usr/local/bin\n/usr/local/sbin\n/usr/bin\n/usr/sbin"
+      },
+      {
+       "cmd": "showargs one",
+       "output": "bash: showargs: command not found"
+      },
+      {
+       "cmd": "echo \"exit code: $?\"",
+       "output": "exit code: 127"
+      }
+     ],
+     "after": "Exit code 127 means \"command not found\". Code 126 means \"found, but not executable\"."
+    },
+    {
+     "title": "Underneath: fork and execve",
+     "text": "Bash does not run the program itself. It creates a child process (`clone`, the system call behind `fork`). The child replaces itself with the program (`execve`). Bash waits for the child to finish.\n\nWe trace both calls and read the trace file `/tmp/trace.out`. The `*.txt` was already expanded when `execve` was called. The long number in each line is a process ID, so yours will differ.",
+     "run": [
+      {
+       "cmd": "strace -f -o /tmp/trace.out -e trace=execve,clone bash -c './showargs *.txt; true' > /dev/null",
+       "output": ""
+      },
+      {
+       "cmd": "cat /tmp/trace.out",
+       "output": "3357632 execve(\"/usr/bin/bash\", [\"bash\", \"-c\", \"./showargs *.txt; true\"], 0xfffff3abd018 /* 54 vars */) = 0\n3357632 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0xffffa013c0f0) = 3357633\n3357633 execve(\"./showargs\", [\"./showargs\", \"a.txt\", \"b.txt\"], 0xaaaaeceb6e50 /* 52 vars */) = 0\n3357633 +++ exited with 0 +++\n3357632 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=3357633, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---\n3357632 +++ exited with 0 +++"
+      }
+     ],
+     "under": "`execve(path, argv, envp)` is the only way to start a program. The `argv` array you see in the trace is the same array `showargs` printed in step 3."
+    },
+    {
+     "title": "Redirection: where stdout and stderr go",
+     "text": "Every process starts with three open files: 0 (stdin), 1 (stdout), 2 (stderr). `>` redirects 1, `2>` redirects 2, `>>` appends. Bash sets this up before it runs the command.",
+     "run": [
+      {
+       "cmd": "ls a.txt nothing.txt > out.txt 2> err.txt",
+       "output": ""
+      },
+      {
+       "cmd": "cat out.txt",
+       "output": "a.txt"
+      },
+      {
+       "cmd": "cat err.txt",
+       "output": "ls: cannot access 'nothing.txt': No such file or directory"
+      }
+     ]
+    },
+    {
+     "title": "The order of redirections matters",
+     "text": "Bash handles redirections left to right. `2>&1` means \"make fd 2 point to where fd 1 points **now**\".\n\nFirst command: stdout goes to the file, then stderr follows it. Second command: stderr follows the terminal (still fd 1), then stdout goes to the file.",
+     "run": [
+      {
+       "cmd": "ls a.txt nothing.txt > both.txt 2>&1; echo '--- both.txt:'; cat both.txt",
+       "output": "--- both.txt:\nls: cannot access 'nothing.txt': No such file or directory\na.txt"
+      },
+      {
+       "cmd": "ls a.txt nothing.txt 2>&1 > one.txt; echo '--- one.txt:'; cat one.txt",
+       "output": "ls: cannot access 'nothing.txt': No such file or directory\n--- one.txt:\na.txt"
+      }
+     ]
+    },
+    {
+     "title": "Pipes and exit codes",
+     "text": "`|` connects stdout of the left command to stdin of the right one. Both run at the same time. Every command ends with an exit code in `$?`: 0 means success, anything else means failure.",
+     "run": [
+      {
+       "cmd": "ls *.txt | wc -l",
+       "output": "6"
+      },
+      {
+       "cmd": "ls nothing.txt; echo \"exit code: $?\"",
+       "output": "ls: cannot access 'nothing.txt': No such file or directory\nexit code: 2"
+      },
+      {
+       "cmd": "ls a.txt; echo \"exit code: $?\"",
+       "output": "a.txt\nexit code: 0"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "You run `ls *.txt`. Who turns `*.txt` into file names?",
+     "options": [
+      "The ls program",
+      "Bash, before it starts ls",
+      "The kernel",
+      "The filesystem"
+     ],
+     "answer": 1,
+     "explain": "Bash expands the pattern and passes the file names to `ls` in `argv`. Step 3 showed it with `showargs`."
+    },
+    {
+     "q": "What does `./showargs \"hello $name\"` pass as arguments (name=world)?",
+     "options": [
+      "Two arguments: hello and world",
+      "One argument: hello world",
+      "One argument: hello $name",
+      "No arguments"
+     ],
+     "answer": 1,
+     "explain": "Double quotes allow the variable to expand but keep the result as one word."
+    },
+    {
+     "q": "Why can `cd` not be a normal program on disk?",
+     "options": [
+      "It is too small",
+      "A child process cannot change its parent's working directory",
+      "It needs root",
+      "It is written in bash"
+     ],
+     "answer": 1,
+     "explain": "The working directory is a per-process attribute. Only the shell process itself can change its own, so `cd` is a builtin."
+    },
+    {
+     "q": "A command prints `command not found`. Which exit code does `$?` show?",
+     "options": [
+      "0",
+      "1",
+      "126",
+      "127"
+     ],
+     "answer": 3,
+     "explain": "127 means not found. 126 means the file was found but cannot be executed."
+    },
+    {
+     "q": "Which command writes the error message to `file` and nothing to the terminal?",
+     "options": [
+      "ls x 2>&1 > file",
+      "ls x > file 2>&1",
+      "ls x > file",
+      "ls x 2> /dev/tty"
+     ],
+     "answer": 1,
+     "explain": "Redirections run left to right. In `> file 2>&1`, fd 1 goes to the file first, then fd 2 follows it. Step 10 showed the other order."
+    }
+   ],
+   "check": {
+    "scenario": "A script runs `rm $file` and `$file` holds `my notes.txt`. It deletes nothing you wanted, and prints two errors about `my` and `notes.txt` not existing. Using what you learned, explain what happened and how to fix it.",
+    "answer": "The unquoted `$file` expanded and was **split into two words** at the blank, so `rm` received two arguments: `my` and `notes.txt`. Step 5 showed the same with `hello $name`.\n\nFix: quote the expansion, `rm \"$file\"`. Then `rm` receives one argument: `my notes.txt`."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What happens, in order, when you type `ls *.txt` and press Enter?",
+   "level": "intermediate",
+   "a": "1. Bash splits the line into words.\n2. It expands the words (here: the `*.txt` glob becomes the matching file names).\n3. It looks for the command: function, builtin, then each directory in `$PATH`.\n4. It forks a child process.\n5. The child sets up redirections and calls `execve` with the expanded words as `argv`.\n6. Bash waits for the child and stores its exit code in `$?`.\n\nSee [the lesson](#/lesson/1/how-bash-runs-a-command/8)."
+  },
+  {
+   "q": "What is the difference between `cmd > f 2>&1` and `cmd 2>&1 > f`?",
+   "level": "intermediate",
+   "a": "Redirections are applied left to right. In the first, stdout goes to `f`, then stderr is pointed at where stdout is now (`f`). In the second, stderr is pointed at the terminal first, then only stdout goes to `f`, so errors still show on the terminal. See [step 10](#/lesson/1/how-bash-runs-a-command/10)."
+  },
+  {
+   "q": "Why is `cd` a shell builtin and not a program?",
+   "level": "beginner",
+   "a": "The current directory belongs to a process. A program started by the shell is a child process, so changing its directory would not affect the shell. Only a builtin runs inside the shell process."
+  },
+  {
+   "q": "What do exit codes 126 and 127 mean?",
+   "level": "beginner",
+   "a": "127: command not found. 126: the file was found but could not be executed (for example, no execute permission)."
+  },
+  {
+   "q": "A script breaks on file names with spaces. What is the usual cause and fix?",
+   "level": "beginner",
+   "a": "An unquoted expansion was split into several words. Quote it: `\"$var\"`. See [step 5](#/lesson/1/how-bash-runs-a-command/5)."
+  }
+ ],
+ "glossary": [
+  {
+   "term": "argv",
+   "def": "The array of argument strings a program receives when it starts. Index 0 is the program name.",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "term": "Builtin",
+   "def": "A command implemented inside the shell itself, not a file on disk. Example: cd.",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "term": "Exit code",
+   "def": "The number a process returns when it ends. 0 means success. Bash stores it in $?.",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "term": "Globbing",
+   "def": "Expansion of patterns such as *.txt into matching file names. Done by the shell before the program runs.",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "term": "PATH",
+   "def": "A colon-separated list of directories the shell searches for programs whose name has no slash.",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "term": "Quoting",
+   "def": "Using single quotes, double quotes or a backslash to stop or limit shell expansion.",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "term": "Redirection",
+   "def": "Changing where a standard file descriptor (0, 1, 2) points before a command runs.",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "term": "Word splitting",
+   "def": "Cutting the result of an unquoted expansion into separate words at blanks.",
+   "lesson": "1/how-bash-runs-a-command"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "type -a NAME",
+   "desc": "Show every way NAME can be run (alias, builtin, file).",
+   "topic": "Shell",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "cmd": "echo \"$PATH\" | tr : '\\n'",
+   "desc": "Print the PATH directories, one per line.",
+   "topic": "Shell",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "cmd": "echo $?",
+   "desc": "Print the exit code of the last command.",
+   "topic": "Shell",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "cmd": "cmd > file 2>&1",
+   "desc": "Send stdout and stderr to a file.",
+   "topic": "Shell",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "cmd": "cmd 2> err.txt",
+   "desc": "Send only stderr to a file.",
+   "topic": "Shell",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "cmd": "cmd >> file",
+   "desc": "Append stdout to a file.",
+   "topic": "Shell",
+   "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "cmd": "strace -f -e trace=execve,clone bash -c 'cmd'",
+   "desc": "Show how bash forks and execs a command.",
+   "topic": "Tracing",
+   "lesson": "1/how-bash-runs-a-command"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}
