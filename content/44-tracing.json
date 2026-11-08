@@ -1,0 +1,369 @@
+{
+ "title": "Tracing",
+ "lessons": [
+  {
+   "id": "strace-ltrace-overhead",
+   "title": "strace versus ltrace, and the cost of tracing",
+   "level": "intermediate",
+   "goal": "Compare the two classic tracers (system calls versus library calls), and measure how much slower a program runs under `strace`.\n\nWhy it matters: choosing the right tracer saves hours, and knowing the overhead tells you when it is unsafe to attach one to a production process.",
+   "setup": {
+    "note": "Programs are small C files. ltrace, strace and bpftrace are used (`dnf install ltrace strace bpftrace`). bpftrace needs root and a kernel with BPF; BCC tools are not installed here.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A small program",
+     "text": "`libdemo.c` allocates a buffer, copies a string, calls `strlen` and `printf`, and frees it. It uses **library functions** (`malloc`, `strcpy`, `strlen`, `printf`, `free`) and, underneath, a few **system calls**.",
+     "code": {
+      "file": "libdemo.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nint main(void) {\n    char *buf = malloc(100);\n    strcpy(buf, \"tracing\");\n    printf(\"length of '%s' is %zu\\n\", buf, strlen(buf));\n    free(buf);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o libdemo libdemo.c",
+       "output": ""
+      },
+      {
+       "cmd": "./libdemo",
+       "output": "length of 'tracing' is 7"
+      }
+     ]
+    },
+    {
+     "title": "ltrace: library calls",
+     "text": "`ltrace` intercepts calls into **shared libraries** (via the PLT) and prints arguments and return values. You see the program's logic at library level, such as `malloc(100)`. (Pointers vary, shown as ADDR.)",
+     "run": [
+      {
+       "cmd": "ltrace -e malloc+free+strlen+strcpy ./libdemo 2>&1 | sed -E 's/0x[0-9a-f]+/ADDR/g'",
+       "output": "libdemo->malloc(100)                             = ADDR\nlibdemo->strlen(\"tracing\")                       = 7\nlibc.so.6->malloc(4096)                          = ADDR\nlibdemo->free(ADDR)                        = <void>\nlength of 'tracing' is 7\n+++ exited (status 0) +++"
+      }
+     ]
+    },
+    {
+     "title": "strace: system calls",
+     "text": "`strace` shows the **kernel boundary**: `brk`/`mmap` for memory, `write` for the output. `printf` became one `write`; `malloc(100)` caused no system call at all (served from memory the allocator already had).",
+     "run": [
+      {
+       "cmd": "strace -e trace=write,brk,mmap ./libdemo 2>&1 | grep -E 'write|^brk' | sed -E 's/0x[0-9a-f]+/ADDR/g' | head -n 3",
+       "output": "brk(NULL)                               = ADDR\nbrk(NULL)                               = ADDR\nbrk(ADDR)                          = ADDR"
+      }
+     ]
+    },
+    {
+     "title": "The cost: tracing a syscall-heavy command",
+     "text": "`strace` stops the traced process at every system call (via `ptrace`). A program that makes a million system calls is slowed a lot. We copy 200 000 bytes one byte at a time (400 000 system calls) with and without `strace`.",
+     "run": [
+      {
+       "cmd": "{ TIMEFORMAT='%R s'; echo -n 'plain:  '; time dd if=/dev/zero of=/dev/null bs=1 count=200000 2>/dev/null; } 2>&1",
+       "output": "plain:  0.183 s"
+      },
+      {
+       "cmd": "{ TIMEFORMAT='%R s'; echo -n 'strace: '; time strace -c -o /dev/null dd if=/dev/zero of=/dev/null bs=1 count=200000 2>/dev/null; } 2>&1",
+       "output": "strace: 8.891 s"
+      }
+     ],
+     "after": "The traced run is many times slower. On a production server, attach `strace -p PID` only for a short time and with a filter (`-e trace=...`), or use a low-overhead tracer (perf, eBPF)."
+    },
+    {
+     "title": "Which tool when",
+     "text": "- **strace**: system calls; what files, sockets and processes does it touch? Overhead: high.\n- **ltrace**: library calls; what does it ask libc or a library? Overhead: high; does not work for static binaries or direct syscalls.\n- **perf**: sampling profiler for CPU hot spots, plus tracepoints and counters. Overhead: low.\n- **eBPF** (bpftrace, BCC): programmable probes in the kernel and user space that aggregate **in the kernel** (counts, histograms). Overhead: very low. Needs root and kernel support.\n- **gdb**: stop and inspect state. Overhead: stops the process.",
+     "under": "`strace` and `ltrace` run in a separate process and use `ptrace`: each event costs two context switches and a copy of arguments between processes. eBPF programs run inside the kernel when the probe fires, after verification by the kernel's **verifier** (which proves they terminate and cannot crash the kernel), and send only summaries to user space."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does ltrace show that strace does not?",
+     "options": [
+      "System calls",
+      "Calls into shared libraries such as malloc and strlen",
+      "Kernel functions",
+      "Disk blocks"
+     ],
+     "answer": 1,
+     "explain": "Library-level calls."
+    },
+    {
+     "q": "Why can strace slow a program down a lot?",
+     "options": [
+      "It compiles it again",
+      "It stops the process at every system call (ptrace)",
+      "It needs the network",
+      "It locks files"
+     ],
+     "answer": 1,
+     "explain": "Two context switches per event."
+    },
+    {
+     "q": "Which tracer aggregates data inside the kernel to keep overhead low?",
+     "options": [
+      "strace",
+      "ltrace",
+      "eBPF (bpftrace)",
+      "gdb"
+     ],
+     "answer": 2,
+     "explain": "Summaries are computed in the kernel."
+    },
+    {
+     "q": "A static binary shows nothing in ltrace. Why?",
+     "options": [
+      "It is broken",
+      "There are no calls through shared libraries to intercept",
+      "ltrace is slow",
+      "Permissions"
+     ],
+     "answer": 1,
+     "explain": "ltrace hooks the PLT of dynamic binaries."
+    }
+   ],
+   "check": {
+    "scenario": "A production process is slow and you want to know which files it opens. You are tempted to `strace -p`. What is the safer approach?",
+    "answer": "Use a low-overhead tracer: `sudo bpftrace -e 'tracepoint:syscalls:sys_enter_openat /pid == PID/ { printf(\"%s\\n\", str(args->filename)); }'` (or `opensnoop-bpfcc -p PID`), or `perf trace -p PID -e openat`. If you must use strace, limit the time and filter (`-e trace=openat`)."
+   }
+  },
+  {
+   "id": "bpftrace-oneliners",
+   "title": "eBPF with bpftrace: one-liners that answer real questions",
+   "level": "advanced",
+   "goal": "Write short `bpftrace` programs to see which files a command opens and the size distribution of its reads, and get to know the BCC tools that package such programs.\n\nWhy it matters: eBPF is the modern way to observe a live Linux system with little overhead, including production. A few one-liners cover most investigations.",
+   "setup": {
+    "note": "Programs are small C files. ltrace, strace and bpftrace are used (`dnf install ltrace strace bpftrace`). bpftrace needs root and a kernel with BPF; BCC tools are not installed here.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "What eBPF is",
+     "text": "**eBPF** lets you load small, verified programs into the kernel and attach them to **probes**: tracepoints (stable kernel events such as `sys_enter_openat`), kprobes (any kernel function), uprobes (user functions) and perf events. Data is kept in **maps** (counters, histograms) and read from user space. `bpftrace` is a high-level language for this. Count the available syscall tracepoints:",
+     "run": [
+      {
+       "cmd": "sudo bpftrace -l 'tracepoint:syscalls:sys_enter_*' | wc -l | awk '{print $1, \"syscall-entry tracepoints\"}'",
+       "output": "315 syscall-entry tracepoints"
+      }
+     ]
+    },
+    {
+     "title": "Which files does a command open?",
+     "text": "The probe fires every time any process calls `openat`. The filter `/comm == \"cat\"/` keeps only the `cat` command. `-c` runs the command and ends the trace with it.",
+     "run": [
+      {
+       "cmd": "sudo bpftrace -e 'tracepoint:syscalls:sys_enter_openat /comm == \"cat\"/ { printf(\"%s\\n\", str(args->filename)); }' -c 'cat /etc/os-release' 2>&1 | grep -v -E '^(Attaching|NAME|VERSION|ID|PRETTY|HOME_URL|BUG|ANSI|CPE|LOGO|VARIANT|SUPPORT|ORACLE|REDHAT)' | sed -n '1,6p'",
+       "output": "Attached 1 probe\n/etc/ld.so.cache\n/lib64/libc.so.6\n/usr/lib/locale/locale-archive\n/etc/os-release\nPLATFORM_ID=\"platform:el9\""
+      }
+     ],
+     "after": "You see the dynamic loader and libc being opened, then the file itself: the same information as `strace -e openat cat ...`, collected without stopping the process."
+    },
+    {
+     "title": "A histogram of read sizes",
+     "text": "`hist()` aggregates values into power-of-two buckets **inside the kernel**. We trace the return value (bytes read) of `read` for `dd` reading 1000 blocks of 4096 bytes.",
+     "run": [
+      {
+       "cmd": "sudo bpftrace -e 'tracepoint:syscalls:sys_exit_read /comm == \"dd\" && args->ret > 0/ { @read_bytes = hist(args->ret); }' -c 'dd if=/dev/zero of=/dev/null bs=4096 count=1000' 2>&1 | grep -E '^@|^\\[' | sed -E 's/ +\\|/ |/'",
+       "output": "@read_bytes:\n[512, 1K)              1 |                                                    |\n[1K, 2K)               0 |                                                    |\n[2K, 4K)               1 |                                                    |\n[4K, 8K)            1000 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|"
+      }
+     ]
+    },
+    {
+     "title": "Counting by key",
+     "text": "A map indexed by a name counts events per key. This one counts system calls of `dd`, by name of the call, and prints the top two when the command ends.",
+     "run": [
+      {
+       "cmd": "sudo bpftrace -e 'tracepoint:raw_syscalls:sys_enter /comm == \"dd\"/ { @calls[args->id] = count(); } END { print(@calls, 2); clear(@calls); }' -c 'dd if=/dev/zero of=/dev/null bs=4096 count=1000' 2>&1 | grep -E '^@calls' | sed -E 's/\\[[0-9]+\\]/[syscall-number]/'",
+       "output": "@calls[syscall-number]: 1003\n@calls[syscall-number]: 1003"
+      }
+     ],
+     "under": "The **verifier** checks every eBPF program before it is loaded: no unbounded loops, no invalid memory access, bounded stack. A JIT compiler then turns it into native code. Programs attached to probes run in the context of the event, so they can read kernel and process memory safely through helpers. Limits: memory and instruction limits per program, and the need for `CAP_BPF`/`CAP_PERFMON` or root."
+    },
+    {
+     "title": "BCC tools: ready-made programs",
+     "text": "The **BCC** package provides tools that are eBPF programs with a command line: `opensnoop` (files opened), `execsnoop` (new processes), `biolatency` (disk latency histogram), `tcpconnect`/`tcplife` (TCP connections), `runqlat` (scheduler delay), `cachestat` (page cache hit ratio), `memleak`, `profile`. They are not installed on this machine.",
+     "run": [
+      {
+       "cmd": "sudo opensnoop-bpfcc -p PID",
+       "explanationOnly": true,
+       "reason": "bcc-tools is not installed on this machine"
+      },
+      {
+       "cmd": "sudo biolatency-bpfcc 10 1",
+       "explanationOnly": true,
+       "reason": "bcc-tools is not installed on this machine"
+      },
+      {
+       "cmd": "sudo execsnoop-bpfcc",
+       "explanationOnly": true,
+       "reason": "bcc-tools is not installed on this machine"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Where does a bpftrace histogram get computed?",
+     "options": [
+      "In the traced program",
+      "In the kernel, inside the eBPF program and its maps",
+      "In bpftrace after copying every event",
+      "On disk"
+     ],
+     "answer": 1,
+     "explain": "In-kernel aggregation keeps overhead low."
+    },
+    {
+     "q": "What does the verifier do?",
+     "options": [
+      "Signs programs",
+      "Proves an eBPF program is safe to run in the kernel (terminates, valid memory access)",
+      "Speeds up programs",
+      "Removes probes"
+     ],
+     "answer": 1,
+     "explain": "Before loading."
+    },
+    {
+     "q": "What is a tracepoint?",
+     "options": [
+      "A stable instrumentation point in the kernel",
+      "A breakpoint in gdb",
+      "A log line",
+      "A file"
+     ],
+     "answer": 0,
+     "explain": "Such as sys_enter_openat."
+    },
+    {
+     "q": "Which tool lists newly started processes with eBPF?",
+     "options": [
+      "execsnoop",
+      "iostat",
+      "ltrace",
+      "ss"
+     ],
+     "answer": 0,
+     "explain": "BCC's execsnoop."
+    }
+   ],
+   "check": {
+    "scenario": "A server has sporadic 200 ms disk latency spikes. Which eBPF-based approach finds them, without restarting anything?",
+    "answer": "`biolatency` (histogram of block I/O latency, per disk with `-D`) to see the distribution and spikes; `biosnoop` to list slow I/Os with the process that issued them; `ext4slower`/`xfsslower 10` for file-system level operations slower than 10 ms. With bpftrace: `tracepoint:block:block_rq_issue`/`block_rq_complete` and a map keyed by the request to compute latency."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "strace versus ltrace versus perf versus eBPF?",
+   "a": "strace: system calls (ptrace, high overhead). ltrace: shared-library calls (high overhead). perf: sampling profiler and counters (low). eBPF: programmable in-kernel tracing and aggregation (very low). See [the lesson](#/lesson/44/strace-ltrace-overhead).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is eBPF?",
+   "a": "A kernel facility to run small verified programs attached to events (tracepoints, kprobes, uprobes, network hooks), with data in maps. Used for observability, networking and security. See [the lesson](#/lesson/44/bpftrace-oneliners).",
+   "level": "advanced"
+  },
+  {
+   "q": "Why is eBPF safe to run in production?",
+   "a": "The verifier proves programs terminate and only access valid memory, and aggregation happens in the kernel, so overhead is low and the kernel cannot be crashed by the program.",
+   "level": "advanced"
+  },
+  {
+   "q": "Name some BCC tools and what they do.",
+   "a": "opensnoop (opens), execsnoop (exec), biolatency (disk latency), tcpconnect/tcplife (TCP), runqlat (run queue latency), cachestat (cache hit ratio), profile (CPU sampling).",
+   "level": "advanced"
+  },
+  {
+   "q": "How do you find what a process spends CPU on?",
+   "a": "perf record -F 99 -g -p PID, perf report; or bpftrace/BCC `profile`. See the perf lesson.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the difference between a tracepoint and a kprobe?",
+   "a": "Tracepoints are stable, predefined kernel events. Kprobes attach to almost any kernel function and may change between kernel versions.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "ltrace",
+   "def": "Tool that traces calls into shared libraries.",
+   "lesson": "44/strace-ltrace-overhead"
+  },
+  {
+   "term": "ptrace",
+   "def": "The system call used by strace and debuggers to control and observe another process.",
+   "lesson": "44/strace-ltrace-overhead"
+  },
+  {
+   "term": "eBPF",
+   "def": "Verified programs running in the kernel attached to probes.",
+   "lesson": "44/bpftrace-oneliners"
+  },
+  {
+   "term": "bpftrace",
+   "def": "A high-level language and tool for eBPF tracing one-liners.",
+   "lesson": "44/bpftrace-oneliners"
+  },
+  {
+   "term": "BCC",
+   "def": "A collection of ready-made eBPF tools and a toolkit for writing them.",
+   "lesson": "44/bpftrace-oneliners"
+  },
+  {
+   "term": "Tracepoint",
+   "def": "A stable instrumentation point in the kernel that eBPF and perf can attach to.",
+   "lesson": "44/bpftrace-oneliners"
+  },
+  {
+   "term": "Verifier",
+   "def": "The kernel component that checks eBPF programs for safety before loading.",
+   "lesson": "44/bpftrace-oneliners"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ltrace -e malloc+free ./prog",
+   "desc": "Trace selected library calls.",
+   "topic": "Tracing",
+   "lesson": "44/strace-ltrace-overhead"
+  },
+  {
+   "cmd": "strace -c -p PID",
+   "desc": "Summarise a process's system calls.",
+   "topic": "Tracing",
+   "lesson": "44/strace-ltrace-overhead"
+  },
+  {
+   "cmd": "sudo bpftrace -l 'tracepoint:syscalls:*openat*'",
+   "desc": "List matching probes.",
+   "topic": "Tracing",
+   "lesson": "44/bpftrace-oneliners"
+  },
+  {
+   "cmd": "sudo bpftrace -e 'tracepoint:syscalls:sys_enter_openat { printf(\"%s %s\\n\", comm, str(args->filename)); }'",
+   "desc": "Show every file open system-wide.",
+   "topic": "Tracing",
+   "lesson": "44/bpftrace-oneliners"
+  },
+  {
+   "cmd": "sudo bpftrace -e 'tracepoint:raw_syscalls:sys_enter { @[comm] = count(); }'",
+   "desc": "Count system calls by process.",
+   "topic": "Tracing",
+   "lesson": "44/bpftrace-oneliners"
+  },
+  {
+   "cmd": "sudo biolatency-bpfcc",
+   "desc": "Disk latency histogram (BCC).",
+   "topic": "Tracing",
+   "lesson": "44/bpftrace-oneliners"
+  },
+  {
+   "cmd": "sudo opensnoop-bpfcc",
+   "desc": "Trace file opens (BCC).",
+   "topic": "Tracing",
+   "lesson": "44/bpftrace-oneliners"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

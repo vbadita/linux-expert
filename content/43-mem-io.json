@@ -1,0 +1,343 @@
+{
+ "title": "Memory and I/O performance",
+ "lessons": [
+  {
+   "id": "vmstat-free",
+   "title": "Memory and I/O at a glance: vmstat and free",
+   "level": "intermediate",
+   "goal": "Read every column of `vmstat`, watch memory, swap and disk I/O change while a file is written, and learn which numbers matter.\n\nWhy it matters: `vmstat 1` is the quickest way to see CPU, memory, swap and I/O together. One screen of it often answers \"is it CPU, memory or disk?\"",
+   "setup": {
+    "note": "Steps write a few hundred MB of temporary files with `dd` in /tmp/lab and delete them. Needs sysstat (`dnf install sysstat`).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The columns",
+     "text": "`vmstat 1` prints a line per second:\n\n- **procs**: `r` runnable, `b` blocked in uninterruptible sleep.\n- **memory** (KB): `swpd` swap used, `free`, `buff` (block cache), `cache` (page cache).\n- **swap**: `si` pages swapped in, `so` swapped out, per second.\n- **io**: `bi` blocks read from devices, `bo` blocks written, per second.\n- **system**: `in` interrupts, `cs` context switches.\n- **cpu**: `us sy id wa st`.\n\nThe first line is the average since boot.",
+     "run": [
+      {
+       "cmd": "vmstat 1 2 | head -n 3",
+       "output": "procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----\n r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st\n 1  0 1240528  94588      0 2141392   34   33  7139    95    3    3  6  3 81  7  2"
+      }
+     ]
+    },
+    {
+     "title": "free in context",
+     "text": "`free -m` shows RAM and swap in MB. `available` is the estimate of memory usable by new programs without swapping.",
+     "run": [
+      {
+       "cmd": "free -m",
+       "output": "               total        used        free      shared  buff/cache   available\nMem:            5642        3655         102          30        2091        1987\nSwap:           4095        1211        2884"
+      }
+     ]
+    },
+    {
+     "title": "Watch I/O while writing a file",
+     "text": "We write 300 MB with direct I/O (bypassing the page cache) in the background and sample `vmstat` for four seconds. `bo` (blocks out) and `b` rise while the disk works; the CPU shows `wa`.",
+     "run": [
+      {
+       "cmd": "dd if=/dev/zero of=big.dat bs=1M count=300 oflag=direct status=none & D=$!; vmstat 1 4 | awk 'NR==2 {print \"b bo wa\"} NR>3 {print $2, $10, $16}'; wait $D",
+       "output": "[1] 379940\nb bo wa\n3 100433 48\n4 18460 63\n4 18488 54"
+      }
+     ],
+     "after": "The first sample (the since-boot average) is skipped. While `dd` runs `bo` is large; afterwards it falls back to nearly zero."
+    },
+    {
+     "title": "Cached writes versus direct writes",
+     "text": "Without `oflag=direct` the data first goes into the page cache and the disk write happens later: `dd` reports a very high speed, and the **dirty** counters grow. `vmstat` shows `bo` after the fact.",
+     "run": [
+      {
+       "cmd": "dd if=/dev/zero of=cached.dat bs=1M count=300 2>&1 | tail -n 1 | awk '{print \"cached write speed:\", $(NF-1), $NF}'; grep -E '^Dirty:' /proc/meminfo | awk '{print \"dirty pages now:\", $2, \"kB\"}'",
+       "output": "cached write speed: 338 MB/s\ndirty pages now: 282796 kB"
+      },
+      {
+       "cmd": "sync; grep -E '^Dirty:' /proc/meminfo | awk '{print \"after sync:\", $2, \"kB\"}'; rm -f big.dat cached.dat",
+       "output": "after sync: 124 kB"
+      }
+     ],
+     "under": "`vmstat` reads `/proc/stat`, `/proc/meminfo` and `/proc/vmstat` twice and subtracts. `bi`/`bo` are in 1 KB blocks. The page cache hides disk speed from programs: benchmark with `oflag=direct` or `fio`, and look at `iostat` for the real device."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does the `b` column of vmstat show?",
+     "options": [
+      "Blocks written",
+      "Tasks blocked in uninterruptible sleep",
+      "Buffers",
+      "Bytes"
+     ],
+     "answer": 1,
+     "explain": "Usually waiting for I/O."
+    },
+    {
+     "q": "Which vmstat columns show swapping?",
+     "options": [
+      "bi bo",
+      "si so",
+      "us sy",
+      "in cs"
+     ],
+     "answer": 1,
+     "explain": "Pages swapped in and out per second."
+    },
+    {
+     "q": "Why is `dd` without oflag=direct so fast?",
+     "options": [
+      "The disk is fast",
+      "It writes into the page cache; the disk write happens later",
+      "dd cheats",
+      "Compression"
+     ],
+     "answer": 1,
+     "explain": "Dirty pages are flushed later."
+    },
+    {
+     "q": "Why ignore vmstat's first line?",
+     "options": [
+      "It is wrong",
+      "It is the average since boot, not the current rate",
+      "It is the header",
+      "It is cached"
+     ],
+     "answer": 1,
+     "explain": "Only later lines show the sampled interval."
+    }
+   ],
+   "check": {
+    "scenario": "`vmstat 1` shows `si`/`so` of 2000 pages per second and `wa` 40% while `free` shows 100 MB available. What is happening and what do you do first?",
+    "answer": "The system is **swapping heavily** (memory saturation) and stalling on swap I/O. Find the consumers (`ps aux --sort=-rss | head`, `smem`), check for a leak or too many workers, reduce memory use or add RAM; as a stopgap tune `vm.swappiness` and add a cgroup limit to the greediest service. Check `dmesg` for OOM kills."
+   }
+  },
+  {
+   "id": "iostat-pidstat-sar",
+   "title": "Disk and network statistics: iostat, pidstat -d, sar",
+   "level": "intermediate",
+   "goal": "Measure a disk precisely with `iostat -x`, attribute I/O to processes with `pidstat -d`, and use `sar` for live and historical numbers.\n\nWhy it matters: \"the disk is slow\" needs numbers: throughput, IOPS, latency and queue depth. These tools produce them and show who is responsible.",
+   "setup": {
+    "note": "Steps write a few hundred MB of temporary files with `dd` in /tmp/lab and delete them. Needs sysstat (`dnf install sysstat`).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "iostat -x: the key columns",
+     "text": "`iostat -dx 1` per device: `r/s`, `w/s` (IOPS), `rkB/s`, `wkB/s` (throughput), `r_await`, `w_await` (average latency in ms: queue plus service time), `aqu-sz` (average queue length) and `%util` (share of time the device had requests in flight). We write with direct I/O and sample the disk.",
+     "run": [
+      {
+       "cmd": "dd if=/dev/zero of=io.dat bs=1M count=300 oflag=direct status=none & D=$!; sleep 0.5; iostat -dx 1 2 sda | awk '$1==\"sda\" {w=$8; k=$9; a=$12; q=$(NF-1); u=$NF} END {print \"device w/s wkB/s w_await aqu-sz %util\"; print \"sda\", w, k, a, q, u}'; wait $D",
+       "output": "[1] 380953\ndevice w/s wkB/s w_await aqu-sz %util\nsda 40.59 16265.35 51.83 140.72 88.71"
+      }
+     ]
+    },
+    {
+     "title": "Who is doing the I/O: pidstat -d",
+     "text": "`pidstat -d 1` reports kB read and written per second **per process**. Here only `dd` writes.",
+     "run": [
+      {
+       "cmd": "dd if=/dev/zero of=io.dat bs=1M count=300 oflag=direct status=none & D=$!; sleep 0.5; pidstat -d -p $D 1 2 | awk '/Average/ {print \"dd: kB_rd/s\", $4, \"kB_wr/s\", $5}'; wait $D; rm -f io.dat",
+       "output": "[1] 381733\ndd: kB_rd/s 0.00 kB_wr/s 16896.00"
+      },
+      {
+       "cmd": "sudo iotop -oPa",
+       "explanationOnly": true,
+       "reason": "iotop is not installed on this machine; pidstat -d shows the same per-process numbers"
+      }
+     ]
+    },
+    {
+     "title": "sar: live",
+     "text": "`sar` (from sysstat) samples many counters: `-u` CPU, `-r` memory, `-b` I/O totals, `-n DEV` network. With an interval it reports live, like `vmstat`.",
+     "run": [
+      {
+       "cmd": "sar -u 1 1 | tail -n 1 | awk '{print \"CPU average: %user\", $3, \"%system\", $5, \"%iowait\", $6, \"%idle\", $8}'",
+       "output": "CPU average: %user 21.36 %system 18.45 %iowait 51.46 %idle 0.00"
+      },
+      {
+       "cmd": "sar -r 1 1 | tail -n 1 | awk '{print \"memory: %memused\", $4, \"kbavail\", $3}'",
+       "output": "memory: %memused 3301628 kbavail 2105476"
+      }
+     ]
+    },
+    {
+     "title": "sar: history",
+     "text": "A systemd timer (`sysstat-collect.timer`) stores samples every 10 minutes in `/var/log/sa/saDD`, so you can ask *yesterday* questions with `sar -u -f FILE` or `sar -s 02:00 -e 03:00`. That is what makes sysstat valuable after the incident.",
+     "run": [
+      {
+       "cmd": "systemctl is-enabled sysstat-collect.timer 2>&1",
+       "output": "enabled"
+      },
+      {
+       "cmd": "ls /var/log/sa 2>/dev/null | head -n 1 | wc -l | awk '{print ($1 > 0) ? \"history files exist\" : \"no history yet: the collector has not run on this machine\"}'",
+       "output": "no history yet: the collector has not run on this machine"
+      }
+     ],
+     "under": "All these tools read the same kernel counters: `/proc/diskstats` (reads, writes, sectors, time in I/O, weighted time in queue per device) and `/proc/net/dev`. `iostat` computes rates and derived values from two snapshots. `%util` is the fraction of the interval during which the device had at least one request, so for devices that handle many requests in parallel (SSD, NVMe, arrays) 100% does not mean saturated: look at `aqu-sz` and `await`."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does iostat's `%util` of 100% mean for an NVMe SSD?",
+     "options": [
+      "It is saturated",
+      "Not necessarily: it only says a request was always in flight",
+      "It is failing",
+      "It is full"
+     ],
+     "answer": 1,
+     "explain": "Parallel devices need aqu-sz and await to judge."
+    },
+    {
+     "q": "Which tool attributes disk I/O to processes?",
+     "options": [
+      "pidstat -d",
+      "free",
+      "ss",
+      "ip"
+     ],
+     "answer": 0,
+     "explain": "Per-process kB read/written."
+    },
+    {
+     "q": "What stores sar history on this system?",
+     "options": [
+      "A systemd timer writing /var/log/sa",
+      "journald",
+      "cron mail",
+      "dmesg"
+     ],
+     "answer": 0,
+     "explain": "sysstat-collect."
+    },
+    {
+     "q": "What is `await` in iostat?",
+     "options": [
+      "Waiting processes",
+      "Average time per request including queueing, in ms",
+      "Idle time",
+      "Cache hit time"
+     ],
+     "answer": 1,
+     "explain": "Latency seen by the application."
+    }
+   ],
+   "check": {
+    "scenario": "Users report that reports run slowly between 02:00 and 03:00 last night. Which tool lets you check the disk and CPU for that window, and what must be in place?",
+    "answer": "`sar -u -s 02:00:00 -e 03:00:00 -f /var/log/sa/saDD` (and `-d` for disks, `-r` memory, `-q` load), which requires the sysstat collector (`sysstat-collect.timer`) to have been running. Without history you can only guess; consider shipping metrics to a time-series system (Prometheus/Grafana)."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What are the most useful vmstat columns?",
+   "a": "r and b (processes), si/so (swapping), bi/bo (I/O), us/sy/id/wa/st (CPU). See [the lesson](#/lesson/43/vmstat-free).",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you tell whether the disk is the bottleneck?",
+   "a": "`iostat -x`: high await and growing aqu-sz with high %util (on a single disk), or high wa in vmstat with tasks in D state. See [the lesson](#/lesson/43/iostat-pidstat-sar).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why is free memory not the right number to watch?",
+   "a": "The kernel uses free RAM for the page cache. `available` (free plus reclaimable) and swap activity are the right indicators.",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you find which process generates disk I/O?",
+   "a": "`pidstat -d 1`, `iotop -oPa`, or `/proc/PID/io`.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the difference between buffered and direct I/O?",
+   "a": "Buffered I/O goes through the page cache and is written later; direct I/O (O_DIRECT) bypasses the cache and shows the device's real speed.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What does sar add to the other tools?",
+   "a": "History: it records counters periodically so you can analyse past periods.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "vmstat",
+   "def": "Command showing processes, memory, swap, I/O and CPU per interval.",
+   "lesson": "43/vmstat-free"
+  },
+  {
+   "term": "Queue depth",
+   "def": "The number of I/O requests waiting or in service (aqu-sz).",
+   "lesson": "43/iostat-pidstat-sar"
+  },
+  {
+   "term": "IOPS",
+   "def": "I/O operations per second.",
+   "lesson": "43/iostat-pidstat-sar"
+  },
+  {
+   "term": "sar",
+   "def": "System Activity Reporter from sysstat: live and historical counters.",
+   "lesson": "43/iostat-pidstat-sar"
+  },
+  {
+   "term": "Direct I/O",
+   "def": "I/O that bypasses the page cache (O_DIRECT).",
+   "lesson": "43/vmstat-free"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "vmstat 1 5",
+   "desc": "Five one-second samples of system state.",
+   "topic": "Performance",
+   "lesson": "43/vmstat-free"
+  },
+  {
+   "cmd": "free -m",
+   "desc": "Memory and swap.",
+   "topic": "Performance",
+   "lesson": "43/vmstat-free"
+  },
+  {
+   "cmd": "iostat -dx 1",
+   "desc": "Per-device I/O statistics.",
+   "topic": "Performance",
+   "lesson": "43/iostat-pidstat-sar"
+  },
+  {
+   "cmd": "pidstat -d 1",
+   "desc": "Per-process I/O each second.",
+   "topic": "Performance",
+   "lesson": "43/iostat-pidstat-sar"
+  },
+  {
+   "cmd": "sar -u 1 5",
+   "desc": "CPU utilisation samples.",
+   "topic": "Performance",
+   "lesson": "43/iostat-pidstat-sar"
+  },
+  {
+   "cmd": "sar -r 1 5",
+   "desc": "Memory utilisation samples.",
+   "topic": "Performance",
+   "lesson": "43/iostat-pidstat-sar"
+  },
+  {
+   "cmd": "sar -n DEV 1 5",
+   "desc": "Network throughput per interface.",
+   "topic": "Performance",
+   "lesson": "43/iostat-pidstat-sar"
+  },
+  {
+   "cmd": "cat /proc/diskstats",
+   "desc": "Raw per-device I/O counters.",
+   "topic": "Performance",
+   "lesson": "43/iostat-pidstat-sar"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

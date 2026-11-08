@@ -1,0 +1,631 @@
+{
+ "title": "Files and permissions",
+ "lessons": [
+  {
+   "id": "rwx-and-octal",
+   "title": "Reading rwx, octal modes and directory permissions",
+   "level": "beginner",
+   "goal": "Learn to read `ls -l`, to change permissions with `chmod` in both symbolic and octal form, and to know what `r`, `w` and `x` mean on a directory.\n\nWhy it matters: \"Permission denied\" is one of the most common errors. You can fix it correctly only if you can read the mode.",
+   "setup": {
+    "note": "Use a scratch directory. Some steps use sudo; run those on a machine where that is safe.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Ten characters",
+     "text": "`ls -l` starts with the file type (`-` file, `d` directory) and nine permission characters: **owner**, **group**, **others**. Each triple is `r` (read), `w` (write), `x` (execute).",
+     "run": [
+      {
+       "cmd": "touch f.txt; mkdir d",
+       "output": ""
+      },
+      {
+       "cmd": "ls -ld f.txt d",
+       "output": "drwxr-xr-x. 2 opc opc 6 Nov  8 10:36 d\n-rw-r--r--. 1 opc opc 0 Nov  8 10:36 f.txt"
+      },
+      {
+       "cmd": "stat -c '%A %a %U:%G %n' f.txt d",
+       "output": "-rw-r--r-- 644 opc:opc f.txt\ndrwxr-xr-x 755 opc:opc d"
+      }
+     ]
+    },
+    {
+     "title": "Octal: r=4, w=2, x=1",
+     "text": "Add the numbers per triple. `rw-` = 4+2 = 6, `r--` = 4, `---` = 0. So `rw-r-----` is `640`. `stat -c %a` prints the octal form.",
+     "run": [
+      {
+       "cmd": "chmod 640 f.txt; stat -c '%A %a' f.txt",
+       "output": "-rw-r----- 640"
+      },
+      {
+       "cmd": "chmod 755 f.txt; stat -c '%A %a' f.txt",
+       "output": "-rwxr-xr-x 755"
+      }
+     ]
+    },
+    {
+     "title": "Symbolic form changes only what you name",
+     "text": "`u` owner, `g` group, `o` others, `a` all. `+` adds, `-` removes, `=` sets. Use it when you want to change one bit and keep the rest.",
+     "run": [
+      {
+       "cmd": "chmod go-rx f.txt; stat -c '%A' f.txt",
+       "output": "-rwx------"
+      },
+      {
+       "cmd": "chmod u+x,g=r f.txt; stat -c '%A' f.txt",
+       "output": "-rwxr-----"
+      }
+     ]
+    },
+    {
+     "title": "What the bits mean on a directory",
+     "text": "On a directory: `r` = list the names, `x` = enter it and reach files inside by name, `w` = create, delete and rename entries (needs `x` too).",
+     "run": [
+      {
+       "cmd": "echo secret > d/file.txt",
+       "output": ""
+      },
+      {
+       "cmd": "chmod u-x d; ls d; cat d/file.txt",
+       "output": "file.txt\ncat: d/file.txt: Permission denied"
+      },
+      {
+       "cmd": "chmod u+x,u-r d; ls d; cat d/file.txt",
+       "output": "ls: cannot open directory 'd': Permission denied\nsecret"
+      },
+      {
+       "cmd": "chmod u+r d; ls d",
+       "output": "file.txt"
+      }
+     ],
+     "after": "Without `x` you can do nothing inside. Without `r` but with `x` you can open a file if you know its name, but you cannot list the directory."
+    },
+    {
+     "title": "umask removes bits from new files",
+     "text": "New files start at `666` and new directories at `777`. The **umask** is subtracted. With `022` you get `644` and `755`.",
+     "run": [
+      {
+       "cmd": "umask",
+       "output": "0022"
+      },
+      {
+       "cmd": "touch new.txt; mkdir newdir; stat -c '%a %n' new.txt newdir",
+       "output": "644 new.txt\n755 newdir"
+      },
+      {
+       "cmd": "(umask 077; touch private.txt; stat -c '%a %n' private.txt)",
+       "output": "600 private.txt"
+      }
+     ],
+     "under": "`open()` and `mkdir()` take a requested mode. The kernel applies `mode & ~umask`. The umask is a property of the process and is inherited by children, so `(umask 077; ...)` in a subshell does not change your shell."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is the octal mode of `rwxr-x---`?",
+     "options": [
+      "750",
+      "755",
+      "640",
+      "570"
+     ],
+     "answer": 0,
+     "explain": "rwx=7, r-x=5, ---=0."
+    },
+    {
+     "q": "A directory has `r--` for you but no `x`. What can you do?",
+     "options": [
+      "List names but not read the files' metadata or open files",
+      "Enter it and create files",
+      "Nothing at all",
+      "Delete it"
+     ],
+     "answer": 0,
+     "explain": "`r` lists names. Without `x` you cannot access anything inside by path. In the lesson `ls d` could still list the name, but `cat d/file.txt` failed with Permission denied."
+    },
+    {
+     "q": "The umask is 027. What mode does a new file get?",
+     "options": [
+      "640",
+      "750",
+      "027",
+      "666"
+     ],
+     "answer": 0,
+     "explain": "666 minus 027 bits = 640."
+    },
+    {
+     "q": "Which command adds execute for the owner and changes nothing else?",
+     "options": [
+      "chmod 700 f",
+      "chmod u+x f",
+      "chmod +x=u f",
+      "chmod a=x f"
+     ],
+     "answer": 1,
+     "explain": "`u+x` adds only that bit."
+    }
+   ],
+   "check": {
+    "scenario": "A web server returns 403 for /srv/www/site/index.html. The file is 644 and owned by you. What else must you check?",
+    "answer": "Every **directory** on the path needs `x` for the server's user: `/srv`, `/srv/www`, `/srv/www/site`. Check with `namei -l /srv/www/site/index.html`, which shows the mode of each component."
+   }
+  },
+  {
+   "id": "owner-group-other",
+   "title": "Who is checked: owner, group, other, and ownership",
+   "level": "intermediate",
+   "goal": "Learn how the kernel picks which permission triple applies, and how ownership changes.\n\nWhy it matters: the rule has a surprise (the owner can be locked out while the group can read), and knowing it saves hours of debugging.",
+   "setup": {
+    "note": "Use a scratch directory. Some steps use sudo; run those on a machine where that is safe.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Your identity",
+     "text": "Every process has a user ID (UID) and group IDs (GIDs). `id` shows them. Files store a numeric owner and group.",
+     "run": [
+      {
+       "cmd": "id -un; id -gn",
+       "output": "opc\nopc"
+      },
+      {
+       "cmd": "stat -c '%u:%g %U:%G' /etc/passwd",
+       "output": "0:0 root:root"
+      }
+     ]
+    },
+    {
+     "title": "The kernel checks one class only",
+     "text": "The kernel tests in order: are you the **owner**? Then only the owner bits apply. Else are you in the **group**? Then only the group bits. Else the **other** bits. It stops at the first match.",
+     "run": [
+      {
+       "cmd": "echo data > rule.txt",
+       "output": ""
+      },
+      {
+       "cmd": "chmod 070 rule.txt; stat -c '%A %U:%G' rule.txt",
+       "output": "----rwx--- opc:opc"
+      },
+      {
+       "cmd": "cat rule.txt",
+       "output": "cat: rule.txt: Permission denied"
+      }
+     ],
+     "after": "You own the file and belong to its group, and the group has full rights, but you are denied. The owner triple `---` matched first."
+    },
+    {
+     "title": "chown and chgrp change ownership",
+     "text": "Only root can give a file to another user. The owner can change the group to any group they belong to.",
+     "run": [
+      {
+       "cmd": "chmod 644 rule.txt",
+       "output": ""
+      },
+      {
+       "cmd": "sudo chown root:adm rule.txt; ls -l rule.txt",
+       "output": "-rw-r--r--. 1 root adm 5 Nov  8 10:36 rule.txt"
+      },
+      {
+       "cmd": "echo x >> rule.txt",
+       "output": "bash: rule.txt: Permission denied"
+      },
+      {
+       "cmd": "sudo chown opc:opc rule.txt; ls -l rule.txt",
+       "output": "-rw-r--r--. 1 opc opc 5 Nov  8 10:36 rule.txt"
+      }
+     ]
+    },
+    {
+     "title": "Test as another user",
+     "text": "`sudo -u USER` runs a command as that user, which is the best way to test permissions.",
+     "run": [
+      {
+       "cmd": "chmod 640 rule.txt",
+       "output": ""
+      },
+      {
+       "cmd": "sudo -u nobody cat rule.txt",
+       "output": "cat: rule.txt: Permission denied"
+      },
+      {
+       "cmd": "chmod 644 rule.txt; sudo -u nobody cat rule.txt",
+       "output": "data"
+      }
+     ],
+     "under": "Permission checks happen inside the kernel on every `open()`. The kernel compares the process's **filesystem UID/GID and supplementary groups** with the inode's owner, group and mode bits. Root skips the read/write checks through the `CAP_DAC_OVERRIDE` capability (module 34)."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "A file is `---rwxrwx` and you are its owner. Can you read it?",
+     "options": [
+      "Yes, you are in the group",
+      "No, the owner bits (---) apply",
+      "Yes, others can",
+      "Only with sudo -u root"
+     ],
+     "answer": 1,
+     "explain": "The kernel stops at the owner class."
+    },
+    {
+     "q": "Who may change a file's owner to another user?",
+     "options": [
+      "The file's owner",
+      "Any group member",
+      "Root",
+      "Nobody"
+     ],
+     "answer": 2,
+     "explain": "Only root (CAP_CHOWN)."
+    },
+    {
+     "q": "Which command lets you test file access as the user `nobody`?",
+     "options": [
+      "su nobody",
+      "sudo -u nobody CMD",
+      "chown nobody",
+      "id nobody"
+     ],
+     "answer": 1,
+     "explain": "`sudo -u nobody cat file`."
+    }
+   ],
+   "check": {
+    "scenario": "Everything in a shared project directory should be editable by the group `dev`, but new files come out as 644 and owned by their creator's group. Which two settings fix this?",
+    "answer": "1. The **setgid bit** on the directory (`chmod g+s dir`) so new files inherit the directory's group.\n2. A **umask of 002** for the users (or a default ACL, next lesson) so new files are group-writable."
+   }
+  },
+  {
+   "id": "special-bits-acl-attr",
+   "title": "setuid, setgid, sticky, ACLs and file attributes",
+   "level": "advanced",
+   "goal": "Learn the three special mode bits, extended ACLs and the immutable attribute, and see each one working.\n\nWhy it matters: these are how `passwd` can edit `/etc/shadow`, how `/tmp` stays safe, and how a file can be undeletable even by root. Misused setuid files are a classic privilege-escalation path.",
+   "setup": {
+    "note": "Use a scratch directory. Some steps use sudo; run those on a machine where that is safe.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "setuid runs a program as its owner",
+     "text": "A program with the **setuid** bit runs with the file owner's identity, not yours. `passwd` is owned by root and has `s` in the owner triple, so it can write `/etc/shadow`.",
+     "run": [
+      {
+       "cmd": "ls -l /usr/bin/passwd",
+       "output": "-rwsr-xr-x. 1 root root 69296 Feb 14  2022 /usr/bin/passwd"
+      },
+      {
+       "cmd": "stat -c '%A %a' /usr/bin/passwd",
+       "output": "-rwsr-xr-x 4755"
+      }
+     ]
+    },
+    {
+     "title": "A demo program: real and effective UID",
+     "text": "This program prints the real UID (who started it) and the effective UID (whose rights it has). Save as `ids.c` and compile it.",
+     "code": {
+      "file": "ids.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <unistd.h>\n\nint main(void) {\n    printf(\"real uid = %d, effective uid = %d\\n\", getuid(), geteuid());\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o ids ids.c",
+       "output": ""
+      },
+      {
+       "cmd": "./ids",
+       "output": "real uid = 1000, effective uid = 1000"
+      }
+     ]
+    },
+    {
+     "title": "Turn on setuid and run it again",
+     "text": "We make root the owner and set the bit. The effective UID becomes 0 while the real UID stays yours.",
+     "run": [
+      {
+       "cmd": "sudo chown root:root ids && sudo chmod u+s ids",
+       "output": ""
+      },
+      {
+       "cmd": "ls -l ids",
+       "output": "-rwsr-xr-x. 1 root root 71592 Nov  8 10:36 ids"
+      },
+      {
+       "cmd": "./ids",
+       "output": "real uid = 1000, effective uid = 0"
+      }
+     ],
+     "under": "At `execve`, if the file has the setuid bit, the kernel sets the process's effective UID (and saved UID) to the file's owner. The real UID is unchanged. Nosuid mounts and scripts (the kernel ignores setuid on scripts) are limits."
+    },
+    {
+     "title": "setgid on a directory, and the sticky bit",
+     "text": "On a directory, **setgid** makes new files inherit the directory's group (`adm` here, instead of your own group `opc`). **sticky** (`t`) lets only owners delete their entries.",
+     "run": [
+      {
+       "cmd": "mkdir share && chgrp adm share && chmod 2775 share && ls -ld share",
+       "output": "drwxrwsr-x. 2 opc adm 6 Nov  8 10:36 share"
+      },
+      {
+       "cmd": "touch plain.txt share/x",
+       "output": ""
+      },
+      {
+       "cmd": "ls -l plain.txt share/x | awk '{print $3, $4, $9}'",
+       "output": "opc opc plain.txt\nopc adm share/x"
+      },
+      {
+       "cmd": "ls -ld /tmp",
+       "output": "drwxrwxrwt. 29 root root 4096 Nov  8 10:36 /tmp"
+      },
+      {
+       "cmd": "stat -c '%a %A' /tmp",
+       "output": "1777 drwxrwxrwt"
+      }
+     ]
+    },
+    {
+     "title": "ACLs add per-user rules",
+     "text": "A POSIX **ACL** gives rights to extra users or groups without changing the owner or group. `setfacl -m` modifies, `getfacl` shows. `ls -l` marks a file with ACL by a `+`.",
+     "run": [
+      {
+       "cmd": "echo hi > acl.txt; chmod 600 acl.txt; sudo -u nobody cat acl.txt",
+       "output": "cat: acl.txt: Permission denied"
+      },
+      {
+       "cmd": "setfacl -m u:nobody:r acl.txt",
+       "output": ""
+      },
+      {
+       "cmd": "getfacl -c acl.txt",
+       "output": "user::rw-\nuser:nobody:r--\ngroup::---\nmask::r--\nother::---"
+      },
+      {
+       "cmd": "ls -l acl.txt | cut -c1-11",
+       "output": "-rw-r-----+"
+      },
+      {
+       "cmd": "sudo -u nobody cat acl.txt",
+       "output": "hi"
+      }
+     ],
+     "after": "`nobody` is neither owner nor in the group, yet it can read. The `+` in `ls -l` warns you that an ACL exists. The group column of `ls -l` now shows the ACL **mask** (`r--`), not the real group rights."
+    },
+    {
+     "title": "File attributes: immutable",
+     "text": "`chattr +i` marks a file **immutable**. Nobody, not even root, can change, delete or rename it until the flag is removed.",
+     "run": [
+      {
+       "cmd": "echo keep > keep.txt",
+       "output": ""
+      },
+      {
+       "cmd": "sudo chattr +i keep.txt && lsattr keep.txt",
+       "output": "----i----------------- keep.txt"
+      },
+      {
+       "cmd": "rm -f keep.txt; sudo rm -f keep.txt",
+       "output": "rm: cannot remove 'keep.txt': Operation not permitted\nrm: cannot remove 'keep.txt': Operation not permitted"
+      },
+      {
+       "cmd": "sudo chattr -i keep.txt && rm keep.txt && echo removed",
+       "output": "removed"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "A setuid root program is started by you. What is its effective UID?",
+     "options": [
+      "Your UID",
+      "0",
+      "65534",
+      "It depends on umask"
+     ],
+     "answer": 1,
+     "explain": "The kernel sets the effective UID to the file owner."
+    },
+    {
+     "q": "What does the setgid bit do on a directory?",
+     "options": [
+      "Runs files as group",
+      "New files inherit the directory's group",
+      "Prevents deletion",
+      "Hides the directory"
+     ],
+     "answer": 1,
+     "explain": "That is the common use for shared project directories."
+    },
+    {
+     "q": "How can you see that a file has an ACL in `ls -l`?",
+     "options": [
+      "A `+` after the mode",
+      "An `@`",
+      "A `*`",
+      "Not visible"
+     ],
+     "answer": 0,
+     "explain": "Step 5: `-rw-r-----+`... the plus sign."
+    },
+    {
+     "q": "Root runs `rm` on an immutable file. What happens?",
+     "options": [
+      "Deleted",
+      "Operation not permitted",
+      "Asks for confirmation",
+      "Moved to trash"
+     ],
+     "answer": 1,
+     "explain": "The immutable attribute blocks it until `chattr -i`."
+    }
+   ],
+   "check": {
+    "scenario": "During an audit you must list all setuid-root files on a server. Which command do you run, and why are they risky?",
+    "answer": "`find / -xdev -perm -4000 -user root -type f 2>/dev/null`. Each one runs with root rights, so a bug (or a writable/replaceable file) in any of them can give an attacker root. Keep the list short and compare it over time."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "Explain 755, 644 and 600.",
+   "a": "755 = rwxr-xr-x (programs, directories), 644 = rw-r--r-- (normal files), 600 = rw------- (private files such as SSH keys). See [the lesson](#/lesson/3/rwx-and-octal).",
+   "level": "beginner"
+  },
+  {
+   "q": "What does x mean on a directory?",
+   "a": "Permission to enter it and access entries by name. r lists names, w creates/deletes entries (with x).",
+   "level": "beginner"
+  },
+  {
+   "q": "You own a file, you are in its group, the mode is 070. Can you read it?",
+   "a": "No. The kernel checks the owner class first and stops, so the owner bits (---) apply. See [the lesson](#/lesson/3/owner-group-other).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What do setuid, setgid and sticky do?",
+   "a": "setuid: run as the file's owner. setgid: run as the file's group (on a directory: new files inherit the group). sticky (directories): only an entry's owner can delete it. See [the lesson](#/lesson/3/special-bits-acl-attr).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How can root be unable to delete a file?",
+   "a": "The file has the immutable attribute (`chattr +i`), or the filesystem is read-only, or a mount protects it.",
+   "level": "advanced"
+  },
+  {
+   "q": "How does umask work?",
+   "a": "The kernel clears the umask bits from the requested mode of every new file or directory (`mode & ~umask`). Default 022 gives 644 files and 755 directories.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Mode",
+   "def": "The permission bits of a file: owner, group, other and the special bits.",
+   "lesson": "3/rwx-and-octal"
+  },
+  {
+   "term": "umask",
+   "def": "A per-process mask of permission bits removed from new files and directories.",
+   "lesson": "3/rwx-and-octal"
+  },
+  {
+   "term": "setuid",
+   "def": "Mode bit: the program runs with the file owner's effective UID.",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "term": "setgid",
+   "def": "Mode bit: run as the file's group; on a directory, new entries inherit its group.",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "term": "ACL",
+   "def": "Access Control List: extra per-user and per-group permission entries on a file.",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "term": "Immutable attribute",
+   "def": "A file flag (chattr +i) that forbids changes, deletion and renaming, even by root.",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "term": "Effective UID",
+   "def": "The user ID the kernel uses for permission checks of a process.",
+   "lesson": "3/special-bits-acl-attr"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ls -l",
+   "desc": "Long listing with mode, owner, group, size and time.",
+   "topic": "Permissions",
+   "lesson": "3/rwx-and-octal"
+  },
+  {
+   "cmd": "stat -c '%A %a %U:%G %n' FILE",
+   "desc": "Show mode (both forms) and owner.",
+   "topic": "Permissions",
+   "lesson": "3/rwx-and-octal"
+  },
+  {
+   "cmd": "chmod 640 FILE",
+   "desc": "Set the mode in octal.",
+   "topic": "Permissions",
+   "lesson": "3/rwx-and-octal"
+  },
+  {
+   "cmd": "chmod u+x,go-w FILE",
+   "desc": "Change single bits symbolically.",
+   "topic": "Permissions",
+   "lesson": "3/rwx-and-octal"
+  },
+  {
+   "cmd": "umask",
+   "desc": "Show the current umask.",
+   "topic": "Permissions",
+   "lesson": "3/rwx-and-octal"
+  },
+  {
+   "cmd": "chown USER:GROUP FILE",
+   "desc": "Change owner and group (root for the owner).",
+   "topic": "Permissions",
+   "lesson": "3/owner-group-other"
+  },
+  {
+   "cmd": "sudo -u USER CMD",
+   "desc": "Run CMD as another user (to test access).",
+   "topic": "Permissions",
+   "lesson": "3/owner-group-other"
+  },
+  {
+   "cmd": "chmod g+s DIR",
+   "desc": "Set the setgid bit on a directory.",
+   "topic": "Permissions",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "cmd": "setfacl -m u:USER:r FILE",
+   "desc": "Give USER read access with an ACL.",
+   "topic": "Permissions",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "cmd": "getfacl FILE",
+   "desc": "Show the ACL.",
+   "topic": "Permissions",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "cmd": "sudo chattr +i FILE",
+   "desc": "Make FILE immutable.",
+   "topic": "Permissions",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "cmd": "lsattr FILE",
+   "desc": "Show file attributes.",
+   "topic": "Permissions",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "cmd": "find / -xdev -perm -4000 -type f",
+   "desc": "List setuid files.",
+   "topic": "Security",
+   "lesson": "3/special-bits-acl-attr"
+  },
+  {
+   "cmd": "namei -l PATH",
+   "desc": "Show the mode of every directory along PATH.",
+   "topic": "Permissions",
+   "lesson": "3/rwx-and-octal"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

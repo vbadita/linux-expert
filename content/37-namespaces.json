@@ -1,0 +1,383 @@
+{
+ "title": "Namespaces",
+ "lessons": [
+  {
+   "id": "unshare-namespaces",
+   "title": "Namespaces: pid, net, mnt, uts, ipc, user with unshare",
+   "level": "advanced",
+   "goal": "Create each kind of namespace by hand with `unshare` and see exactly what it isolates.\n\nWhy it matters: containers are not a kernel feature. They are ordinary processes placed in namespaces (what they can see) and cgroups (what they can use). Once you have done it by hand, Docker stops being magic.",
+   "setup": {
+    "note": "Most steps use `sudo unshare`; the user-namespace steps need no root. Nothing is installed or changed permanently. Never run `sudo unshare` demos on a machine you cannot afford to experiment on.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A namespace is a private view",
+     "text": "A **namespace** wraps a global resource so that processes inside see their own copy. Linux has eight kinds: `mnt` (mount points), `pid` (process IDs), `net` (network stack), `uts` (hostname), `ipc` (message queues and shared memory), `user` (UIDs), `cgroup` and `time`. Every process belongs to one of each; `/proc/PID/ns/` links name them by inode number.",
+     "run": [
+      {
+       "cmd": "ls /proc/self/ns | tr '\\n' ' '; echo",
+       "output": "cgroup ipc mnt net pid pid_for_children time time_for_children user uts "
+      },
+      {
+       "cmd": "readlink /proc/self/ns/uts | sed -E 's/[0-9]+/N/'",
+       "output": "uts:[N]"
+      }
+     ]
+    },
+    {
+     "title": "uts: a private hostname",
+     "text": "`unshare -u` starts a command in a new UTS namespace. Changing the hostname inside does not touch the host's.",
+     "run": [
+      {
+       "cmd": "h=$(hostname); sudo unshare -u sh -c 'hostname lab-container; echo \"inside: $(hostname)\"'; [ \"$(hostname)\" = \"$h\" ] && echo 'host hostname unchanged'",
+       "output": "inside: lab-container\nhost hostname unchanged"
+      }
+     ]
+    },
+    {
+     "title": "The namespace is different from ours",
+     "text": "Comparing the link text of `/proc/PID/ns/uts` inside and outside shows two different namespaces.",
+     "run": [
+      {
+       "cmd": "a=$(readlink /proc/self/ns/uts); b=$(sudo unshare -u readlink /proc/self/ns/uts); [ \"$a\" != \"$b\" ] && echo 'different uts namespace inside'",
+       "output": "different uts namespace inside"
+      }
+     ]
+    },
+    {
+     "title": "pid: the first process is PID 1",
+     "text": "In a new PID namespace the first process gets PID 1 and sees **only** processes in the namespace. `--fork` is needed because the process that calls `unshare` stays in the old namespace; `--mount-proc` mounts a fresh `/proc` for the new view.",
+     "run": [
+      {
+       "cmd": "sudo unshare --pid --fork --mount-proc sh -c 'echo \"my pid: $$\"; ps -e -o pid,comm | cat'",
+       "output": "my pid: 1\n    PID COMMAND\n      1 sh\n      2 ps\n      3 cat"
+      }
+     ],
+     "after": "Only the shell and `ps` exist. On the host the same shell has an ordinary large PID: the kernel gives each process one PID **per namespace level**."
+    },
+    {
+     "title": "net: an empty network stack",
+     "text": "A new network namespace has only a down loopback interface: no addresses, no routes, no connectivity. That is why container networking needs `veth` pairs (module 28).",
+     "run": [
+      {
+       "cmd": "sudo unshare -n ip -br link | awk '{print $1, $2}'",
+       "output": "lo DOWN"
+      }
+     ]
+    },
+    {
+     "title": "mnt: private mounts",
+     "text": "Mounts made inside a mount namespace are invisible outside. We mount a tmpfs on `/mnt` inside and look from outside.",
+     "run": [
+      {
+       "cmd": "sudo unshare -m sh -c 'mount -t tmpfs tmpfs /mnt && echo inside > /mnt/f && echo \"inside sees: $(ls /mnt)\"'; echo \"outside sees $(ls /mnt | wc -l) entries\"",
+       "output": "inside sees: f\noutside sees 0 entries"
+      }
+     ]
+    },
+    {
+     "title": "user: root without privilege",
+     "text": "A **user namespace** maps IDs. `unshare -Ur` (no sudo!) creates one in which you are UID 0, mapped to your real UID outside. Inside you have a full set of capabilities **over the namespace's own resources**, but outside you are still an ordinary user. This is how rootless containers work.",
+     "run": [
+      {
+       "cmd": "unshare -Ur sh -c 'id -u; id -un; cat /proc/self/uid_map | tr -s \" \" \" \"'",
+       "output": "0\nroot\n 0 1000 1"
+      },
+      {
+       "cmd": "touch mine; unshare -Ur ls -ln mine | awk '{print \"inside the namespace the file owner is\", $3}'; ls -ln mine | awk '{print \"outside it is\", $3}'",
+       "output": "inside the namespace the file owner is 0\noutside it is 1000"
+      }
+     ],
+     "under": "Namespaces are created by the `clone()` flags `CLONE_NEWNS`, `CLONE_NEWPID`, `CLONE_NEWNET`, `CLONE_NEWUTS`, `CLONE_NEWIPC`, `CLONE_NEWUSER`, or later with `unshare()`/`setns()`. A namespace lives as long as a process is in it or a file (bind mount or open descriptor) references it. Each kernel object (a socket, a mount, a process) stores a pointer to its namespace, so lookups use the caller's view."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What do namespaces do?",
+     "options": [
+      "Limit CPU",
+      "Give processes a private view of a global resource",
+      "Encrypt files",
+      "Schedule tasks"
+     ],
+     "answer": 1,
+     "explain": "They isolate what is visible; cgroups limit what is usable."
+    },
+    {
+     "q": "Why does `unshare --pid` need `--fork`?",
+     "options": [
+      "Speed",
+      "The calling process does not enter the new PID namespace; its child does",
+      "Security",
+      "Logging"
+     ],
+     "answer": 1,
+     "explain": "Only children are created in the new PID namespace."
+    },
+    {
+     "q": "What does a new network namespace contain?",
+     "options": [
+      "The host's interfaces",
+      "Only a down loopback interface",
+      "Nothing at all",
+      "A bridge"
+     ],
+     "answer": 1,
+     "explain": "No addresses or routes."
+    },
+    {
+     "q": "What is special about `unshare -Ur`?",
+     "options": [
+      "It needs root",
+      "It creates a user namespace where you are root without real privileges",
+      "It disables SELinux",
+      "It changes the hostname"
+     ],
+     "answer": 1,
+     "explain": "Unprivileged user namespaces."
+    }
+   ],
+   "check": {
+    "scenario": "Explain in two sentences why a container is not a virtual machine.",
+    "answer": "A container is an ordinary process (or tree of them) started in new namespaces and cgroups: it shares the **host's kernel**, so it starts in milliseconds and a kernel bug can affect all containers. A VM runs its own kernel on emulated or virtualised hardware, with a hypervisor between it and the host."
+   }
+  },
+  {
+   "id": "nsenter-and-lifetime",
+   "title": "Entering namespaces: nsenter, ip netns, lifetime",
+   "level": "advanced",
+   "goal": "Join a running namespace from outside with `nsenter`, see how named network namespaces are kept alive, and read the namespaces of any process.\n\nWhy it matters: `nsenter -t PID -n` is the standard way to debug a container's network from the host, and \"where does this namespace live\" explains leftovers after container crashes.",
+   "setup": {
+    "note": "Most steps use `sudo unshare`; the user-namespace steps need no root. Nothing is installed or changed permanently. Never run `sudo unshare` demos on a machine you cannot afford to experiment on.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Start a process in new namespaces",
+     "text": "A background shell sleeps in its own network and UTS namespaces. We keep its PID.",
+     "run": [
+      {
+       "cmd": "sudo unshare -n -u sleep 300 & echo $! > pid.txt; sleep 0.5; p=$(pgrep -P $(cat pid.txt) sleep || cat pid.txt); echo $p > target.pid; ls /proc/$p/ns | wc -l | awk '{print $1, \"namespace files for the target\"}'",
+       "output": "[1] 409008\nls: cannot open directory '/proc/409013/ns': Permission denied\n0 namespace files for the target"
+      }
+     ]
+    },
+    {
+     "title": "Enter it with nsenter",
+     "text": "`nsenter -t PID -n COMMAND` runs a command inside the **network** namespace of process PID. Our tools stay the host's, only the namespace changes. `-u` for UTS, `-m` mount, `-p` pid, `-a` all.",
+     "run": [
+      {
+       "cmd": "sudo nsenter -t $(cat target.pid) -n ip -br link | awk '{print $1, $2}'",
+       "output": "lo DOWN"
+      },
+      {
+       "cmd": "sudo nsenter -t $(cat target.pid) -u sh -c 'hostname lab-in-ns; hostname'",
+       "output": "lab-in-ns"
+      }
+     ]
+    },
+    {
+     "title": "Same process, two views",
+     "text": "From the host the process lives in a different network namespace than we do, which `ls -l /proc/PID/ns/net` shows by inode.",
+     "run": [
+      {
+       "cmd": "a=$(readlink /proc/self/ns/net); b=$(sudo readlink /proc/$(cat target.pid)/ns/net); [ \"$a\" != \"$b\" ] && echo 'target is in a different network namespace'",
+       "output": "target is in a different network namespace"
+      }
+     ]
+    },
+    {
+     "title": "Named namespaces: ip netns",
+     "text": "`ip netns add NAME` creates a namespace and **bind-mounts** its file onto `/run/netns/NAME`. That bind mount keeps the namespace alive even when no process runs in it. `ip netns exec` joins it by name.",
+     "run": [
+      {
+       "cmd": "sudo ip netns add lab-keep; ls /run/netns",
+       "output": "lab-keep"
+      },
+      {
+       "cmd": "sudo nsenter --net=/run/netns/lab-keep ip -br link | awk '{print $1, $2}'",
+       "output": "lo DOWN"
+      },
+      {
+       "cmd": "findmnt -rn -o TARGET,FSTYPE | grep lab-keep | awk '{print $2}'",
+       "output": "nsfs\nnsfs"
+      }
+     ]
+    },
+    {
+     "title": "Lifetime and cleanup",
+     "text": "A namespace disappears when nothing references it. Delete the named one and stop the sleeper.",
+     "run": [
+      {
+       "cmd": "sudo ip netns del lab-keep; ls /run/netns 2>/dev/null | wc -l | awk '{print $1, \"named namespaces left\"}'",
+       "output": "0 named namespaces left"
+      },
+      {
+       "cmd": "sudo kill $(cat pid.txt) 2>/dev/null; sleep 0.3; echo cleaned",
+       "output": "cleaned"
+      }
+     ],
+     "under": "`lsns` lists the namespaces of all processes with the number of processes and the first one. A namespace with 0 processes can still exist (kept by a bind mount or an open file descriptor): leaked network namespaces after a crashed container runtime are found under `/run/netns` or `/var/run/docker/netns`."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `nsenter -t PID -n CMD` do?",
+     "options": [
+      "Kills PID",
+      "Runs CMD inside the network namespace of PID",
+      "Creates a namespace",
+      "Shows namespaces"
+     ],
+     "answer": 1,
+     "explain": "It joins the namespace and runs the command."
+    },
+    {
+     "q": "How does `ip netns add` keep a namespace alive without processes?",
+     "options": [
+      "A daemon",
+      "A bind mount of the namespace file in /run/netns",
+      "A cron job",
+      "A cgroup"
+     ],
+     "answer": 1,
+     "explain": "The bind mount holds a reference."
+    },
+    {
+     "q": "Which tool lists all namespaces on the host?",
+     "options": [
+      "lsns",
+      "ip addr",
+      "ps",
+      "mount"
+     ],
+     "answer": 0,
+     "explain": "lsns."
+    },
+    {
+     "q": "When is a namespace destroyed?",
+     "options": [
+      "When the machine reboots only",
+      "When no process or file reference remains",
+      "After 60 seconds",
+      "Never"
+     ],
+     "answer": 1,
+     "explain": "Reference counting."
+    }
+   ],
+   "check": {
+    "scenario": "A container is stuck and you need to see its listening ports from the host without a shell in it. What do you run?",
+    "answer": "Find its host PID (`docker inspect -f '{{.State.Pid}}' NAME`), then `sudo nsenter -t PID -n ss -ltnp` (and `ip addr`, `tcpdump -i eth0` the same way). The tools come from the host, so no shell or tools are needed in the container."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "List the Linux namespace types.",
+   "a": "mnt, pid, net, uts, ipc, user, cgroup, time. See [the lesson](#/lesson/37/unshare-namespaces).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the relationship between containers, namespaces and cgroups?",
+   "a": "A container is a process started in new namespaces (isolated view) and placed in cgroups (limited resources), with a root file system image. No separate kernel.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you debug a container's network from the host?",
+   "a": "`nsenter -t PID -n ...` using the container's host PID. See [the lesson](#/lesson/37/nsenter-and-lifetime).",
+   "level": "advanced"
+  },
+  {
+   "q": "What is a user namespace and why do rootless containers need it?",
+   "a": "It maps UIDs so a process is root inside with privileges only over the namespace's resources, while being an ordinary user outside. It lets unprivileged users create mount/pid/net namespaces.",
+   "level": "advanced"
+  },
+  {
+   "q": "Why does the first process in a PID namespace matter?",
+   "a": "It is PID 1 there: it adopts orphans and must reap zombies, and if it exits the kernel kills every process in the namespace.",
+   "level": "advanced"
+  },
+  {
+   "q": "What keeps a network namespace alive with no processes?",
+   "a": "A bind mount of its file (ip netns) or an open file descriptor to it.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Namespace",
+   "def": "A private view of a global kernel resource for a group of processes.",
+   "lesson": "37/unshare-namespaces"
+  },
+  {
+   "term": "unshare",
+   "def": "Command that runs a program in new namespaces.",
+   "lesson": "37/unshare-namespaces"
+  },
+  {
+   "term": "nsenter",
+   "def": "Command that runs a program inside the namespaces of an existing process.",
+   "lesson": "37/nsenter-and-lifetime"
+  },
+  {
+   "term": "User namespace",
+   "def": "A namespace that maps user and group IDs, enabling rootless containers.",
+   "lesson": "37/unshare-namespaces"
+  },
+  {
+   "term": "PID namespace",
+   "def": "A namespace with its own process ID numbering where the first process is PID 1.",
+   "lesson": "37/unshare-namespaces"
+  },
+  {
+   "term": "veth",
+   "def": "A virtual Ethernet cable connecting two network namespaces.",
+   "lesson": "28/interfaces-addresses-routes"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "sudo unshare -u -n -p --fork --mount-proc CMD",
+   "desc": "Run CMD in new uts, net and pid namespaces.",
+   "topic": "Containers",
+   "lesson": "37/unshare-namespaces"
+  },
+  {
+   "cmd": "unshare -Ur CMD",
+   "desc": "Run CMD as namespace-root without privileges.",
+   "topic": "Containers",
+   "lesson": "37/unshare-namespaces"
+  },
+  {
+   "cmd": "ls -l /proc/PID/ns",
+   "desc": "Show the namespaces of a process.",
+   "topic": "Containers",
+   "lesson": "37/unshare-namespaces"
+  },
+  {
+   "cmd": "sudo nsenter -t PID -n CMD",
+   "desc": "Run CMD in PID's network namespace.",
+   "topic": "Containers",
+   "lesson": "37/nsenter-and-lifetime"
+  },
+  {
+   "cmd": "lsns",
+   "desc": "List namespaces.",
+   "topic": "Containers",
+   "lesson": "37/nsenter-and-lifetime"
+  },
+  {
+   "cmd": "sudo ip netns add NAME",
+   "desc": "Create a named network namespace.",
+   "topic": "Containers",
+   "lesson": "37/nsenter-and-lifetime"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

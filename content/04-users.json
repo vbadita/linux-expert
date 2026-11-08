@@ -1,0 +1,447 @@
+{
+ "title": "Users and groups",
+ "lessons": [
+  {
+   "id": "passwd-group-files",
+   "title": "Users and groups: /etc/passwd and /etc/group",
+   "level": "beginner",
+   "goal": "Learn where Linux stores accounts, what each field means, and how the kernel uses numbers (UID and GID), not names.\n\nWhy it matters: ownership, permissions and \"who is running this\" questions all come down to these files and numbers.",
+   "setup": {
+    "note": "Steps that create a test user use sudo. Run them on a throwaway machine. The user `demo1` is removed at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo userdel -r demo1 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Who am I?",
+     "text": "`id` shows your UID, primary group and all groups. The kernel only knows these **numbers**. Names are a convenience added by libraries.",
+     "run": [
+      {
+       "cmd": "id -u; id -un; id -g; id -gn",
+       "output": "1000\nopc\n1000\nopc"
+      }
+     ]
+    },
+    {
+     "title": "One line per user in /etc/passwd",
+     "text": "Seven fields separated by colons: `name:x:UID:GID:comment:home:shell`. The `x` means the password hash is in `/etc/shadow`. `getent` reads the account databases the way programs do.",
+     "run": [
+      {
+       "cmd": "getent passwd opc | awk -F: '{print \"name=\"$1, \"uid=\"$3, \"gid=\"$4, \"home=\"$6, \"shell=\"$7}'",
+       "output": "name=opc uid=1000 gid=1000 home=/home/opc shell=/bin/bash"
+      }
+     ]
+    },
+    {
+     "title": "Groups in /etc/group",
+     "text": "Format `name:x:GID:members`. The **primary group** comes from the GID field in passwd. **Supplementary groups** are listed here.",
+     "run": [
+      {
+       "cmd": "grep '^wheel:' /etc/group",
+       "output": "wheel:x:10:"
+      },
+      {
+       "cmd": "id -G | wc -w",
+       "output": "3"
+      }
+     ]
+    },
+    {
+     "title": "UID ranges and UID 0",
+     "text": "UID **0** is root. The kernel gives it special power (capabilities), whatever the name. System accounts use low numbers, normal users start at `UID_MIN`.",
+     "run": [
+      {
+       "cmd": "grep -E '^(UID_MIN|UID_MAX|SYS_UID_MAX)' /etc/login.defs",
+       "output": "UID_MIN                  1000\nUID_MAX                 60000\nSYS_UID_MAX               999"
+      },
+      {
+       "cmd": "awk -F: '$3==0 {print $1}' /etc/passwd",
+       "output": "root"
+      }
+     ]
+    },
+    {
+     "title": "Create a user",
+     "text": "`useradd` adds a line to `/etc/passwd` and `/etc/group` (and `/etc/shadow`), and `-m` creates the home directory.",
+     "run": [
+      {
+       "cmd": "sudo useradd -m -s /bin/bash demo1",
+       "output": ""
+      },
+      {
+       "cmd": "getent passwd demo1",
+       "output": "demo1:x:1001:1001::/home/demo1:/bin/bash"
+      },
+      {
+       "cmd": "id demo1",
+       "output": "uid=1001(demo1) gid=1001(demo1) groups=1001(demo1)"
+      },
+      {
+       "cmd": "ls -ld /home/demo1",
+       "output": "drwx------. 2 demo1 demo1 62 Nov  8 10:38 /home/demo1"
+      }
+     ]
+    },
+    {
+     "title": "Files store numbers",
+     "text": "`ls -n` shows the raw owner numbers. If the name is deleted from passwd, the file keeps its number.",
+     "run": [
+      {
+       "cmd": "touch mine; sudo chown demo1 mine; ls -l mine | awk '{print $3}'",
+       "output": "demo1"
+      },
+      {
+       "cmd": "ls -ln mine | awk '{print $3}'",
+       "output": "1001"
+      },
+      {
+       "cmd": "id -u demo1",
+       "output": "1001"
+      },
+      {
+       "cmd": "sudo userdel -r demo1; ls -ln mine | awk '{print $3}'; ls -l mine | awk '{print $3}'",
+       "output": "1001\n1001"
+      }
+     ],
+     "under": "The inode stores a 32-bit owner number. When `ls` prints a name, the C library calls `getpwuid()`, which reads the sources listed in `/etc/nsswitch.conf` (files, then maybe LDAP or SSSD). After the user is deleted the lookup fails and `ls` falls back to the number. A new user created later with the same UID would silently own the file."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does the kernel use to identify the owner of a file?",
+     "options": [
+      "The user name",
+      "A numeric UID",
+      "The login shell",
+      "The home directory"
+     ],
+     "answer": 1,
+     "explain": "Names exist only in user space."
+    },
+    {
+     "q": "Which field of /etc/passwd holds the login shell?",
+     "options": [
+      "Second",
+      "Fourth",
+      "Sixth",
+      "Seventh"
+     ],
+     "answer": 3,
+     "explain": "name:x:UID:GID:comment:home:shell. The shell is the seventh."
+    },
+    {
+     "q": "What happens to a deleted user's files?",
+     "options": [
+      "They are deleted",
+      "They keep the numeric owner",
+      "They move to root",
+      "They become world-writable"
+     ],
+     "answer": 1,
+     "explain": "Step 6: `ls -l` shows the number after the user is removed."
+    },
+    {
+     "q": "Which command reads accounts the way programs do (through NSS)?",
+     "options": [
+      "cat /etc/passwd",
+      "getent passwd NAME",
+      "grep NAME /etc/shadow",
+      "whoami"
+     ],
+     "answer": 1,
+     "explain": "`getent` follows nsswitch.conf, so it also finds LDAP/SSSD users."
+    }
+   ],
+   "check": {
+    "scenario": "You find files owned by UID 1234 on a disk from another server, and no such user exists here. What are the risks of simply creating a user with UID 1234?",
+    "answer": "The new user instantly owns all those files and can read or change them. Check what the files are first. Prefer `chown` to the correct local user, or map IDs deliberately."
+   }
+  },
+  {
+   "id": "shadow-su-sudo",
+   "title": "Passwords, su and sudo",
+   "level": "intermediate",
+   "goal": "Learn where password hashes live, how `su` and `sudo` differ, and how to give a user exactly one privileged command.\n\nWhy it matters: sudo configuration is one of the most security-relevant files on a server, and a syntax error in it can lock you out.",
+   "setup": {
+    "note": "Steps that create a test user use sudo. Run them on a throwaway machine. The user `demo1` is removed at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo userdel -r demo1 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "/etc/shadow is locked down",
+     "text": "Password hashes are not in `/etc/passwd`, which everyone can read. They are in `/etc/shadow`, which ordinary users cannot read.",
+     "run": [
+      {
+       "cmd": "ls -l /etc/shadow",
+       "output": "----------. 1 root root 1054 Nov  8 10:38 /etc/shadow"
+      },
+      {
+       "cmd": "sudo useradd -m demo1 && echo 'demo1:Test-pass-123' | sudo chpasswd",
+       "output": ""
+      },
+      {
+       "cmd": "sudo awk -F: '$1==\"demo1\" {print $1, substr($2,1,3), $5}' /etc/shadow",
+       "output": "demo1 $6$ 99999"
+      }
+     ],
+     "after": "We print only the first three characters of the hash field. `$6$` means SHA-512 on this system (newer distributions use `$y$`, yescrypt). The last field is the maximum password age in days."
+    },
+    {
+     "title": "Locking an account",
+     "text": "`passwd -l` puts `!!` in front of the hash. The password can no longer match. `-u` removes it.",
+     "run": [
+      {
+       "cmd": "sudo passwd -l demo1",
+       "output": "Locking password for user demo1.\npasswd: Success"
+      },
+      {
+       "cmd": "sudo awk -F: '$1==\"demo1\" {print substr($2,1,2)}' /etc/shadow",
+       "output": "!!"
+      },
+      {
+       "cmd": "sudo passwd -u demo1",
+       "output": "Unlocking password for user demo1.\npasswd: Success"
+      }
+     ]
+    },
+    {
+     "title": "su starts a shell as another user",
+     "text": "`su - USER` (with the dash) starts a **login shell**: it sets HOME, PATH and the working directory as for a new login. Without the dash you keep most of your old environment. Root can use `su` without a password.",
+     "run": [
+      {
+       "cmd": "sudo su - demo1 -c 'id -un; pwd; echo $HOME'",
+       "output": "demo1\n/home/demo1\n/home/demo1"
+      }
+     ]
+    },
+    {
+     "title": "sudo runs one command with another identity",
+     "text": "`sudo` is a setuid-root program. It reads `/etc/sudoers`, checks whether you may run the command, and then runs it as the target user (root by default).",
+     "run": [
+      {
+       "cmd": "ls -l /usr/bin/sudo | cut -c1-10",
+       "output": "---s--x--x"
+      },
+      {
+       "cmd": "sudo id -un",
+       "output": "root"
+      },
+      {
+       "cmd": "sudo -u demo1 id -un",
+       "output": "demo1"
+      }
+     ]
+    },
+    {
+     "title": "Allow exactly one command",
+     "text": "Put rules in a file under `/etc/sudoers.d/`. Always check the syntax with `visudo -cf` **before** relying on it: a broken sudoers file can lock you out of sudo.",
+     "run": [
+      {
+       "cmd": "echo 'demo1 ALL=(root) NOPASSWD: /usr/bin/id' | sudo tee /etc/sudoers.d/demo1 > /dev/null",
+       "output": ""
+      },
+      {
+       "cmd": "sudo chmod 440 /etc/sudoers.d/demo1; sudo visudo -cf /etc/sudoers.d/demo1",
+       "output": "/etc/sudoers.d/demo1: parsed OK"
+      },
+      {
+       "cmd": "sudo -u demo1 sudo -n id -un",
+       "output": "root"
+      },
+      {
+       "cmd": "sudo -u demo1 sudo -n cat /etc/shadow 2>&1 | head -1",
+       "output": "sudo: a password is required"
+      }
+     ],
+     "under": "`sudo` matches the command by its **full path**, so `cat` was not allowed. Never allow commands that can start a shell or edit arbitrary files (`vi`, `less`, `find`, `tar`) in a sudo rule: they give full root."
+    },
+    {
+     "title": "Clean up",
+     "text": "Remove the rule and the user.",
+     "run": [
+      {
+       "cmd": "sudo rm /etc/sudoers.d/demo1; sudo userdel -r demo1; getent passwd demo1; echo \"exit code: $?\"",
+       "output": "exit code: 2"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Where are password hashes stored?",
+     "options": [
+      "/etc/passwd",
+      "/etc/shadow",
+      "/etc/group",
+      "/etc/login.defs"
+     ],
+     "answer": 1,
+     "explain": "/etc/shadow is unreadable for normal users."
+    },
+    {
+     "q": "What is the difference between `su demo1` and `su - demo1`?",
+     "options": [
+      "None",
+      "The dash starts a login shell with the user's environment",
+      "The dash needs root",
+      "The dash locks the account"
+     ],
+     "answer": 1,
+     "explain": "With `-` you get HOME, PATH and directory of a fresh login."
+    },
+    {
+     "q": "Why use `visudo -cf FILE` before relying on a sudoers file?",
+     "options": [
+      "It encrypts the file",
+      "A syntax error can disable sudo for everyone",
+      "It runs the commands",
+      "It sets the owner"
+     ],
+     "answer": 1,
+     "explain": "A broken sudoers file makes sudo refuse to work."
+    },
+    {
+     "q": "A sudo rule allows `/usr/bin/less`. Why is that dangerous?",
+     "options": [
+      "less is slow",
+      "You can start a shell from inside less and have root",
+      "less deletes files",
+      "It is not dangerous"
+     ],
+     "answer": 1,
+     "explain": "Typing `!sh` in less runs a root shell."
+    }
+   ],
+   "check": {
+    "scenario": "A junior admin edited /etc/sudoers directly and made a typo. `sudo` now says `syntax error` and everyone is locked out. How do you recover, and how do you prevent it next time?",
+    "answer": "Get a root shell by another way (console/rescue mode, `su -` with the root password, or a recovery boot), fix the file. Prevent: edit only with `visudo` (it validates before saving) and keep local rules in `/etc/sudoers.d/` files checked by `visudo -cf`."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What are the fields of /etc/passwd?",
+   "a": "`name:x:UID:GID:comment:home:shell`. The x means the hash is in /etc/shadow. See [the lesson](#/lesson/4/passwd-group-files).",
+   "level": "beginner"
+  },
+  {
+   "q": "What makes a user \"root\"?",
+   "a": "UID 0. The kernel gives the process all capabilities. The name `root` is only a label in /etc/passwd.",
+   "level": "beginner"
+  },
+  {
+   "q": "Difference between su and sudo?",
+   "a": "`su` switches to another account and needs **that account's** password (not for root). `sudo` runs single commands with your own password and logs each one, according to sudoers rules. See [the lesson](#/lesson/4/shadow-su-sudo).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why is /etc/shadow separate from /etc/passwd?",
+   "a": "/etc/passwd must be world-readable (many programs map UIDs to names), so hashes there could be attacked offline by anyone. /etc/shadow is readable only by root.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you safely edit sudoers?",
+   "a": "With `visudo` (validates and locks) or drop-in files in /etc/sudoers.d/ checked with `visudo -cf`.",
+   "level": "intermediate"
+  },
+  {
+   "q": "A user is deleted but files remain. What happens?",
+   "a": "The files keep the numeric UID. Listing shows the number. Reusing the UID would hand the files to a new user.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "UID",
+   "def": "Numeric user ID. The kernel uses it for ownership and permission checks.",
+   "lesson": "4/passwd-group-files"
+  },
+  {
+   "term": "GID",
+   "def": "Numeric group ID.",
+   "lesson": "4/passwd-group-files"
+  },
+  {
+   "term": "NSS",
+   "def": "Name Service Switch: the libc mechanism (nsswitch.conf) that decides where names come from (files, DNS, SSSD).",
+   "lesson": "4/passwd-group-files"
+  },
+  {
+   "term": "/etc/shadow",
+   "def": "Root-only file with password hashes and ageing information.",
+   "lesson": "4/shadow-su-sudo"
+  },
+  {
+   "term": "sudoers",
+   "def": "The configuration that says who may run which commands as whom with sudo.",
+   "lesson": "4/shadow-su-sudo"
+  },
+  {
+   "term": "Login shell",
+   "def": "The shell started for a new login session; `su -` starts one.",
+   "lesson": "4/shadow-su-sudo"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "id",
+   "desc": "Show UID, GID and groups.",
+   "topic": "Users",
+   "lesson": "4/passwd-group-files"
+  },
+  {
+   "cmd": "getent passwd NAME",
+   "desc": "Look up an account through NSS.",
+   "topic": "Users",
+   "lesson": "4/passwd-group-files"
+  },
+  {
+   "cmd": "useradd -m -s /bin/bash NAME",
+   "desc": "Create a user with a home directory.",
+   "topic": "Users",
+   "lesson": "4/passwd-group-files"
+  },
+  {
+   "cmd": "userdel -r NAME",
+   "desc": "Delete a user and the home directory.",
+   "topic": "Users",
+   "lesson": "4/passwd-group-files"
+  },
+  {
+   "cmd": "passwd -l NAME",
+   "desc": "Lock an account's password.",
+   "topic": "Users",
+   "lesson": "4/shadow-su-sudo"
+  },
+  {
+   "cmd": "su - NAME",
+   "desc": "Start a login shell as NAME.",
+   "topic": "Users",
+   "lesson": "4/shadow-su-sudo"
+  },
+  {
+   "cmd": "sudo -u NAME CMD",
+   "desc": "Run CMD as NAME.",
+   "topic": "Users",
+   "lesson": "4/shadow-su-sudo"
+  },
+  {
+   "cmd": "visudo -cf FILE",
+   "desc": "Check a sudoers file for syntax errors.",
+   "topic": "Users",
+   "lesson": "4/shadow-su-sudo"
+  },
+  {
+   "cmd": "ls -ln",
+   "desc": "List with numeric owner and group.",
+   "topic": "Users",
+   "lesson": "4/passwd-group-files"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

@@ -1,0 +1,560 @@
+{
+ "title": "Inodes and links",
+ "lessons": [
+  {
+   "id": "inodes-links",
+   "title": "Inodes, hard links and symbolic links",
+   "level": "beginner",
+   "goal": "Learn that a file is an **inode** and a name is just an entry in a directory pointing to it, and see the difference between hard and symbolic links.\n\nWhy it matters: it explains why deleting a name does not always free space, why `mv` is instant, and why a hard link cannot cross file systems.",
+   "setup": {
+    "note": "Steps with sudo mount small RAM file systems (tmpfs) under /tmp/lab and unmount them again.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A name points to an inode",
+     "text": "The **inode** holds everything about a file except its name: owner, mode, size, timestamps and where the data blocks are. A **directory** is a table of names and inode numbers. `ls -i` shows the number.",
+     "run": [
+      {
+       "cmd": "echo hello > a.txt",
+       "output": ""
+      },
+      {
+       "cmd": "ls -i a.txt",
+       "output": "2095798 a.txt"
+      },
+      {
+       "cmd": "stat -c 'inode=%i links=%h size=%s' a.txt",
+       "output": "inode=2095798 links=1 size=6"
+      }
+     ]
+    },
+    {
+     "title": "A hard link is a second name",
+     "text": "`ln a.txt b.txt` adds a second name for the **same inode**. The link count becomes 2. Both names are equal: neither is the \"original\".",
+     "run": [
+      {
+       "cmd": "ln a.txt b.txt",
+       "output": ""
+      },
+      {
+       "cmd": "ls -i a.txt b.txt",
+       "output": "2095798 a.txt\n2095798 b.txt"
+      },
+      {
+       "cmd": "stat -c 'links=%h' a.txt",
+       "output": "links=2"
+      },
+      {
+       "cmd": "echo more >> b.txt; cat a.txt",
+       "output": "hello\nmore"
+      }
+     ]
+    },
+    {
+     "title": "Deleting a name",
+     "text": "`rm` removes one name and decrements the link count. The data is freed only when the count reaches 0 **and** no process has the file open.",
+     "run": [
+      {
+       "cmd": "rm a.txt; stat -c 'links=%h' b.txt; cat b.txt",
+       "output": "links=1\nhello\nmore"
+      }
+     ]
+    },
+    {
+     "title": "A symbolic link is a small file with a path",
+     "text": "`ln -s TARGET LINK` creates a new inode that contains the **path** of the target. It can point to directories and to other file systems, and it can **dangle**: if the target is removed it points to nothing.",
+     "run": [
+      {
+       "cmd": "ln -s b.txt s.txt",
+       "output": ""
+      },
+      {
+       "cmd": "ls -li b.txt s.txt | awk '{print $1, $3, $10, $11, $12}'",
+       "output": "2095798 1 b.txt  \n2095799 1 s.txt -> b.txt"
+      },
+      {
+       "cmd": "readlink s.txt; cat s.txt | head -n 1",
+       "output": "b.txt\nhello"
+      },
+      {
+       "cmd": "rm b.txt; cat s.txt; ls -l s.txt | awk '{print $9, $10, $11}'",
+       "output": "cat: s.txt: No such file or directory\ns.txt -> b.txt"
+      }
+     ]
+    },
+    {
+     "title": "Hard links cannot cross file systems",
+     "text": "An inode number is only unique inside one file system, so a hard link to another file system is refused. A symbolic link works because it stores only a path.",
+     "run": [
+      {
+       "cmd": "echo x > f.txt; ln f.txt /dev/shm/f.txt",
+       "output": "ln: failed to create hard link '/dev/shm/f.txt' => 'f.txt': Invalid cross-device link"
+      },
+      {
+       "cmd": "ln -s /tmp/lab/f.txt /dev/shm/f.link && cat /dev/shm/f.link; rm /dev/shm/f.link",
+       "output": "x"
+      }
+     ],
+     "under": "`mv` within one file system only changes directory entries (a `rename` system call): the inode number stays the same, so moving a 100 GB file is instant. Across file systems `mv` must copy and delete. `cp` always creates a new inode."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does a directory contain?",
+     "options": [
+      "File data",
+      "A table of names and inode numbers",
+      "Permissions only",
+      "Only subdirectories"
+     ],
+     "answer": 1,
+     "explain": "Names map to inodes."
+    },
+    {
+     "q": "`ln a b` then `rm a`. What happens to the data?",
+     "options": [
+      "Deleted",
+      "Still there through b",
+      "Moved to trash",
+      "Corrupted"
+     ],
+     "answer": 1,
+     "explain": "The link count dropped from 2 to 1."
+    },
+    {
+     "q": "Which link type can cross file systems?",
+     "options": [
+      "Hard link",
+      "Symbolic link",
+      "Both",
+      "Neither"
+     ],
+     "answer": 1,
+     "explain": "A symlink stores a path."
+    },
+    {
+     "q": "Why is `mv` of a huge file inside one file system instant?",
+     "options": [
+      "It compresses",
+      "Only a directory entry changes",
+      "It uses cache",
+      "It runs in background"
+     ],
+     "answer": 1,
+     "explain": "The inode is unchanged."
+    }
+   ],
+   "check": {
+    "scenario": "You must free 10 GB by deleting a big file, but `df` does not change after `rm`. Name two possible reasons related to this lesson.",
+    "answer": "1. The file has **another hard link** elsewhere (check `stat -c %h` or `find / -xdev -samefile FILE`), so the inode stays.\n2. A running process still has it **open** (see the deleted-but-open lesson), so the blocks are freed when the process closes it."
+   }
+  },
+  {
+   "id": "inode-exhaustion",
+   "title": "Disk full, but df shows free space: inodes",
+   "level": "intermediate",
+   "goal": "Learn that a file system has a limited number of inodes, how to reproduce running out of inodes, and how to find the directory that holds the millions of files.\n\nWhy it matters: `No space left on device` while `df -h` shows free space is almost always inode exhaustion (or a deleted-but-open file).",
+   "setup": {
+    "note": "Steps with sudo mount small RAM file systems (tmpfs) under /tmp/lab and unmount them again.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Two separate resources",
+     "text": "A file system has **blocks** for data and **inodes** for files. Creating a file needs an inode, even if it is empty. With millions of tiny files you run out of inodes long before you run out of blocks. `df -i` shows inode use.",
+     "run": [
+      {
+       "cmd": "df -i /tmp | awk '{print $1, $2, $3, $5}'",
+       "output": "Filesystem Inodes IUsed IUse%\n/dev/mapper/ocivolume-root 7251096 391558 6%"
+      }
+     ]
+    },
+    {
+     "title": "A small file system with few inodes",
+     "text": "We mount a 10 MB RAM file system limited to 50 inodes (`nr_inodes`). Plenty of space, very few inodes.",
+     "run": [
+      {
+       "cmd": "sudo mkdir -p /tmp/lab/small && sudo mount -t tmpfs -o size=10m,nr_inodes=50 tmpfs /tmp/lab/small && sudo chown $(id -un): /tmp/lab/small",
+       "output": ""
+      },
+      {
+       "cmd": "df -h /tmp/lab/small | tail -n 1 | awk '{print \"space:\", $2, \"size,\", $4, \"free\"}'",
+       "output": "space: 10M size, 10M free"
+      },
+      {
+       "cmd": "df -i /tmp/lab/small | tail -n 1 | awk '{print \"inodes:\", $2, \"total,\", $4, \"free\"}'",
+       "output": "inodes: 50 total, 49 free"
+      }
+     ]
+    },
+    {
+     "title": "Create files until it fails",
+     "text": "Each empty file uses one inode and no data blocks.",
+     "run": [
+      {
+       "cmd": "for i in $(seq 1 100); do : > /tmp/lab/small/f$i || break; done 2>&1 | tail -n 1",
+       "output": "bash: /tmp/lab/small/f45: No space left on device"
+      },
+      {
+       "cmd": "ls /tmp/lab/small | wc -l",
+       "output": "44"
+      }
+     ]
+    },
+    {
+     "title": "The symptom and the diagnosis",
+     "text": "Writing fails with `No space left on device`, but `df -h` still shows free space. `df -i` shows 100% inode use.",
+     "run": [
+      {
+       "cmd": "echo test > /tmp/lab/small/new.txt",
+       "output": "bash: /tmp/lab/small/new.txt: No space left on device"
+      },
+      {
+       "cmd": "df -h /tmp/lab/small | tail -n 1 | awk '{print \"space used:\", $5}'",
+       "output": "space used: 0%"
+      },
+      {
+       "cmd": "df -i /tmp/lab/small | tail -n 1 | awk '{print \"inodes used:\", $5}'",
+       "output": "inodes used: 98%"
+      }
+     ]
+    },
+    {
+     "title": "Find the directory with too many files",
+     "text": "Count entries per directory with `find`. On a real server run this on the full file system and look at the top directories (sessions, mail queues and caches are typical).",
+     "run": [
+      {
+       "cmd": "find /tmp/lab/small -xdev -type f | wc -l",
+       "output": "44"
+      },
+      {
+       "cmd": "find /tmp/lab -xdev -maxdepth 2 | cut -d/ -f1-4 | sort | uniq -c | sort -rn | head -n 3",
+       "output": "      1 /tmp/lab/small\n      1 /tmp/lab"
+      },
+      {
+       "cmd": "sudo umount /tmp/lab/small && echo unmounted",
+       "output": "unmounted"
+      }
+     ],
+     "under": "On **ext4** the number of inodes is fixed when the file system is created (`mkfs.ext4 -N` or `-i bytes-per-inode`). On **xfs** and **btrfs** inodes are allocated dynamically, so exhaustion is rare (xfs can still fail if the free space is too fragmented to allocate inode chunks)."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which command shows inode usage?",
+     "options": [
+      "df -h",
+      "df -i",
+      "du -i",
+      "free -i"
+     ],
+     "answer": 1,
+     "explain": "`df -i`."
+    },
+    {
+     "q": "`df -h` shows 40% free, but writes fail with ENOSPC. First suspect?",
+     "options": [
+      "Cache",
+      "Inode exhaustion",
+      "CPU",
+      "Network"
+     ],
+     "answer": 1,
+     "explain": "Check `df -i`."
+    },
+    {
+     "q": "Does an empty file use an inode?",
+     "options": [
+      "No",
+      "Yes",
+      "Only if it has a name longer than 8 characters",
+      "Only on ext4"
+     ],
+     "answer": 1,
+     "explain": "Every file needs an inode."
+    },
+    {
+     "q": "Which file systems allocate inodes dynamically?",
+     "options": [
+      "ext4",
+      "xfs and btrfs",
+      "FAT",
+      "ext2"
+     ],
+     "answer": 1,
+     "explain": "Unlike ext4, they do not fix the count at mkfs time."
+    }
+   ],
+   "check": {
+    "scenario": "A mail server's /var/spool is out of inodes. You cannot `rm *` (argument list too long). How do you delete the millions of files safely?",
+    "answer": "`find /var/spool/dir -type f -delete` (no argument list, one `unlink` per file) or `rsync -a --delete /empty/ /var/spool/dir/`. Then fix the cause (stuck queue, cleanup job) and consider a separate file system with more inodes for that directory."
+   }
+  },
+  {
+   "id": "deleted-but-open",
+   "title": "Deleted but still open: lsof +L1 and /proc/PID/fd",
+   "level": "advanced",
+   "goal": "Reproduce a file that was deleted but still takes space, find it, recover its content and free the space without restarting the process.\n\nWhy it matters: after rotating or deleting a big log, `df` still says full. This is the classic cause, and `/proc` lets you fix it live.",
+   "setup": {
+    "note": "Steps with sudo mount small RAM file systems (tmpfs) under /tmp/lab and unmount them again.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Set up the situation",
+     "text": "A 16 MB RAM file system. We write an 8 MB \"log\", start a process that holds it open (`sleep` with the file as stdin), and delete the file.",
+     "run": [
+      {
+       "cmd": "sudo mkdir -p /tmp/lab/disk && sudo mount -t tmpfs -o size=16m tmpfs /tmp/lab/disk && sudo chown $(id -un): /tmp/lab/disk",
+       "output": ""
+      },
+      {
+       "cmd": "dd if=/dev/zero of=/tmp/lab/disk/app.log bs=1M count=8 status=none; sleep 600 < /tmp/lab/disk/app.log & echo $! > holder.pid; sleep 0.3; df -h /tmp/lab/disk | tail -n 1 | awk '{print \"used before rm:\", $3}'",
+       "output": "[1] 3467615\nused before rm: 8.0M"
+      },
+      {
+       "cmd": "rm /tmp/lab/disk/app.log; ls /tmp/lab/disk | wc -l; df -h /tmp/lab/disk | tail -n 1 | awk '{print \"used after rm: \", $3}'",
+       "output": "0\nused after rm:  8.0M"
+      }
+     ],
+     "after": "The directory is empty, but the 8 MB is still used."
+    },
+    {
+     "title": "du and df disagree",
+     "text": "`du` walks names, so it sees nothing. `df` asks the file system, so it counts the blocks.",
+     "run": [
+      {
+       "cmd": "du -sh /tmp/lab/disk | cut -f1",
+       "output": "0"
+      },
+      {
+       "cmd": "df -h /tmp/lab/disk | tail -n 1 | awk '{print $3, \"used\"}'",
+       "output": "8.0M used"
+      }
+     ]
+    },
+    {
+     "title": "Find the holder: lsof +L1",
+     "text": "`+L1` lists open files whose **link count is below 1**: files with no name left. `+a` limits the list to one file system.",
+     "run": [
+      {
+       "cmd": "lsof -nP +aL1 /tmp/lab/disk 2>/dev/null",
+       "output": "COMMAND     PID USER   FD   TYPE DEVICE SIZE/OFF NLINK NODE NAME\nsleep   3467615  opc    0r   REG  0,182  8388608     0    2 /tmp/lab/disk/app.log (deleted)"
+      }
+     ]
+    },
+    {
+     "title": "The same fact in /proc",
+     "text": "Every open descriptor is a link in `/proc/PID/fd`. For a deleted file the link text ends with `(deleted)`, and you can still **read** the file through it.",
+     "run": [
+      {
+       "cmd": "ls -l /proc/$(cat holder.pid)/fd/0 | awk '{print $9, $10, $11, $12}'",
+       "output": "/proc/3467615/fd/0 -> /tmp/lab/disk/app.log (deleted)"
+      },
+      {
+       "cmd": "wc -c < /proc/$(cat holder.pid)/fd/0",
+       "output": "8388608"
+      },
+      {
+       "cmd": "cp /proc/$(cat holder.pid)/fd/0 /tmp/lab/recovered.log; ls -l /tmp/lab/recovered.log | awk '{print $5, $9}'",
+       "output": "8388608 /tmp/lab/recovered.log"
+      }
+     ],
+     "under": "Opening `/proc/PID/fd/N` does not look up a name: it is a magic link that gives you the **same inode** through the process's descriptor. That is why the content can be copied out although the name is gone. The inode is freed when its link count is 0 and its open count is 0."
+    },
+    {
+     "title": "Free the space without restarting",
+     "text": "If the data is not needed, truncate the file through the same link. The space returns at once and the process keeps running (it holds an empty file). Restarting the process would also free it, but may interrupt a service.",
+     "run": [
+      {
+       "cmd": ": > /proc/$(cat holder.pid)/fd/0; df -h /tmp/lab/disk | tail -n 1 | awk '{print \"used after truncate:\", $3}'",
+       "output": "used after truncate: 0"
+      },
+      {
+       "cmd": "kill $(cat holder.pid); sudo umount /tmp/lab/disk; echo cleaned",
+       "output": "cleaned"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `lsof +L1` list?",
+     "options": [
+      "Large files",
+      "Open files with a link count of zero (deleted)",
+      "Level 1 processes",
+      "Locked files"
+     ],
+     "answer": 1,
+     "explain": "Deleted files that are still open."
+    },
+    {
+     "q": "Why does `du` not see a deleted open file?",
+     "options": [
+      "It is hidden",
+      "du walks directory names and the name is gone",
+      "du ignores big files",
+      "du needs root"
+     ],
+     "answer": 1,
+     "explain": "No name, so no walk."
+    },
+    {
+     "q": "How can you read the content of a deleted open file?",
+     "options": [
+      "You cannot",
+      "Copy it from /proc/PID/fd/N",
+      "Use undelete",
+      "Reboot"
+     ],
+     "answer": 1,
+     "explain": "The magic link opens the same inode."
+    },
+    {
+     "q": "Which action frees the space without stopping the process?",
+     "options": [
+      "rm again",
+      "Truncate the file via /proc/PID/fd/N",
+      "Reboot",
+      "chmod"
+     ],
+     "answer": 1,
+     "explain": "`: > /proc/PID/fd/N`."
+    }
+   ],
+   "check": {
+    "scenario": "After `logrotate` deleted `app.log.1` (30 GB), `df` still shows 100%. The application must keep running. What do you do?",
+    "answer": "`lsof +L1 /mount` (or `ls -l /proc/*/fd | grep deleted`) to find the process and descriptor. If the data is not needed: `: > /proc/PID/fd/N` frees the space. Better: make the application reopen its log (send the right signal, or restart in a window) and configure logrotate with `postrotate` or `copytruncate` so it does not happen again."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is an inode?",
+   "a": "The file system object that holds a file's metadata (owner, mode, size, times) and the location of its data. A directory maps names to inode numbers. See [the lesson](#/lesson/18/inodes-links).",
+   "level": "beginner"
+  },
+  {
+   "q": "Hard link vs symbolic link?",
+   "a": "A hard link is another name for the same inode (same file system only). A symbolic link is a separate small file that stores a path and can dangle or cross file systems.",
+   "level": "beginner"
+  },
+  {
+   "q": "`df -h` shows free space but you cannot create files. Why?",
+   "a": "Out of inodes (check `df -i`), or a quota, or a deleted file held open. See [inode exhaustion](#/lesson/18/inode-exhaustion).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you find deleted-but-open files and free the space?",
+   "a": "`lsof +L1` or `/proc/PID/fd` links ending in (deleted). Truncate via `: > /proc/PID/fd/N` or restart the process. See [the lesson](#/lesson/18/deleted-but-open).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why is `mv` fast within a file system but slow across file systems?",
+   "a": "Within one file system it renames a directory entry. Across file systems it must copy the data and delete the source.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why can't hard links cross file systems?",
+   "a": "An inode number is only meaningful inside its own file system, so a directory entry cannot point to an inode in another one.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Inode",
+   "def": "The file system record of a file's metadata and data location (not its name).",
+   "lesson": "18/inodes-links"
+  },
+  {
+   "term": "Hard link",
+   "def": "An additional directory entry pointing to the same inode.",
+   "lesson": "18/inodes-links"
+  },
+  {
+   "term": "Symbolic link",
+   "def": "A small file that stores the path of another file.",
+   "lesson": "18/inodes-links"
+  },
+  {
+   "term": "Link count",
+   "def": "The number of names (directory entries) that point to an inode.",
+   "lesson": "18/inodes-links"
+  },
+  {
+   "term": "Inode exhaustion",
+   "def": "No free inodes left, so no new files can be created even if blocks are free.",
+   "lesson": "18/inode-exhaustion"
+  },
+  {
+   "term": "Deleted-but-open file",
+   "def": "A file with no name left that a process still holds open; its space is not freed yet.",
+   "lesson": "18/deleted-but-open"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ls -i FILE",
+   "desc": "Show the inode number.",
+   "topic": "Filesystem",
+   "lesson": "18/inodes-links"
+  },
+  {
+   "cmd": "stat FILE",
+   "desc": "Show inode, links, size and times.",
+   "topic": "Filesystem",
+   "lesson": "18/inodes-links"
+  },
+  {
+   "cmd": "ln TARGET LINK",
+   "desc": "Create a hard link.",
+   "topic": "Filesystem",
+   "lesson": "18/inodes-links"
+  },
+  {
+   "cmd": "ln -s TARGET LINK",
+   "desc": "Create a symbolic link.",
+   "topic": "Filesystem",
+   "lesson": "18/inodes-links"
+  },
+  {
+   "cmd": "find / -xdev -samefile FILE",
+   "desc": "Find all names of one inode.",
+   "topic": "Filesystem",
+   "lesson": "18/inodes-links"
+  },
+  {
+   "cmd": "df -i",
+   "desc": "Show inode usage.",
+   "topic": "Filesystem",
+   "lesson": "18/inode-exhaustion"
+  },
+  {
+   "cmd": "find DIR -type f -delete",
+   "desc": "Delete many files without argument limits.",
+   "topic": "Filesystem",
+   "lesson": "18/inode-exhaustion"
+  },
+  {
+   "cmd": "lsof +L1",
+   "desc": "List deleted files that are still open.",
+   "topic": "Filesystem",
+   "lesson": "18/deleted-but-open"
+  },
+  {
+   "cmd": ": > /proc/PID/fd/N",
+   "desc": "Truncate a deleted open file.",
+   "topic": "Filesystem",
+   "lesson": "18/deleted-but-open"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

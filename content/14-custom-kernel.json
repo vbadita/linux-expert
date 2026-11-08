@@ -1,0 +1,376 @@
+{
+ "title": "Building and booting a custom kernel",
+ "lessons": [
+  {
+   "id": "kernel-versions",
+   "title": "Kernel versions and the release cycle",
+   "level": "intermediate",
+   "goal": "Learn to read a kernel version string, see which kernel packages and boot entries a machine has, and understand how new kernels are released.\n\nWhy it matters: \"which kernel are we on, and is it supported?\" is asked in every incident and every audit.",
+   "setup": {
+    "note": "Steps with sudo load a harmless module (`dummy`) and change one sysctl value, then restore both. Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Reading uname -r",
+     "text": "`6.12.0-206.104.4.4.el9uek.aarch64` has: the **upstream version** `6.12.0` (mainline 6.12), the **distribution's build** `206.104.4.4` and its tag `el9uek` (Oracle Linux 9, Unbreakable Enterprise Kernel), and the architecture. Vendors add their own patches on top of the upstream number, so \"6.12\" does not mean the same code everywhere.",
+     "run": [
+      {
+       "cmd": "uname -r",
+       "output": "6.12.0-206.104.4.4.el9uek.aarch64"
+      },
+      {
+       "cmd": "uname -m",
+       "output": "aarch64"
+      },
+      {
+       "cmd": "cut -d'(' -f1 /proc/version",
+       "output": "Linux version 6.12.0-206.104.4.4.el9uek.aarch64 "
+      }
+     ]
+    },
+    {
+     "title": "Installed kernels and the boot entries",
+     "text": "Several kernels can be installed side by side. The boot loader menu lists them. The default is what boots next. Keeping the previous one is your fallback.",
+     "run": [
+      {
+       "cmd": "rpm -q kernel-uek-core",
+       "output": "kernel-uek-core-6.12.0-206.104.4.4.el9uek.aarch64"
+      },
+      {
+       "cmd": "ls /boot | grep -E '^(vmlinuz|initramfs|config)' | grep -v rescue",
+       "output": "config-6.12.0-206.104.4.4.el9uek.aarch64\ninitramfs-6.12.0-206.104.4.4.el9uek.aarch64.img\ninitramfs-6.12.0-206.104.4.4.el9uek.aarch64kdump.img\nvmlinuz-6.12.0-206.104.4.4.el9uek.aarch64"
+      },
+      {
+       "cmd": "sudo grubby --default-kernel",
+       "output": "/boot/vmlinuz-6.12.0-206.104.4.4.el9uek.aarch64"
+      }
+     ]
+    },
+    {
+     "title": "The build configuration of a kernel",
+     "text": "Every kernel is built with a configuration: thousands of options, each `y` (built in), `m` (module) or not set. The file is stored next to the kernel.",
+     "run": [
+      {
+       "cmd": "grep -c '=y$' /boot/config-$(uname -r)",
+       "output": "3103"
+      },
+      {
+       "cmd": "grep -c '=m$' /boot/config-$(uname -r)",
+       "output": "3023"
+      },
+      {
+       "cmd": "grep -E '^CONFIG_(HZ|NR_CPUS|MODULES)=' /boot/config-$(uname -r)",
+       "output": "CONFIG_NR_CPUS=4096\nCONFIG_HZ=250\nCONFIG_MODULES=y"
+      }
+     ]
+    },
+    {
+     "title": "The release cycle",
+     "text": "Upstream Linux follows a steady rhythm.\n\n- **Merge window** (2 weeks): new features go in, ending with `-rc1`.\n- **Release candidates** `-rc2` ... `-rc7` (or rc8), one per week: only fixes.\n- **Release**: `6.N` after about 9 to 10 weeks. New releases come about every 9 to 10 weeks.\n- **Stable** `6.N.y`: bug fixes for a few months. Some releases become **LTS** (long term support) with years of fixes. Distributions usually base their kernel on an LTS release and backport fixes.",
+     "run": [
+      {
+       "cmd": "curl -s https://www.kernel.org/releases.json | jq '.latest_stable'",
+       "explanationOnly": true,
+       "reason": "the answer changes daily; shown as the command you would run, not recorded"
+      }
+     ],
+     "under": "Linus Torvalds releases mainline. The first number changes rarely and has no technical meaning (4.20 was followed by 5.0, 5.19 by 6.0). Greg Kroah-Hartman and Sasha Levin maintain the stable trees. Enterprise vendors freeze a version for a release and backport security fixes, so a \"5.14\" Red Hat kernel can contain code from 6.x."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "In `6.12.0-206.104.4.4.el9uek.aarch64`, what is `6.12.0`?",
+     "options": [
+      "The distribution's build",
+      "The upstream mainline version",
+      "The CPU model",
+      "The patch level of glibc"
+     ],
+     "answer": 1,
+     "explain": "The base kernel version."
+    },
+    {
+     "q": "How long is the usual merge window?",
+     "options": [
+      "2 weeks",
+      "2 days",
+      "2 months",
+      "1 year"
+     ],
+     "answer": 0,
+     "explain": "Then rc1 is released."
+    },
+    {
+     "q": "What does `CONFIG_FOO=m` mean?",
+     "options": [
+      "Disabled",
+      "Built as a loadable module",
+      "Built in",
+      "Mandatory"
+     ],
+     "answer": 1,
+     "explain": "y = built in, m = module."
+    },
+    {
+     "q": "Why keep the old kernel installed after an update?",
+     "options": [
+      "Disk space is cheap",
+      "It is the fallback if the new one does not boot",
+      "It is required for modules",
+      "Compliance"
+     ],
+     "answer": 1,
+     "explain": "Choose it in the boot menu if the new kernel fails."
+    }
+   ],
+   "check": {
+    "scenario": "An audit says \"your servers run kernel 5.14, which is end of life\". They run Oracle/Red Hat kernels. How do you answer?",
+    "answer": "Vendor kernels carry backported fixes, so the upstream number alone is not the support status. Check the vendor's errata and the package release (`rpm -q kernel` / `uname -r`) against their advisories (`dnf updateinfo list security`). The question to answer is whether the **vendor build** is current and within its support window."
+   }
+  },
+  {
+   "id": "custom-kernel",
+   "title": "Building and booting a custom kernel: the walkthrough",
+   "level": "advanced",
+   "goal": "Learn the steps to build, install and safely test your own kernel, and how to read the configuration and boot parameters you would change.\n\nWhy it matters: you will rarely build a kernel on a production server, but you must understand the pieces (config, image, modules, initramfs, boot entry, fallback) to debug boot problems and to apply patched kernels.",
+   "setup": {
+    "note": "Steps with sudo load a harmless module (`dummy`) and change one sysctl value, then restore both. Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "What a kernel installation consists of",
+     "text": "Four things must match: the **kernel image** (`vmlinuz-VERSION`), its **modules** (`/lib/modules/VERSION`), an **initramfs** (early user space that can mount the root file system) and a **boot loader entry**.",
+     "run": [
+      {
+       "cmd": "ls /boot | grep -E '^(vmlinuz|initramfs)' | grep -v rescue",
+       "output": "initramfs-6.12.0-206.104.4.4.el9uek.aarch64.img\ninitramfs-6.12.0-206.104.4.4.el9uek.aarch64kdump.img\nvmlinuz-6.12.0-206.104.4.4.el9uek.aarch64"
+      },
+      {
+       "cmd": "ls -d /lib/modules/*",
+       "output": "/lib/modules/6.12.0-206.104.4.4.el9uek.aarch64"
+      },
+      {
+       "cmd": "sudo lsinitrd /boot/initramfs-$(uname -r).img 2>/dev/null | grep -E 'lib/modules/.*(xfs|virtio_blk|nvme)' | head -n 2 | awk '{print $NF}'",
+       "output": "usr/lib/modules/6.12.0-206.104.4.4.el9uek.aarch64/kernel/drivers/block/virtio_blk.ko.xz\nusr/lib/modules/6.12.0-206.104.4.4.el9uek.aarch64/kernel/drivers/nvme"
+      }
+     ]
+    },
+    {
+     "title": "Step 1: get the source and a configuration",
+     "text": "Start from the configuration of the working kernel and let `olddefconfig` set new options to their defaults. This is much safer than starting from nothing.",
+     "run": [
+      {
+       "cmd": "curl -O https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz && tar xf linux-6.12.tar.xz && cd linux-6.12 && cp /boot/config-$(uname -r) .config && make olddefconfig",
+       "explanationOnly": true,
+       "reason": "downloads about 140 MB and unpacks 1.5 GB; this VM has little free disk"
+      }
+     ]
+    },
+    {
+     "title": "Step 2: build",
+     "text": "`make -j N` compiles the kernel and `make modules` the modules. Use a unique `LOCALVERSION` so the new modules do not overwrite the old ones.",
+     "run": [
+      {
+       "cmd": "make -j\"$(nproc)\" LOCALVERSION=-custom && make modules",
+       "explanationOnly": true,
+       "reason": "a full build takes hours on this 1-CPU VM and needs several GB of disk"
+      }
+     ]
+    },
+    {
+     "title": "Step 3: install",
+     "text": "`modules_install` copies modules to `/lib/modules/VERSION`. `make install` (or `kernel-install`) copies the image, builds the initramfs with `dracut` and adds a boot entry.",
+     "run": [
+      {
+       "cmd": "sudo make modules_install && sudo make install",
+       "explanationOnly": true,
+       "reason": "installs a kernel into /boot and changes the boot menu of this machine"
+      }
+     ]
+    },
+    {
+     "title": "Step 4: boot it once, with a fallback",
+     "text": "Set the new kernel for the **next boot only** and keep the old one as default. If the new kernel panics, a power cycle returns to the working one.",
+     "run": [
+      {
+       "cmd": "sudo grubby --set-default /boot/vmlinuz-6.12.0-custom && sudo grub2-reboot 0 && sudo reboot",
+       "explanationOnly": true,
+       "reason": "reboots this machine"
+      },
+      {
+       "cmd": "sudo grubby --info=ALL | grep -E '^(index|title)' | head -n 2",
+       "output": "index=0\ntitle=\"Oracle Linux Server (6.12.0-206.104.4.4.el9uek.aarch64 with Unbreakable Enterprise Kernel) 9.8\""
+      }
+     ],
+     "after": "The last command lists the first boot entry. `grub2-reboot` selects an entry for a single boot."
+    },
+    {
+     "title": "Boot parameters",
+     "text": "The command line after the kernel name configures it for one boot: root device, console, quiet. They are visible in `/proc/cmdline`. Edit persistent defaults with `grubby --update-kernel=ALL --args=...`.",
+     "run": [
+      {
+       "cmd": "tr ' ' '\\n' < /proc/cmdline | grep -E '^(ro|quiet|loglevel|console)'",
+       "output": "root=/dev/mapper/ocivolume-root\nro\nconsole=ttyAMA0\nconsole=ttyAMA0,115200\nloglevel=4"
+      }
+     ],
+     "under": "The boot loader loads the kernel image and the initramfs into memory and jumps to the kernel with the command line. The kernel unpacks the initramfs as a temporary root, runs `/init` (systemd in dracut), loads the storage driver, mounts the real root and switches to it (module 24)."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which files must match for a kernel to boot?",
+     "options": [
+      "Only vmlinuz",
+      "Image, modules, initramfs and a boot entry",
+      "Only the config",
+      "Only /etc/fstab"
+     ],
+     "answer": 1,
+     "explain": "All four belong together."
+    },
+    {
+     "q": "Why start from the existing /boot/config and run `make olddefconfig`?",
+     "options": [
+      "It is faster only",
+      "It keeps the options that work on this hardware and sets new ones to defaults",
+      "It removes modules",
+      "It signs the kernel"
+     ],
+     "answer": 1,
+     "explain": "It starts from a known-good configuration."
+    },
+    {
+     "q": "How do you try a new kernel once and fall back automatically?",
+     "options": [
+      "Delete the old kernel",
+      "grub2-reboot to boot the new entry for one boot",
+      "Edit /etc/fstab",
+      "Disable Secure Boot"
+     ],
+     "answer": 1,
+     "explain": "grub2-reboot (or grubby) sets a one-time entry."
+    },
+    {
+     "q": "What is the initramfs for?",
+     "options": [
+      "Swap space",
+      "Early user space with the drivers needed to mount the root file system",
+      "Backups",
+      "The boot menu"
+     ],
+     "answer": 1,
+     "explain": "It lets the kernel reach the real root."
+    }
+   ],
+   "check": {
+    "scenario": "A new kernel panics with `VFS: Unable to mount root fs`. What is the most likely build or install mistake, and how do you recover?",
+    "answer": "The initramfs lacks the storage or file system driver (or was not built for this kernel), or `root=` is wrong. Recover by booting the old kernel from the GRUB menu, then rebuild the initramfs with `dracut --force /boot/initramfs-VERSION.img VERSION` after `depmod`, and check `lsinitrd` for the driver."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "How do you read a kernel version like 6.12.0-206.el9uek?",
+   "a": "Upstream base 6.12.0, then the distributor's build number and tag (EL9, UEK). Vendors backport fixes, so the base version alone does not tell the patch level. See [the lesson](#/lesson/14/kernel-versions).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How often are kernels released?",
+   "a": "About every 9 to 10 weeks: a 2-week merge window, then rc1..rc7/8 weekly, then the release. Some versions become LTS.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What are the steps to build and install a kernel?",
+   "a": "Get source, start from the current .config and run `make olddefconfig`, `make -j`, `make modules_install`, `make install` (image, initramfs, boot entry), test with a one-time boot, keep the old kernel as fallback. See [the walkthrough](#/lesson/14/custom-kernel).",
+   "level": "advanced"
+  },
+  {
+   "q": "What does the initramfs do?",
+   "a": "It is a small root file system loaded by the boot loader. It contains the drivers and tools to find and mount the real root file system, then switches to it.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you keep a machine bootable when testing a kernel?",
+   "a": "Keep the working kernel installed, boot the new one once (`grub2-reboot`), have console access, and keep the previous GRUB entry as default.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Mainline",
+   "def": "The kernel tree maintained by Linus Torvalds from which releases are made.",
+   "lesson": "14/kernel-versions"
+  },
+  {
+   "term": "LTS kernel",
+   "def": "A kernel version that gets bug fixes for several years.",
+   "lesson": "14/kernel-versions"
+  },
+  {
+   "term": "initramfs",
+   "def": "The initial RAM file system: early user space used to mount the real root file system.",
+   "lesson": "14/custom-kernel"
+  },
+  {
+   "term": "Kernel config",
+   "def": "The set of build options (.config), each built in, module or off.",
+   "lesson": "14/kernel-versions"
+  },
+  {
+   "term": "Kernel command line",
+   "def": "Parameters given by the boot loader to the kernel at boot, visible in /proc/cmdline.",
+   "lesson": "14/custom-kernel"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "uname -r",
+   "desc": "Show the running kernel release.",
+   "topic": "Kernel",
+   "lesson": "14/kernel-versions"
+  },
+  {
+   "cmd": "cat /proc/cmdline",
+   "desc": "Show the kernel command line of this boot.",
+   "topic": "Kernel",
+   "lesson": "14/custom-kernel"
+  },
+  {
+   "cmd": "sudo grubby --default-kernel",
+   "desc": "Show the default boot kernel.",
+   "topic": "Kernel",
+   "lesson": "14/kernel-versions"
+  },
+  {
+   "cmd": "sudo grubby --info=ALL",
+   "desc": "List all boot entries.",
+   "topic": "Kernel",
+   "lesson": "14/custom-kernel"
+  },
+  {
+   "cmd": "make olddefconfig",
+   "desc": "Update .config with defaults for new options.",
+   "topic": "Kernel",
+   "lesson": "14/custom-kernel"
+  },
+  {
+   "cmd": "sudo dracut --force /boot/initramfs-VER.img VER",
+   "desc": "Rebuild an initramfs.",
+   "topic": "Kernel",
+   "lesson": "14/custom-kernel"
+  },
+  {
+   "cmd": "sudo lsinitrd IMG",
+   "desc": "List the contents of an initramfs.",
+   "topic": "Kernel",
+   "lesson": "14/custom-kernel"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

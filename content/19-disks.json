@@ -1,0 +1,542 @@
+{
+ "title": "Disks and partitions",
+ "lessons": [
+  {
+   "id": "block-devices",
+   "title": "Block devices: disks, sectors and loop devices",
+   "level": "beginner",
+   "goal": "Learn what a block device is, how to list the disks of a machine, and how to practise safely with a **loop device**: an ordinary file presented to the kernel as a disk.\n\nWhy it matters: you will partition, format, grow and repair disks. Practising on files costs nothing and cannot damage real data.",
+   "setup": {
+    "note": "These steps use sudo, loop devices (files that act as disks) and partitioning tools. They never touch your real disks. Every loop device is detached at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Block versus character devices",
+     "text": "A **block device** gives random access to fixed-size blocks (disks, SSDs, partitions). A **character device** is a stream (terminal, `/dev/null`). In `ls -l` the first letter is `b` or `c`. The two numbers are the **major** (driver) and **minor** (instance).",
+     "run": [
+      {
+       "cmd": "ls -l /dev/sda /dev/null | awk '{print $1, $5, $6, $10}'",
+       "output": "crw-rw-rw-. 1, 3 /dev/null\nbrw-rw----. 8, 0 /dev/sda"
+      }
+     ]
+    },
+    {
+     "title": "List the disks",
+     "text": "`lsblk` shows the tree: disk, partitions, and what is built on them (LVM, mounts). `-d` shows only whole disks.",
+     "run": [
+      {
+       "cmd": "lsblk -d -o NAME,SIZE,TYPE,ROTA",
+       "output": "NAME SIZE TYPE ROTA\nsda   50G disk    1"
+      },
+      {
+       "cmd": "cat /proc/partitions | awk 'NR<=3'",
+       "output": "major minor  #blocks  name\n\n   8        0   52428800 sda"
+      }
+     ]
+    },
+    {
+     "title": "Sector sizes",
+     "text": "A disk is addressed in **sectors**, traditionally 512 bytes (many modern disks are 4096). `blockdev` reads the geometry.",
+     "run": [
+      {
+       "cmd": "sudo blockdev --getss --getsize64 /dev/sda",
+       "output": "512\n53687091200"
+      }
+     ]
+    },
+    {
+     "title": "Make a practice disk",
+     "text": "`truncate -s 64M disk.img` creates a **sparse** file: it claims 64 MB but uses no disk space until written. `losetup` attaches it to a free loop device. The kernel then treats `/dev/loopN` like a disk.",
+     "run": [
+      {
+       "cmd": "truncate -s 64M disk.img; ls -ls disk.img | awk '{print \"allocated KB:\", $1, \"apparent bytes:\", $6}'",
+       "output": "allocated KB: 0 apparent bytes: 67108864"
+      },
+      {
+       "cmd": "L=$(sudo losetup -f --show disk.img); echo $L",
+       "output": "/dev/loop0"
+      },
+      {
+       "cmd": "lsblk -o NAME,SIZE,TYPE $L",
+       "output": "NAME  SIZE TYPE\nloop0  64M loop"
+      }
+     ]
+    },
+    {
+     "title": "The kernel sees a disk",
+     "text": "Reading the device gives zeros (the file is empty). The size matches the file. Detach when done.",
+     "run": [
+      {
+       "cmd": "sudo blockdev --getsize64 $L",
+       "output": "67108864"
+      },
+      {
+       "cmd": "sudo dd if=$L bs=512 count=1 status=none | xxd | head -n 1",
+       "output": "00000000: 0000 0000 0000 0000 0000 0000 0000 0000  ................"
+      },
+      {
+       "cmd": "sudo losetup -d $L; losetup -a | grep -c disk.img",
+       "output": "0"
+      }
+     ],
+     "under": "Block I/O goes through the **block layer**: the file system submits `bio` requests, the I/O scheduler (module 22) orders them, and the driver talks to the hardware. A loop device is a driver whose \"hardware\" is reads and writes on a file."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which letter marks a block device in `ls -l`?",
+     "options": [
+      "c",
+      "b",
+      "d",
+      "l"
+     ],
+     "answer": 1,
+     "explain": "b = block, c = character."
+    },
+    {
+     "q": "What is a loop device?",
+     "options": [
+      "A network disk",
+      "A file presented to the kernel as a block device",
+      "A RAID level",
+      "A swap area"
+     ],
+     "answer": 1,
+     "explain": "It lets you practise on files."
+    },
+    {
+     "q": "What does `truncate -s 64M disk.img` create?",
+     "options": [
+      "A full 64 MB file on disk",
+      "A sparse file that uses space only when written",
+      "A partition",
+      "A backup"
+     ],
+     "answer": 1,
+     "explain": "Step 4 showed 0 allocated blocks."
+    },
+    {
+     "q": "What are major and minor numbers?",
+     "options": [
+      "Version numbers",
+      "Driver and device instance numbers",
+      "Sizes",
+      "Permissions"
+     ],
+     "answer": 1,
+     "explain": "They identify the driver and the unit."
+    }
+   ],
+   "check": {
+    "scenario": "You must rehearse resizing a production LVM volume. How do you build a safe test bed without spare disks?",
+    "answer": "Create sparse files (`truncate -s 1G a.img b.img`), attach them with `losetup`, and build the same PV/VG/LV structure on the loop devices. Everything can be thrown away by detaching the devices and deleting the files."
+   }
+  },
+  {
+   "id": "gpt-vs-mbr",
+   "title": "Partition tables: GPT versus MBR",
+   "level": "intermediate",
+   "goal": "Learn what a partition table is, create one with `parted`, and compare the two formats by looking at the bytes on disk.\n\nWhy it matters: MBR limits you to 2 TiB and four primary partitions; GPT is the standard for UEFI. When a disk \"shows no partitions\" or a boot fails, you read these structures.",
+   "setup": {
+    "note": "These steps use sudo, loop devices (files that act as disks) and partitioning tools. They never touch your real disks. Every loop device is detached at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A partition table is a few bytes at the start",
+     "text": "The partition table says where each partition starts and ends. It lives in the first sectors of the disk. We create a 64 MB image and write a **GPT** table with two partitions.",
+     "run": [
+      {
+       "cmd": "truncate -s 64M gpt.img; L=$(sudo losetup -f --show -P gpt.img); echo $L",
+       "output": "/dev/loop0"
+      },
+      {
+       "cmd": "sudo parted -s $L mklabel gpt mkpart data 1MiB 32MiB mkpart logs 32MiB 100%",
+       "output": ""
+      },
+      {
+       "cmd": "sudo parted -s $L unit s print | sed -n '1,12p' | grep -vE '^(Model|Sector|Disk Flags)?$'",
+       "output": "Model: Loopback device (loopback)\nDisk /dev/loop0: 131072s\nSector size (logical/physical): 512B/512B\nPartition Table: gpt\nDisk Flags: \nNumber  Start   End      Size    File system  Name  Flags\n 1      2048s   65535s   63488s               data\n 2      65536s  131038s  65503s               logs"
+      }
+     ]
+    },
+    {
+     "title": "The partitions become devices",
+     "text": "With `-P` (scan partitions) the kernel creates `loop0p1` and `loop0p2`.",
+     "run": [
+      {
+       "cmd": "lsblk -o NAME,SIZE,TYPE,PARTLABEL $L",
+       "output": "NAME      SIZE TYPE PARTLABEL\nloop0      64M loop \n├─loop0p1  31M part data\n└─loop0p2  32M part logs"
+      }
+     ]
+    },
+    {
+     "title": "GPT on disk: signature and backup",
+     "text": "GPT keeps a **protective MBR** in sector 0 (so old tools see a full disk), the GPT header at sector 1 starting with the text `EFI PART`, and a **backup header** in the last sector. The backup lets tools repair a damaged table.",
+     "run": [
+      {
+       "cmd": "xxd -s 510 -l 2 gpt.img",
+       "output": "000001fe: 55aa                                     U."
+      },
+      {
+       "cmd": "xxd -s 512 -l 16 gpt.img",
+       "output": "00000200: 4546 4920 5041 5254 0000 0100 5c00 0000  EFI PART....\\..."
+      },
+      {
+       "cmd": "xxd -s $(( $(stat -c %s gpt.img) - 512 )) -l 16 gpt.img",
+       "output": "03fffe00: 4546 4920 5041 5254 0000 0100 5c00 0000  EFI PART....\\..."
+      }
+     ],
+     "after": "`55aa` at offset 510 is the boot signature of the protective MBR. `EFI PART` is the GPT header, found twice: at the start and at the very end."
+    },
+    {
+     "title": "MBR on disk: four entries of 16 bytes",
+     "text": "An **MBR** (also called msdos) table is 64 bytes at offset 446: four entries of 16 bytes each, then the signature `55aa`. Each entry stores a type, a start sector and a size as 32-bit numbers, which is where the 2 TiB limit comes from.",
+     "run": [
+      {
+       "cmd": "sudo losetup -d $L; truncate -s 64M mbr.img; L=$(sudo losetup -f --show -P mbr.img)",
+       "output": ""
+      },
+      {
+       "cmd": "sudo parted -s $L mklabel msdos mkpart primary 1MiB 32MiB",
+       "output": ""
+      },
+      {
+       "cmd": "xxd -s 446 -l 16 mbr.img",
+       "output": "000001be: 0004 0104 837f 0280 0008 0000 00f8 0000  ................"
+      },
+      {
+       "cmd": "xxd -s 510 -l 2 mbr.img",
+       "output": "000001fe: 55aa                                     U."
+      },
+      {
+       "cmd": "sudo fdisk -l $L | grep -E '^Disklabel type'",
+       "output": "Disklabel type: dos"
+      }
+     ]
+    },
+    {
+     "title": "Compare",
+     "text": "- **MBR**: 4 primary partitions (or 3 + extended), disks up to 2 TiB, no backup copy, no checksums, boots with BIOS.\n- **GPT**: 128 partitions by default, disks up to 8 ZiB, backup header, CRC32 checksums, partition names and UUIDs, needed for UEFI boot and disks above 2 TiB.",
+     "run": [
+      {
+       "cmd": "sudo losetup -d $L; losetup -a | grep -cE 'gpt.img|mbr.img'",
+       "output": "0"
+      }
+     ],
+     "under": "Both formats store sector numbers. GPT uses 64-bit logical block addresses (LBA), so it addresses 2^64 sectors; MBR uses 32-bit LBA values, so 2^32 sectors x 512 bytes = 2 TiB."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What text starts the GPT header?",
+     "options": [
+      "BOOT",
+      "EFI PART",
+      "GRUB",
+      "NTFS"
+     ],
+     "answer": 1,
+     "explain": "The signature `EFI PART` in sector 1."
+    },
+    {
+     "q": "Why can MBR not address more than 2 TiB?",
+     "options": [
+      "Software limit of parted",
+      "32-bit sector numbers",
+      "Only 4 partitions",
+      "No UEFI"
+     ],
+     "answer": 1,
+     "explain": "2^32 sectors of 512 bytes."
+    },
+    {
+     "q": "Where is the backup GPT header?",
+     "options": [
+      "In sector 0",
+      "In the last sector of the disk",
+      "In /boot",
+      "In RAM"
+     ],
+     "answer": 1,
+     "explain": "That allows recovery."
+    },
+    {
+     "q": "Which tables support UEFI boot?",
+     "options": [
+      "Only MBR",
+      "GPT (with an EFI system partition)",
+      "Neither",
+      "Only LVM"
+     ],
+     "answer": 1,
+     "explain": "UEFI expects GPT."
+    }
+   ],
+   "check": {
+    "scenario": "A 6 TB disk shows only 2 TB usable after you partitioned it with fdisk on an old server. What went wrong?",
+    "answer": "The disk got an **MBR** (msdos) label, which cannot address beyond 2 TiB. Convert to GPT (`parted /dev/sdX mklabel gpt`, which **destroys** the old table: back up first, or use `sgdisk -g` for a non-destructive conversion), then recreate the partitions."
+   }
+  },
+  {
+   "id": "alignment-sfdisk-uuid",
+   "title": "Alignment, saving partition tables and UUIDs",
+   "level": "advanced",
+   "goal": "Learn why partitions start at 1 MiB, how to dump and restore a partition table, and how partitions and file systems get stable identifiers.\n\nWhy it matters: misaligned partitions slow down SSDs and RAID; scripted layouts make servers reproducible; and device names like `/dev/sdb` can change between boots while UUIDs do not.",
+   "setup": {
+    "note": "These steps use sudo, loop devices (files that act as disks) and partitioning tools. They never touch your real disks. Every loop device is detached at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Alignment",
+     "text": "Modern disks use 4 KiB physical sectors and SSDs write in larger pages. A partition that starts on a boundary the hardware likes is **aligned**. The standard is to start at sector 2048 (1 MiB). `parted align-check` tests it.",
+     "run": [
+      {
+       "cmd": "truncate -s 128M a.img; L=$(sudo losetup -f --show -P a.img); sudo parted -s $L mklabel gpt mkpart p1 1MiB 64MiB mkpart p2 64MiB 100%",
+       "output": ""
+      },
+      {
+       "cmd": "sudo parted -s $L align-check optimal 1 && echo 'partition 1: aligned'; sudo parted -s $L align-check optimal 2 && echo 'partition 2: aligned'",
+       "output": "partition 1: aligned\npartition 2: aligned"
+      },
+      {
+       "cmd": "cat /sys/class/block/$(basename $L)p1/start /sys/class/block/$(basename $L)p1/size",
+       "output": "2048\n129024"
+      }
+     ],
+     "after": "Partition 1 starts at sector 2048 (1 MiB). The size is in 512-byte sectors: 63 MiB = 129024 sectors."
+    },
+    {
+     "title": "Dump and restore a layout",
+     "text": "`sfdisk -d` prints the partition table as text. Feed it to `sfdisk` on another disk to clone the layout. This is how you script server builds and how you save a table before changing it.",
+     "run": [
+      {
+       "cmd": "sudo sfdisk -d $L > layout.txt; grep -vE '^(device|sector-size|first-lba|last-lba)' layout.txt | sed 's#/dev/loop[0-9]*#DISK#'",
+       "output": "label: gpt\nlabel-id: 58681C4D-F11A-480E-988D-4ABCD95C374E\nunit: sectors\n\nDISKp1 : start=        2048, size=      129024, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=3230C3D9-E55C-4F5B-AAFD-5D28B73F8E54, name=\"p1\"\nDISKp2 : start=      131072, size=      131039, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=AF54A409-A4DD-409E-92A9-6C65643F1718, name=\"p2\""
+      },
+      {
+       "cmd": "truncate -s 128M b.img; M=$(sudo losetup -f --show -P b.img); sudo sfdisk -q $M < layout.txt; sleep 1; lsblk -no NAME,SIZE $M | sed 's/^/clone: /'",
+       "output": "clone: loop1      128M\nclone: ├─loop1p1   63M\nclone: └─loop1p2   64M"
+      }
+     ]
+    },
+    {
+     "title": "Stable names: UUIDs",
+     "text": "A **PARTUUID** identifies a partition (stored in the GPT). A **UUID** identifies a file system (stored in its superblock). `/dev/sdb2` may become `/dev/sdc2` after a reboot; UUIDs never change. Use them in `/etc/fstab` and boot arguments.",
+     "run": [
+      {
+       "cmd": "sudo mkfs.ext4 -q ${L}p1; sudo blkid -s TYPE -s UUID -s PARTLABEL ${L}p1 | sed -E 's/UUID=\"[^\"]*\"/UUID=\"<uuid>\"/; s#/dev/loop[0-9]+#/dev/loopN#'",
+       "output": "/dev/loopNp1: UUID=\"<uuid>\" TYPE=\"ext4\" PARTLABEL=\"p1\""
+      },
+      {
+       "cmd": "ls /dev/disk/by-uuid | wc -l",
+       "output": "5"
+      }
+     ],
+     "under": "`udev` creates the symlinks in `/dev/disk/by-uuid`, `by-partuuid`, `by-label` and `by-id` when a device appears, by reading the identifiers with `blkid`. They point to whatever kernel name the device got this time."
+    },
+    {
+     "title": "Clean up",
+     "text": "Detach the loop devices and delete the images.",
+     "run": [
+      {
+       "cmd": "sudo losetup -d $L $M; rm -f a.img b.img gpt.img mbr.img disk.img; losetup -a | wc -l",
+       "output": "0"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "At which sector does a standard aligned first partition start?",
+     "options": [
+      "0",
+      "63",
+      "2048",
+      "4096"
+     ],
+     "answer": 2,
+     "explain": "Sector 2048 = 1 MiB."
+    },
+    {
+     "q": "Which tool dumps a partition table as a script?",
+     "options": [
+      "sfdisk -d",
+      "lsblk",
+      "blkid",
+      "mount"
+     ],
+     "answer": 0,
+     "explain": "`sfdisk -d` prints it; `sfdisk < file` restores."
+    },
+    {
+     "q": "Why use UUIDs in fstab?",
+     "options": [
+      "They are shorter",
+      "Device names like /dev/sdb can change between boots",
+      "They are faster",
+      "They encrypt"
+     ],
+     "answer": 1,
+     "explain": "UUIDs are stable."
+    },
+    {
+     "q": "What stores a file system's UUID?",
+     "options": [
+      "The partition table",
+      "The file system's superblock",
+      "/etc/fstab",
+      "udev"
+     ],
+     "answer": 1,
+     "explain": "The superblock; blkid reads it."
+    }
+   ],
+   "check": {
+    "scenario": "After adding a disk, the server boots to emergency mode because `/data` (listed as /dev/sdb1 in fstab) is missing or mounted wrong. What is the lasting fix?",
+    "answer": "Use stable identifiers in `/etc/fstab`: `UUID=... /data xfs defaults,nofail 0 2` (get it with `blkid`), and `nofail` so a missing data disk does not stop the boot. Verify with `findmnt --verify` before rebooting."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is a block device?",
+   "a": "A device with random access to fixed-size blocks, like a disk or partition, exposed as a file in /dev. See [the lesson](#/lesson/19/block-devices).",
+   "level": "beginner"
+  },
+  {
+   "q": "How can you practise partitioning without a spare disk?",
+   "a": "Create a sparse file with `truncate`, attach it with `losetup -P`, and use it like a disk.",
+   "level": "beginner"
+  },
+  {
+   "q": "GPT versus MBR?",
+   "a": "GPT: 64-bit LBA, up to 128 partitions, backup header, checksums, needed for UEFI and disks over 2 TiB. MBR: 32-bit LBA (2 TiB limit), 4 primary partitions, no backup. See [the lesson](#/lesson/19/gpt-vs-mbr).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why start partitions at 1 MiB?",
+   "a": "To align with 4 KiB physical sectors, SSD pages and RAID stripes, avoiding read-modify-write slowdowns.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why use UUIDs instead of /dev/sdX in fstab?",
+   "a": "Kernel device names depend on probe order and can change. UUIDs are stored in the file system. See [the lesson](#/lesson/19/alignment-sfdisk-uuid).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you copy a partition layout to another disk?",
+   "a": "`sfdisk -d /dev/sda | sfdisk /dev/sdb`, or `sgdisk -R` for GPT (then randomise the GUIDs with `sgdisk -G`).",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Block device",
+   "def": "A device with random access to fixed-size blocks, such as a disk.",
+   "lesson": "19/block-devices"
+  },
+  {
+   "term": "Loop device",
+   "def": "A block device backed by a regular file.",
+   "lesson": "19/block-devices"
+  },
+  {
+   "term": "Sector",
+   "def": "The smallest addressable unit of a disk (512 or 4096 bytes).",
+   "lesson": "19/block-devices"
+  },
+  {
+   "term": "GPT",
+   "def": "GUID Partition Table: modern partition table with backup header and checksums.",
+   "lesson": "19/gpt-vs-mbr"
+  },
+  {
+   "term": "MBR",
+   "def": "Master Boot Record: the legacy partition table with 4 entries and 32-bit sector numbers.",
+   "lesson": "19/gpt-vs-mbr"
+  },
+  {
+   "term": "Alignment",
+   "def": "Starting partitions on boundaries that match the hardware's physical blocks.",
+   "lesson": "19/alignment-sfdisk-uuid"
+  },
+  {
+   "term": "UUID",
+   "def": "A stable identifier stored in a file system or partition.",
+   "lesson": "19/alignment-sfdisk-uuid"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "lsblk",
+   "desc": "Show disks, partitions and mounts as a tree.",
+   "topic": "Disks",
+   "lesson": "19/block-devices"
+  },
+  {
+   "cmd": "sudo blockdev --getsize64 DEV",
+   "desc": "Show the size of a device in bytes.",
+   "topic": "Disks",
+   "lesson": "19/block-devices"
+  },
+  {
+   "cmd": "truncate -s 1G disk.img",
+   "desc": "Create a sparse image file.",
+   "topic": "Disks",
+   "lesson": "19/block-devices"
+  },
+  {
+   "cmd": "sudo losetup -f --show -P disk.img",
+   "desc": "Attach an image as a loop disk with partitions.",
+   "topic": "Disks",
+   "lesson": "19/block-devices"
+  },
+  {
+   "cmd": "sudo losetup -d /dev/loopN",
+   "desc": "Detach a loop device.",
+   "topic": "Disks",
+   "lesson": "19/block-devices"
+  },
+  {
+   "cmd": "sudo parted -s DEV mklabel gpt",
+   "desc": "Write a new GPT.",
+   "topic": "Disks",
+   "lesson": "19/gpt-vs-mbr"
+  },
+  {
+   "cmd": "sudo parted -s DEV mkpart NAME 1MiB 100%",
+   "desc": "Create a partition.",
+   "topic": "Disks",
+   "lesson": "19/gpt-vs-mbr"
+  },
+  {
+   "cmd": "sudo fdisk -l DEV",
+   "desc": "Show the partition table.",
+   "topic": "Disks",
+   "lesson": "19/gpt-vs-mbr"
+  },
+  {
+   "cmd": "sudo sfdisk -d DEV > layout.txt",
+   "desc": "Save a partition table.",
+   "topic": "Disks",
+   "lesson": "19/alignment-sfdisk-uuid"
+  },
+  {
+   "cmd": "sudo blkid",
+   "desc": "Show file system types and UUIDs.",
+   "topic": "Disks",
+   "lesson": "19/alignment-sfdisk-uuid"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

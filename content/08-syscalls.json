@@ -1,0 +1,488 @@
+{
+ "title": "System calls and strace",
+ "lessons": [
+  {
+   "id": "what-is-a-syscall",
+   "title": "What a system call is",
+   "level": "beginner",
+   "goal": "Learn that programs cannot touch hardware or other processes directly, and that every such request goes through a **system call** into the kernel.\n\nWhy it matters: `strace` shows these calls. Once you can read them, you can see what any program is really doing without its source code.",
+   "setup": {
+    "note": "Programs here are small C files. You need gcc and strace (`dnf install gcc strace`).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Two worlds: user mode and kernel mode",
+     "text": "Your programs run in **user mode**: they can compute, but they cannot read a disk, send a packet or create a process. The **kernel** runs in privileged mode and does these things on request. A **system call** is the controlled door between the two."
+    },
+    {
+     "title": "Make a system call by hand",
+     "text": "`write(fd, buffer, length)` asks the kernel to write bytes to a file descriptor. File descriptor 1 is standard output. This program calls it directly through `syscall()`, without the C library's `printf`.",
+     "code": {
+      "file": "sys_write.c",
+      "lang": "c",
+      "src": "#include <unistd.h>\n#include <sys/syscall.h>\n\nint main(void) {\n    const char msg[] = \"hello from a raw system call\\n\";\n    syscall(SYS_write, 1, msg, sizeof msg - 1);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o sys_write sys_write.c",
+       "output": ""
+      },
+      {
+       "cmd": "./sys_write",
+       "output": "hello from a raw system call"
+      }
+     ]
+    },
+    {
+     "title": "strace shows the call",
+     "text": "`strace` runs a program and prints every system call with its arguments and return value. `-e trace=write` limits the output to `write`. The result `= 29` is the number of bytes written.",
+     "run": [
+      {
+       "cmd": "strace -e trace=write ./sys_write",
+       "output": "write(1, \"hello from a raw system call\\n\", 29hello from a raw system call\n) = 29\n+++ exited with 0 +++"
+      }
+     ],
+     "under": "On 64-bit ARM the program executes the `svc #0` instruction with the syscall number in register `x8` and the arguments in `x0`...`x5`. On x86-64 it is the `syscall` instruction with the number in `rax`. The CPU switches to kernel mode and jumps to the kernel's entry point. The kernel runs `write`, then returns to user mode with the result in a register."
+    },
+    {
+     "title": "printf is a layer on top",
+     "text": "`printf` formats text and keeps it in a buffer in your process. It calls `write` later. When stdout is a pipe or a file the C library waits until the buffer is full or the program ends, so both lines come out in **one** write.",
+     "code": {
+      "file": "pf.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n\nint main(void) {\n    printf(\"line one\\n\");\n    printf(\"line two\\n\");\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o pf pf.c",
+       "output": ""
+      },
+      {
+       "cmd": "strace -e trace=write ./pf | cat",
+       "output": "write(1, \"line one\\nline two\\n\", 18line one\nline two\n)    = 18\n+++ exited with 0 +++"
+      }
+     ],
+     "after": "strace prints its trace on stderr, which still goes to the terminal. The program's own output went through `cat`. Two `printf` calls produced a single `write`."
+    },
+    {
+     "title": "Count the calls",
+     "text": "`strace -c` does not print each call. It prints a summary table: how many times each system call ran and how long it took. Even `ls` makes dozens of calls.",
+     "run": [
+      {
+       "cmd": "strace -c -o /tmp/lab/summary.txt ls /usr > /dev/null; head -n 6 /tmp/lab/summary.txt | cut -c1-70",
+       "output": "% time     seconds  usecs/call     calls    errors syscall\n------ ----------- ----------- --------- --------- ----------------\n  0.00    0.000000           0         3         3 ioctl\n  0.00    0.000000           0         2           statfs\n  0.00    0.000000           0         2         1 faccessat\n  0.00    0.000000           0         7           openat"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Why can a normal program not write to a disk directly?",
+     "options": [
+      "The compiler forbids it",
+      "Only the kernel runs in privileged mode and talks to hardware",
+      "Disks are slow",
+      "It needs root"
+     ],
+     "answer": 1,
+     "explain": "User-mode code must ask the kernel through a system call."
+    },
+    {
+     "q": "In `write(1, \"hi\\n\", 3) = 3`, what does the `= 3` mean?",
+     "options": [
+      "File descriptor",
+      "The kernel returned 3 (bytes written)",
+      "Error code 3",
+      "Three calls"
+     ],
+     "answer": 1,
+     "explain": "The return value of the call."
+    },
+    {
+     "q": "Why did two `printf` calls become one `write`?",
+     "options": [
+      "A kernel bug",
+      "The C library buffered the output (stdout was a pipe)",
+      "strace merged them",
+      "printf is a system call"
+     ],
+     "answer": 1,
+     "explain": "stdio buffers when output is not a terminal."
+    },
+    {
+     "q": "Which tool prints the system calls of a running program?",
+     "options": [
+      "ls",
+      "strace",
+      "ps",
+      "ldd"
+     ],
+     "answer": 1,
+     "explain": "That is what strace does."
+    }
+   ],
+   "check": {
+    "scenario": "A tool prints `Error` and exits, and you have no source code. Which first command shows what it asked the kernel to do?",
+    "answer": "`strace -f -o trace.txt ./tool` then look at the last calls before it exits, for example `tail trace.txt` or `grep -E 'ENOENT|EACCES' trace.txt`. The failing system call and its error tell you which file, permission or network address is the problem."
+   }
+  },
+  {
+   "id": "reading-strace",
+   "title": "Reading strace output: errors, files and timing",
+   "level": "intermediate",
+   "goal": "Learn the format of a strace line and use it to solve a typical problem: a program fails and prints a vague message.\n\nWhy it matters: system calls return an error code (`errno`) like `ENOENT` or `EACCES`. The program may hide it, but strace shows it.",
+   "setup": {
+    "note": "Programs here are small C files. You need gcc and strace (`dnf install gcc strace`).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "One line, three parts",
+     "text": "`name(arguments) = result`. A failed call shows `-1` and the error name and text, for example `-1 ENOENT (No such file or directory)`.",
+     "run": [
+      {
+       "cmd": "strace -e trace=openat ls /nonexistent 2>&1 | tail -n 3",
+       "output": "openat(AT_FDCWD, \"/usr/share/locale/en/LC_MESSAGES/libc.mo\", O_RDONLY) = -1 ENOENT (No such file or directory)\n: No such file or directory\n+++ exited with 2 +++"
+      }
+     ]
+    },
+    {
+     "title": "A program that hides the reason",
+     "text": "`readconf` reads `/tmp/lab/app.conf`. When it cannot, it prints only \"cannot start\". We do not know why.",
+     "code": {
+      "file": "readconf.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n\nint main(void) {\n    FILE *f = fopen(\"/tmp/lab/app.conf\", \"r\");\n    if (!f) {\n        puts(\"app: cannot start\");\n        return 1;\n    }\n    char line[100];\n    if (fgets(line, sizeof line, f))\n        printf(\"config: %s\", line);\n    fclose(f);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o readconf readconf.c",
+       "output": ""
+      },
+      {
+       "cmd": "./readconf; echo \"exit code: $?\"",
+       "output": "app: cannot start\nexit code: 1"
+      }
+     ]
+    },
+    {
+     "title": "Ask strace which file it wanted",
+     "text": "We trace only `openat` (the call that opens files) and look for our file.",
+     "run": [
+      {
+       "cmd": "strace -e trace=openat ./readconf 2>&1 | grep app.conf",
+       "output": "openat(AT_FDCWD, \"/tmp/lab/app.conf\", O_RDONLY) = -1 ENOENT (No such file or directory)"
+      }
+     ],
+     "after": "`ENOENT` means the file does not exist. The path in the first argument is the one the program expected. Without any source code we found the cause."
+    },
+    {
+     "title": "Fix it and confirm",
+     "text": "Create the file, run again, and watch the same call succeed. The result is now a file descriptor number (3).",
+     "run": [
+      {
+       "cmd": "echo 'port=8080' > /tmp/lab/app.conf",
+       "output": ""
+      },
+      {
+       "cmd": "strace -e trace=openat,read,close ./readconf 2>&1 | grep -A2 app.conf | cut -c1-80",
+       "output": "openat(AT_FDCWD, \"/tmp/lab/app.conf\", O_RDONLY) = 3\nread(3, \"port=8080\\n\", 4096)            = 10\nclose(3)                                = 0"
+      },
+      {
+       "cmd": "./readconf",
+       "output": "config: port=8080"
+      }
+     ]
+    },
+    {
+     "title": "Useful options",
+     "text": "`-f` follows child processes. `-o FILE` writes the trace to a file. `-T` shows the time spent in each call. `-e trace=file` selects all calls that take a path, `trace=network` all socket calls. `-p PID` attaches to a running process.",
+     "run": [
+      {
+       "cmd": "strace -T -e trace=write -o /tmp/lab/t.txt dd if=/dev/zero of=/dev/null bs=64k count=2 2>/dev/null; grep 'write(1' /tmp/lab/t.txt | sed -E 's/write\\(1, \"[^\"]*\"(\\.\\.\\.)?, ([0-9]+)\\)/write(1, DATA, \\2)/'",
+       "output": "write(1, DATA, 65536) = 65536 <0.000007>\nwrite(1, DATA, 65536) = 65536 <0.000006>"
+      }
+     ],
+     "under": "`strace` uses the `ptrace` system call. It makes the kernel stop the traced process at every system call entry and exit and lets strace read the registers. That stop is what makes strace slow (often 10 to 100 times slower for call-heavy programs)."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which error code means \"file does not exist\"?",
+     "options": [
+      "EACCES",
+      "ENOENT",
+      "EBUSY",
+      "EPIPE"
+     ],
+     "answer": 1,
+     "explain": "ENOENT: No such file or directory."
+    },
+    {
+     "q": "What does `strace -f` do?",
+     "options": [
+      "Fast mode",
+      "Follows child processes",
+      "Filters errors",
+      "Shows files"
+     ],
+     "answer": 1,
+     "explain": "Without -f only the parent is traced."
+    },
+    {
+     "q": "A failed system call returns...",
+     "options": [
+      "0",
+      "-1 and sets errno",
+      "a negative file descriptor only",
+      "nothing"
+     ],
+     "answer": 1,
+     "explain": "On error the libc wrapper returns -1 and sets errno."
+    },
+    {
+     "q": "Why can strace slow a program down a lot?",
+     "options": [
+      "It compiles it again",
+      "It stops the process at every system call (ptrace)",
+      "It uses the network",
+      "It is single-threaded"
+     ],
+     "answer": 1,
+     "explain": "Each stop costs context switches."
+    }
+   ],
+   "check": {
+    "scenario": "A service fails to start with `permission denied` but the log does not say for which file. How do you find it?",
+    "answer": "`strace -f -e trace=file -o /tmp/s.txt COMMAND` and then `grep -E 'EACCES|EPERM' /tmp/s.txt`. The first argument of the failing call is the path. Check its mode and the modes of the directories above it (`namei -l PATH`), and SELinux (`ausearch -m avc`)."
+   }
+  },
+  {
+   "id": "syscall-cost-vdso",
+   "title": "How expensive is a system call? The vDSO shortcut",
+   "level": "advanced",
+   "goal": "Learn that a system call has a cost, and that Linux avoids it for some calls by running kernel-provided code in user space (the **vDSO**).\n\nWhy it matters: a hot loop that calls the kernel thousands of times per second is slow. Knowing which calls are real system calls tells you where time goes.",
+   "setup": {
+    "note": "Programs here are small C files. You need gcc and strace (`dnf install gcc strace`).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Two loops",
+     "text": "`vdso.c` calls `clock_gettime` 1000 times and `getppid` 1000 times. Both look like simple library calls.",
+     "code": {
+      "file": "vdso.c",
+      "lang": "c",
+      "src": "#include <time.h>\n#include <unistd.h>\n\nint main(void) {\n    struct timespec ts;\n    for (int i = 0; i < 1000; i++)\n        clock_gettime(CLOCK_MONOTONIC, &ts);\n    for (int i = 0; i < 1000; i++)\n        getppid();\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -O1 -o vdso vdso.c",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "Count what reaches the kernel",
+     "text": "We ask strace to count only those two calls.",
+     "run": [
+      {
+       "cmd": "strace -c -e trace=clock_gettime,getppid ./vdso 2>&1 | tail -n 4",
+       "output": "------ ----------- ----------- --------- --------- ----------------\n100.00    0.001538           1      1000           getppid\n------ ----------- ----------- --------- --------- ----------------\n100.00    0.001538           1      1000           total"
+      }
+     ],
+     "after": "`getppid` shows 1000 calls. `clock_gettime` is **missing**: its 1000 calls never entered the kernel."
+    },
+    {
+     "title": "Where did clock_gettime run?",
+     "text": "The kernel maps a small shared library, the **vDSO**, into every process. `clock_gettime` reads the time from a page the kernel keeps updated, in user space, with no mode switch. You can see the mapping.",
+     "run": [
+      {
+       "cmd": "grep -E 'vdso|vvar' /proc/self/maps | awk '{print $2, $6}'",
+       "output": "r--p [vvar]\nr-xp [vdso]"
+      }
+     ],
+     "under": "The vDSO (virtual dynamic shared object) is built into the kernel and placed in the address space of every process at `execve`. libc finds it through the auxiliary vector and uses it for `clock_gettime`, `gettimeofday` and (on some CPUs) `getcpu`. The `vvar` pages next to it hold the data the kernel updates on each timer tick."
+    },
+    {
+     "title": "Measure the difference",
+     "text": "`cost.c` times 2 million calls. Without arguments it calls `clock_gettime` (vDSO), with an argument it calls `getppid` (a real system call). The numbers depend on your CPU and kernel, but the ratio shows the price of entering the kernel.",
+     "code": {
+      "file": "cost.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <time.h>\n#include <unistd.h>\n\nstatic long ns(struct timespec a, struct timespec b) {\n    return (b.tv_sec - a.tv_sec) * 1000000000L + (b.tv_nsec - a.tv_nsec);\n}\n\nint main(int argc, char **argv) {\n    const long n = 2000000;\n    struct timespec t0, t1, ts;\n    clock_gettime(CLOCK_MONOTONIC, &t0);\n    for (long i = 0; i < n; i++) {\n        if (argc > 1) getppid();                       /* a real system call */\n        else clock_gettime(CLOCK_MONOTONIC, &ts);      /* served by the vDSO */\n    }\n    clock_gettime(CLOCK_MONOTONIC, &t1);\n    printf(\"%s: %ld ns per call\\n\", argc > 1 ? \"getppid\" : \"clock_gettime\", ns(t0, t1) / n);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -O1 -o cost cost.c",
+       "output": ""
+      },
+      {
+       "cmd": "./cost",
+       "output": "clock_gettime: 37 ns per call"
+      },
+      {
+       "cmd": "./cost x",
+       "output": "getppid: 196 ns per call"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is the vDSO?",
+     "options": [
+      "A kernel module",
+      "Kernel code mapped into every process so some calls need no mode switch",
+      "A device",
+      "A debugger"
+     ],
+     "answer": 1,
+     "explain": "It serves calls such as clock_gettime in user space."
+    },
+    {
+     "q": "Why did strace show no `clock_gettime` calls?",
+     "options": [
+      "They failed",
+      "They ran in the vDSO and never entered the kernel",
+      "strace hides them",
+      "The loop was optimised away"
+     ],
+     "answer": 1,
+     "explain": "Step 2: only getppid reached the kernel."
+    },
+    {
+     "q": "Which of these is a real system call?",
+     "options": [
+      "printf",
+      "getppid",
+      "memcpy",
+      "sqrt"
+     ],
+     "answer": 1,
+     "explain": "getppid asks the kernel for the parent PID."
+    }
+   ],
+   "check": {
+    "scenario": "A program calls `gettimeofday` 100000 times per second, yet strace shows none. Is something wrong?",
+    "answer": "No. On most platforms `gettimeofday` and `clock_gettime` are served from the vDSO, so strace never sees them. They are cheap. If the clocksource is unusual (some virtual machines force the slower path), they can become real system calls and then appear in strace."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is a system call?",
+   "a": "A controlled entry from user mode into the kernel, used to ask for a service such as reading a file, creating a process or sending data. See [the lesson](#/lesson/8/what-is-a-syscall).",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you see the system calls of a command?",
+   "a": "`strace COMMAND` (add `-f` for children, `-o file` to save, `-p PID` to attach). `strace -c` summarises counts and times.",
+   "level": "beginner"
+  },
+  {
+   "q": "What does ENOENT mean and how do you find the file in strace?",
+   "a": "No such file or directory. Look for the failing `openat`/`stat` call: its first argument is the path. See [reading strace](#/lesson/8/reading-strace).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why is printf not a system call?",
+   "a": "It is a libc function that formats text into a user-space buffer and later calls `write`. Several printf calls can produce one write.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the vDSO and why does it exist?",
+   "a": "A small shared library the kernel maps into each process. It runs some read-only calls (clock_gettime, gettimeofday) in user space to avoid the cost of a mode switch. See [the lesson](#/lesson/8/syscall-cost-vdso).",
+   "level": "advanced"
+  },
+  {
+   "q": "How does strace work?",
+   "a": "It uses `ptrace` to stop the tracee at every system call entry and exit, reads registers, and prints the call. That is why it slows programs down.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "System call",
+   "def": "A request from a user-mode program to the kernel, made with a special CPU instruction.",
+   "lesson": "8/what-is-a-syscall"
+  },
+  {
+   "term": "User mode",
+   "def": "The CPU mode in which normal programs run, without direct hardware access.",
+   "lesson": "8/what-is-a-syscall"
+  },
+  {
+   "term": "Kernel mode",
+   "def": "The privileged CPU mode in which the kernel runs.",
+   "lesson": "8/what-is-a-syscall"
+  },
+  {
+   "term": "errno",
+   "def": "The error number set by a failed system call, for example ENOENT.",
+   "lesson": "8/reading-strace"
+  },
+  {
+   "term": "ptrace",
+   "def": "The system call that lets one process observe and control another. Debuggers and strace use it.",
+   "lesson": "8/reading-strace"
+  },
+  {
+   "term": "vDSO",
+   "def": "Kernel code mapped into every process so some calls run without entering the kernel.",
+   "lesson": "8/syscall-cost-vdso"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "strace COMMAND",
+   "desc": "Trace the system calls of COMMAND.",
+   "topic": "Tracing",
+   "lesson": "8/what-is-a-syscall"
+  },
+  {
+   "cmd": "strace -c COMMAND",
+   "desc": "Summarise system calls by count and time.",
+   "topic": "Tracing",
+   "lesson": "8/what-is-a-syscall"
+  },
+  {
+   "cmd": "strace -f -o FILE COMMAND",
+   "desc": "Trace children too and write to FILE.",
+   "topic": "Tracing",
+   "lesson": "8/reading-strace"
+  },
+  {
+   "cmd": "strace -e trace=openat COMMAND",
+   "desc": "Trace only file opens.",
+   "topic": "Tracing",
+   "lesson": "8/reading-strace"
+  },
+  {
+   "cmd": "strace -T -e trace=read COMMAND",
+   "desc": "Show the time spent in each call.",
+   "topic": "Tracing",
+   "lesson": "8/reading-strace"
+  },
+  {
+   "cmd": "strace -p PID",
+   "desc": "Attach to a running process.",
+   "topic": "Tracing",
+   "lesson": "8/reading-strace"
+  },
+  {
+   "cmd": "grep vdso /proc/self/maps",
+   "desc": "Show the vDSO mapping.",
+   "topic": "Tracing",
+   "lesson": "8/syscall-cost-vdso"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

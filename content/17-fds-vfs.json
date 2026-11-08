@@ -1,0 +1,541 @@
+{
+ "title": "File descriptors and the VFS",
+ "lessons": [
+  {
+   "id": "file-descriptors",
+   "title": "File descriptors: 0, 1, 2 and the rest",
+   "level": "beginner",
+   "goal": "Learn that an open file is a small number (a **file descriptor**) in each process, how to open and close descriptors in the shell, and how to see them in `/proc`.\n\nWhy it matters: sockets, pipes, files and devices are all descriptors. Redirections, `lsof` output, \"too many open files\" and deleted-but-open files all make sense once you know this.",
+   "setup": {
+    "note": "Use a scratch directory. A sample data file is created for the examples.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "printf 'alpha\\nbravo\\ndelta\\n' > data.txt"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A descriptor is an index",
+     "text": "When a program opens a file, the kernel returns a small number, the **file descriptor** (fd). The program uses that number in `read` and `write`. Every process starts with 0 (stdin), 1 (stdout) and 2 (stderr). `strace` shows the number returned by `openat`: the **lowest free** number, so 3.",
+     "run": [
+      {
+       "cmd": "strace -e trace=openat cat data.txt 2>&1 | grep data.txt",
+       "output": "openat(AT_FDCWD, \"data.txt\", O_RDONLY)  = 3"
+      }
+     ]
+    },
+    {
+     "title": "Open a descriptor in the shell",
+     "text": "`exec 3< FILE` opens FILE for reading as fd 3 in the current shell. `read -u 3` reads a line from it. The next read continues where the last stopped: the **offset** is stored with the open file.",
+     "run": [
+      {
+       "cmd": "exec 3< data.txt",
+       "output": ""
+      },
+      {
+       "cmd": "read -u 3 line; echo \"$line\"",
+       "output": "alpha"
+      },
+      {
+       "cmd": "read -u 3 line; echo \"$line\"",
+       "output": "bravo"
+      },
+      {
+       "cmd": "ls -l /proc/$$/fd/3 | awk '{print $9, $10, $11}'",
+       "output": "/proc/3467358/fd/3 -> /tmp/lab/data.txt"
+      }
+     ]
+    },
+    {
+     "title": "fdinfo shows the offset",
+     "text": "`/proc/PID/fdinfo/N` shows the current position (`pos`) and flags of descriptor N.",
+     "run": [
+      {
+       "cmd": "cat /proc/$$/fdinfo/3",
+       "output": "pos:\t12\nflags:\t0400000\nmnt_id:\t149\nino:\t18214081"
+      },
+      {
+       "cmd": "exec 3<&-; [ -e /proc/$$/fd/3 ] && echo 'fd 3 still open' || echo 'fd 3 is closed'",
+       "output": "fd 3 is closed"
+      }
+     ],
+     "after": "`pos: 12` = two lines of 6 bytes were read. `exec 3<&-` closes descriptor 3, so `/proc/PID/fd/3` is gone."
+    },
+    {
+     "title": "Open a descriptor for writing",
+     "text": "`exec 4> FILE` opens (and truncates) FILE as fd 4. `>&4` sends output there. This is the same mechanism as `> file`, kept open for several commands.",
+     "run": [
+      {
+       "cmd": "exec 4> out.txt; echo one >&4; echo two >&4; exec 4>&-; cat out.txt",
+       "output": "one\ntwo"
+      }
+     ]
+    },
+    {
+     "title": "Descriptors are not only files",
+     "text": "Pipes, sockets, terminals and devices are descriptors as well. The link in `/proc/PID/fd` shows what each one is. In a subshell with `/dev/null` open as fd 7:",
+     "run": [
+      {
+       "cmd": "bash -c 'exec 7<>/dev/null; ls -l /proc/$$/fd | awk \"NR>1 {print \\$9, \\$10, \\$11}\"' | sed 's/pipe:\\[[0-9]*\\]/pipe/'",
+       "output": "0 -> pipe\n1 -> pipe\n2 -> pipe\n7 -> /dev/null"
+      }
+     ],
+     "under": "Each process has a **file descriptor table**: an array whose entries point to kernel objects (open file descriptions). `open` picks the lowest free index. `close` frees it. `fork` copies the table, `exec` keeps it (unless the descriptor is marked close-on-exec), which is how redirections reach the new program."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What number does `open` return when only 0, 1 and 2 are in use?",
+     "options": [
+      "0",
+      "3",
+      "-1",
+      "The file size"
+     ],
+     "answer": 1,
+     "explain": "The lowest free descriptor: 3."
+    },
+    {
+     "q": "What does `exec 3< file` do in a shell?",
+     "options": [
+      "Runs file",
+      "Opens file as descriptor 3 in the current shell",
+      "Closes fd 3",
+      "Copies file"
+     ],
+     "answer": 1,
+     "explain": "It opens the descriptor and keeps it open."
+    },
+    {
+     "q": "Where can you see the position in an open file?",
+     "options": [
+      "/proc/PID/fdinfo/N",
+      "/etc/fdinfo",
+      "ls -l",
+      "df"
+     ],
+     "answer": 0,
+     "explain": "`pos:` in fdinfo."
+    },
+    {
+     "q": "What do 0, 1 and 2 stand for?",
+     "options": [
+      "stdin, stdout, stderr",
+      "read, write, exec",
+      "pipe, socket, file",
+      "user, group, other"
+     ],
+     "answer": 0,
+     "explain": "Standard input, output and error."
+    }
+   ],
+   "check": {
+    "scenario": "A script does `exec 3> log.txt` and later `echo done >&3`. A reader wonders why `lsof` shows the file open after the script's `cat` finished. What is happening?",
+    "answer": "The script's shell still holds descriptor 3 open until it exits or runs `exec 3>&-`. `cat` finishing does not close the shell's own descriptor. Close it explicitly when you are done."
+   }
+  },
+  {
+   "id": "too-many-open-files",
+   "title": "Limits: \"Too many open files\"",
+   "level": "intermediate",
+   "goal": "Learn the per-process and system-wide limits on open files, reproduce the error `Too many open files`, and learn how to look for leaks.\n\nWhy it matters: servers with many connections hit this limit (EMFILE) and start refusing clients. It is a top-five production error.",
+   "setup": {
+    "note": "Use a scratch directory. A sample data file is created for the examples.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "printf 'alpha\\nbravo\\ndelta\\n' > data.txt"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The soft and hard limit",
+     "text": "Each process has a **soft** limit (enforced) and a **hard** limit (the ceiling the soft limit may be raised to without root) for open files. `ulimit -n` shows the soft limit, `-Hn` the hard one.",
+     "run": [
+      {
+       "cmd": "ulimit -Sn; ulimit -Hn",
+       "output": "524288\n524288"
+      },
+      {
+       "cmd": "grep 'Max open files' /proc/$$/limits",
+       "output": "Max open files            524288               524288               files     "
+      }
+     ]
+    },
+    {
+     "title": "A program that opens files until it fails",
+     "text": "`fdhog.c` opens `/dev/null` in a loop and reports the error.",
+     "code": {
+      "file": "fdhog.c",
+      "lang": "c",
+      "src": "#include <errno.h>\n#include <fcntl.h>\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n\nint main(void) {\n    int n = 0;\n    for (;;) {\n        int fd = open(\"/dev/null\", O_RDONLY);\n        if (fd < 0) {\n            printf(\"opened %d files, then: %s (errno %d)\\n\", n, strerror(errno), errno);\n            return 1;\n        }\n        n++;\n    }\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o fdhog fdhog.c",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "Lower the limit and run it",
+     "text": "We lower the soft limit to 20 in a subshell. The program has 3 descriptors from the start (0, 1, 2), so it can open 17 more, and then `open` fails with **EMFILE**.",
+     "run": [
+      {
+       "cmd": "(ulimit -n 20; ./fdhog)",
+       "output": "opened 17 files, then: Too many open files (errno 24)"
+      },
+      {
+       "cmd": "(ulimit -n 100; ./fdhog)",
+       "output": "opened 97 files, then: Too many open files (errno 24)"
+      }
+     ],
+     "under": "The check is in the kernel: `open` allocates the lowest free fd number and fails with `EMFILE` if that number would be at or above `RLIMIT_NOFILE`. The error text is \"Too many open files\". There is also a system-wide table: `ENFILE` (\"Too many open files in system\") when `fs.file-max` is reached."
+    },
+    {
+     "title": "System-wide numbers",
+     "text": "`/proc/sys/fs/file-nr` has three numbers: allocated file handles, unused, and the system maximum (`fs.file-max`).",
+     "run": [
+      {
+       "cmd": "cat /proc/sys/fs/file-nr",
+       "output": "4256\t0\t9223372036854775807"
+      },
+      {
+       "cmd": "sysctl fs.file-max",
+       "output": "fs.file-max = 9223372036854775807"
+      }
+     ]
+    },
+    {
+     "title": "Look at a running process",
+     "text": "`/proc/PID/fd` has one entry per open descriptor, so counting entries shows usage. `prlimit` shows or changes limits of a running process.",
+     "run": [
+      {
+       "cmd": "ls /proc/$$/fd | wc -l",
+       "output": "6"
+      },
+      {
+       "cmd": "prlimit --pid $$ --nofile",
+       "output": "RESOURCE DESCRIPTION                SOFT   HARD UNITS\nNOFILE   max number of open files 524288 524288 files"
+      }
+     ]
+    },
+    {
+     "title": "Raise the limit for a service",
+     "text": "For a systemd service set `LimitNOFILE=65536` in the unit. For a login session set `nofile` in `/etc/security/limits.conf`. After a change restart the service and verify in `/proc/PID/limits`. Raising the limit hides a **leak** (descriptors never closed): if the count grows without bound, find the leak.",
+     "run": [
+      {
+       "cmd": "sleep 100 & p=$!; sudo prlimit --pid $p --nofile=4096:4096; grep 'Max open files' /proc/$p/limits; kill $p",
+       "output": "[1] 3467416\nMax open files            4096                 4096                 files     "
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What errno does `open` return when the per-process limit is reached?",
+     "options": [
+      "ENOENT",
+      "EMFILE",
+      "EACCES",
+      "ENOSPC"
+     ],
+     "answer": 1,
+     "explain": "EMFILE: Too many open files."
+    },
+    {
+     "q": "Which file shows a running process's limits?",
+     "options": [
+      "/proc/PID/limits",
+      "/etc/limits",
+      "/proc/PID/stat",
+      "/sys/limits"
+     ],
+     "answer": 0,
+     "explain": "/proc/PID/limits."
+    },
+    {
+     "q": "A server hits the limit again after you raised it tenfold. What should you check?",
+     "options": [
+      "Reboot",
+      "Whether descriptors leak (count grows over time)",
+      "Disk space",
+      "CPU"
+     ],
+     "answer": 1,
+     "explain": "A leak makes any limit too small eventually."
+    },
+    {
+     "q": "How do you set a higher limit for a systemd service?",
+     "options": [
+      "ulimit in the unit",
+      "LimitNOFILE= in the unit",
+      "sysctl fs.nr_open only",
+      "chmod"
+     ],
+     "answer": 1,
+     "explain": "LimitNOFILE=."
+    }
+   ],
+   "check": {
+    "scenario": "nginx logs `accept4() failed (24: Too many open files)` under load. Give the steps to fix and verify it.",
+    "answer": "Check the limit of the running master/worker: `cat /proc/PID/limits`, and count `ls /proc/PID/fd | wc -l`. Raise `worker_rlimit_nofile` in nginx and `LimitNOFILE=` in the systemd unit (and `fs.file-max` if the system limit is near). Restart, re-check `/proc/PID/limits`. If the count still climbs without load, look for a descriptor leak."
+   }
+  },
+  {
+   "id": "vfs-open-file-description",
+   "title": "The VFS and the open file description",
+   "level": "advanced",
+   "goal": "Learn the layers between a `read()` and the disk, and the difference between a descriptor, an open file description and an inode.\n\nWhy it matters: it explains why a forked child and its parent share a file offset, why two separate `open` calls do not, and how one interface works for ext4, xfs, NFS, `/proc` and sockets alike.",
+   "setup": {
+    "note": "Use a scratch directory. A sample data file is created for the examples.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "printf 'alpha\\nbravo\\ndelta\\n' > data.txt"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Three levels",
+     "text": "1. The **file descriptor** is an entry in a process's table.\n2. It points to an **open file description** (kernel `struct file`): the offset, the flags, and a pointer to the file's operations.\n3. That points to an **inode** (the file itself: size, owner, data location) found through a **dentry** (name).\n\nSeveral descriptors can point to one description (`dup`, `fork`). Several descriptions can point to one inode (two `open` calls).",
+     "run": [
+      {
+       "cmd": "stat -c 'inode %i, size %s bytes' data.txt",
+       "output": "inode 59768325, size 18 bytes"
+      },
+      {
+       "cmd": "exec 3< data.txt; lsof -a -d 3 -p $$ 2>/dev/null | awk 'NR==2 {print \"lsof shows inode (NODE):\", $(NF-1)}'; exec 3<&-",
+       "output": "lsof shows inode (NODE): 59768325"
+      }
+     ]
+    },
+    {
+     "title": "Sharing the offset: a test program",
+     "text": "The program opens the file once and forks: parent and child hold **the same description**, so they share one offset. Then it opens the file twice: two descriptions, two independent offsets.",
+     "code": {
+      "file": "fdshare.c",
+      "lang": "c",
+      "src": "#include <fcntl.h>\n#include <stdio.h>\n#include <sys/wait.h>\n#include <unistd.h>\n\nstatic void readsome(const char *who, int fd) {\n    char buf[7] = {0};\n    int n = read(fd, buf, 6);\n    if (n > 0 && buf[n - 1] == '\\n') buf[n - 1] = 0;\n    printf(\"%-8s read: %s\\n\", who, buf);\n}\n\nint main(void) {\n    puts(\"-- one open(), then fork: parent and child share the offset\");\n    fflush(stdout);                    /* an unflushed buffer would be copied into the child */\n    int fd = open(\"data.txt\", O_RDONLY);\n    if (fork() == 0) {\n        readsome(\"child\", fd);\n        return 0;\n    }\n    wait(NULL);\n    readsome(\"parent\", fd);\n    close(fd);\n\n    puts(\"-- two separate open() calls: independent offsets\");\n    int a = open(\"data.txt\", O_RDONLY), b = open(\"data.txt\", O_RDONLY);\n    readsome(\"fd a\", a);\n    readsome(\"fd b\", b);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o fdshare fdshare.c",
+       "output": ""
+      },
+      {
+       "cmd": "./fdshare",
+       "output": "-- one open(), then fork: parent and child share the offset\nchild    read: alpha\nparent   read: bravo\n-- two separate open() calls: independent offsets\nfd a     read: alpha\nfd b     read: alpha"
+      }
+     ],
+     "after": "The child read `alpha`, then the parent continued with `bravo`. With two `open` calls both descriptors started at the beginning."
+    },
+    {
+     "title": "dup shares a description too",
+     "text": "`exec 4<&3` duplicates descriptor 3 as 4. Reading from either moves the same offset.",
+     "run": [
+      {
+       "cmd": "exec 3< data.txt; exec 4<&3",
+       "output": ""
+      },
+      {
+       "cmd": "read -u 3 a; read -u 4 b; echo \"$a $b\"",
+       "output": "alpha bravo"
+      },
+      {
+       "cmd": "grep pos /proc/$$/fdinfo/3 /proc/$$/fdinfo/4 | sed 's#/proc/[0-9]*/fdinfo/##'",
+       "output": "3:pos:\t12\n4:pos:\t12"
+      },
+      {
+       "cmd": "exec 3<&- 4<&-",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "The VFS: one interface, many file systems",
+     "text": "The **Virtual File System** is the kernel layer that defines the common objects (superblock, inode, dentry, file) and a table of operations for each (`read`, `write`, `open`, `lookup`...). Each file system (xfs, ext4, NFS, procfs) fills in its own table. A `read()` on any descriptor calls the `read` entry of that file's table.",
+     "run": [
+      {
+       "cmd": "grep -v nodev /proc/filesystems | head -n 3 | tr -d '\\t'",
+       "output": "ext3\next4\nzonefs"
+      },
+      {
+       "cmd": "grep -c nodev /proc/filesystems",
+       "output": "27"
+      }
+     ],
+     "under": "The path walk is the part you see in `strace` as a single `openat`. The kernel splits the path, finds each component in the **dentry cache** (or asks the file system's `lookup`), crosses mount points, checks permissions on each directory, and finally creates a `struct file`. Cached dentries make repeated opens fast; negative dentries remember names that do not exist."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which object stores the current read/write offset?",
+     "options": [
+      "The inode",
+      "The open file description",
+      "The directory",
+      "The superblock"
+     ],
+     "answer": 1,
+     "explain": "It is per open file description."
+    },
+    {
+     "q": "After `fork`, parent and child both read from a descriptor opened before. Do they share the offset?",
+     "options": [
+      "No",
+      "Yes: they share one open file description",
+      "Only for writes",
+      "Only as root"
+     ],
+     "answer": 1,
+     "explain": "The program showed `alpha` then `bravo`."
+    },
+    {
+     "q": "What does the VFS do?",
+     "options": [
+      "Stores data on disk",
+      "Provides a common interface that each file system implements",
+      "Encrypts files",
+      "Mounts devices"
+     ],
+     "answer": 1,
+     "explain": "A uniform set of objects and operations."
+    },
+    {
+     "q": "Two separate `open()` calls on one file give...",
+     "options": [
+      "One description",
+      "Two descriptions with independent offsets",
+      "An error",
+      "A copy of the file"
+     ],
+     "answer": 1,
+     "explain": "Each open creates its own description."
+    }
+   ],
+   "check": {
+    "scenario": "Two processes append log lines to the same file and sometimes lines are interleaved or overwritten. Which open flag makes appends safe and why?",
+    "answer": "`O_APPEND`: the kernel moves the offset to the end **and** writes atomically for each `write()`. Without it, each process uses its own offset and may overwrite the other's data. (Shared descriptors via fork share one offset, but separate `open` calls do not.) Keep each log record in a single `write()` call."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is a file descriptor?",
+   "a": "A small integer index into a process's table of open files. 0, 1, 2 are stdin, stdout, stderr. See [the lesson](#/lesson/17/file-descriptors).",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you diagnose `Too many open files`?",
+   "a": "Check `/proc/PID/limits`, count `/proc/PID/fd`, compare with the limit, raise `LimitNOFILE`/`nofile` and look for a descriptor leak (`lsof -p PID`). See [the lesson](#/lesson/17/too-many-open-files).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the difference between EMFILE and ENFILE?",
+   "a": "EMFILE: the process reached its own limit. ENFILE: the system-wide file table (`fs.file-max`) is full.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Do a parent and a forked child share file offsets?",
+   "a": "Yes for descriptors opened before the fork: they share the open file description. Files opened separately have independent offsets. See [the lesson](#/lesson/17/vfs-open-file-description).",
+   "level": "advanced"
+  },
+  {
+   "q": "What is the VFS?",
+   "a": "The kernel's virtual file system layer: common objects (inode, dentry, file, superblock) and operation tables implemented by each file system, so `read`/`write` work the same everywhere.",
+   "level": "advanced"
+  },
+  {
+   "q": "Why does a redirection survive `exec`?",
+   "a": "File descriptors are inherited across `execve` unless marked close-on-exec. The shell sets the descriptors before it execs the program.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "File descriptor",
+   "def": "A small integer that identifies an open file, pipe or socket within a process.",
+   "lesson": "17/file-descriptors"
+  },
+  {
+   "term": "EMFILE",
+   "def": "Error: the process has too many open files.",
+   "lesson": "17/too-many-open-files"
+  },
+  {
+   "term": "RLIMIT_NOFILE",
+   "def": "The per-process limit on open file descriptors.",
+   "lesson": "17/too-many-open-files"
+  },
+  {
+   "term": "Open file description",
+   "def": "The kernel object that holds the offset and flags of an open file; shared by dup and fork.",
+   "lesson": "17/vfs-open-file-description"
+  },
+  {
+   "term": "Inode",
+   "def": "The file system object that stores a file's metadata and data location.",
+   "lesson": "17/vfs-open-file-description"
+  },
+  {
+   "term": "VFS",
+   "def": "Virtual File System: the kernel layer that gives all file systems one interface.",
+   "lesson": "17/vfs-open-file-description"
+  },
+  {
+   "term": "dentry",
+   "def": "A cached directory entry that maps a name to an inode.",
+   "lesson": "17/vfs-open-file-description"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ls -l /proc/PID/fd",
+   "desc": "List the open descriptors of a process.",
+   "topic": "Files",
+   "lesson": "17/file-descriptors"
+  },
+  {
+   "cmd": "cat /proc/PID/fdinfo/N",
+   "desc": "Show offset and flags of descriptor N.",
+   "topic": "Files",
+   "lesson": "17/file-descriptors"
+  },
+  {
+   "cmd": "exec 3< FILE",
+   "desc": "Open FILE as fd 3 in the shell.",
+   "topic": "Files",
+   "lesson": "17/file-descriptors"
+  },
+  {
+   "cmd": "exec 3<&-",
+   "desc": "Close fd 3.",
+   "topic": "Files",
+   "lesson": "17/file-descriptors"
+  },
+  {
+   "cmd": "ulimit -n",
+   "desc": "Show the open-file limit of the shell.",
+   "topic": "Files",
+   "lesson": "17/too-many-open-files"
+  },
+  {
+   "cmd": "prlimit --pid PID --nofile",
+   "desc": "Show or set the open-file limit of a process.",
+   "topic": "Files",
+   "lesson": "17/too-many-open-files"
+  },
+  {
+   "cmd": "lsof -p PID",
+   "desc": "List open files of a process.",
+   "topic": "Files",
+   "lesson": "17/too-many-open-files"
+  },
+  {
+   "cmd": "cat /proc/sys/fs/file-nr",
+   "desc": "Show system-wide file handle counts.",
+   "topic": "Files",
+   "lesson": "17/too-many-open-files"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

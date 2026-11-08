@@ -1,0 +1,368 @@
+{
+ "title": "CPU performance",
+ "lessons": [
+  {
+   "id": "top-mpstat-pidstat",
+   "title": "CPU tools: top, mpstat, pidstat, vmstat",
+   "level": "intermediate",
+   "goal": "Read the CPU time breakdown (user, system, idle, iowait, steal), find which process uses it, and tell CPU-bound from I/O-bound work.\n\nWhy it matters: `top` is on every machine, but its numbers have meanings you must know: 100% `us` is a different problem from 100% `sy` or high `wa`.",
+   "setup": {
+    "note": "Programs are small C files (gcc needed). perf, sysstat (mpstat, pidstat) are used; install with `dnf install perf sysstat`.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The CPU time categories",
+     "text": "The kernel accounts every tick to one category: **us** user code, **sy** kernel code (system calls, interrupts handling), **ni** niced user code, **id** idle, **wa** idle while tasks wait for I/O, **hi/si** hardware/software interrupts, **st** *steal*: time the hypervisor gave to another VM. High `st` on a virtual machine means the host is overcommitted.",
+     "run": [
+      {
+       "cmd": "top -b -n 1 | sed -n '3p' | sed 's/^%Cpu(s): //'",
+       "output": "38.1 us, 19.0 sy,  0.0 ni,  0.0 id, 23.8 wa,  4.8 hi,  4.8 si,  9.5 st"
+      },
+      {
+       "cmd": "grep '^cpu ' /proc/stat | awk '{print \"counters since boot (ticks): user\", $2, \"system\", $4, \"idle\", $5, \"iowait\", $6, \"steal\", $9}'",
+       "output": "counters since boot (ticks): user 23818675 system 11233397 idle 332031576 iowait 30180154 steal 7560729"
+      }
+     ]
+    },
+    {
+     "title": "A process using CPU",
+     "text": "We start a busy loop and look at it with `top -b -n 1 -p PID` (batch mode, one iteration, one process). `%CPU` is the share of one CPU.",
+     "run": [
+      {
+       "cmd": "sh -c 'while :; do :; done' & echo $! > busy.pid; sleep 2; top -b -n 1 -p $(cat busy.pid) | tail -n 2 | awk 'NR==1 {print $1, $9, $10, $12} NR==2 {print $1, $9, $10, $12}'",
+       "output": "[1] 423032\nPID %CPU %MEM COMMAND\n423032 46.7 0.3 sh"
+      }
+     ]
+    },
+    {
+     "title": "Per-CPU with mpstat",
+     "text": "`mpstat -P ALL 1 1` shows each CPU separately. One saturated CPU with others idle means a single-threaded bottleneck (the average hides it).",
+     "run": [
+      {
+       "cmd": "mpstat -P ALL 1 1 | awk '/CPU/ && /%usr/ {print \"CPU %usr %sys %iowait %steal %idle\"} /^Average|^[0-9:]+ +(all|[0-9]+) / && NF>=12 {print $3, $4, $6, $7, $9, $NF}' | tail -n 3",
+       "output": "%usr %nice %iowait %irq %steal %idle\n67.33 0.00 0.00 1.98 14.85 0.00\n67.33 0.00 0.00 1.98 14.85 0.00"
+      }
+     ]
+    },
+    {
+     "title": "Per-process with pidstat",
+     "text": "`pidstat -u -p PID 1 2` samples one process: `%usr`, `%system` and `%CPU`. `pidstat -w` adds context switches: **voluntary** (the task blocked) and **non-voluntary** (the scheduler preempted it, a sign of CPU competition).",
+     "run": [
+      {
+       "cmd": "pidstat -u -p $(cat busy.pid) 1 2 | awk '/Average/ {print \"avg %usr\", $4, \"%system\", $5, \"%CPU\", $8}'",
+       "output": "avg %usr 58.00 %system 0.50 %CPU 58.50"
+      },
+      {
+       "cmd": "pidstat -w -p $(cat busy.pid) 1 2 | awk '/Average/ {print \"cswch/s\", $4, \"nvcswch/s\", $5}'",
+       "output": "cswch/s 0.00 nvcswch/s 940.50"
+      }
+     ]
+    },
+    {
+     "title": "Is it CPU-bound or I/O-bound?",
+     "text": "A CPU-bound task shows high `%usr` and few voluntary switches. An I/O-bound task shows low CPU, many voluntary switches and `wa` in the system line. Compare with a task that mostly sleeps:",
+     "run": [
+      {
+       "cmd": "kill $(cat busy.pid); sh -c 'while :; do sleep 0.01; done' & echo $! > sleepy.pid; sleep 1; pidstat -u -w -p $(cat sleepy.pid) 1 2 | awk '/Average/ && $4 ~ /^[0-9.]+$/ {print $0}' | awk '{print $4, $5, $8}' | tr '\\n' ' '; echo; kill $(cat sleepy.pid)",
+       "output": "[2] 423417\n0.00 1.50 1.50 84.50 46.00  "
+      }
+     ],
+     "under": "`top` and `mpstat` read `/proc/stat` (system-wide ticks) and `/proc/PID/stat` (`utime`, `stime` per process) twice and compute the difference. Accounting in ticks (usually 100 per second) is statistical: a task that runs for 1 ms between two ticks may be charged for none or for a whole tick. For precise per-event data use `perf`."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does a high `st` (steal) value in a VM mean?",
+     "options": [
+      "The disk is busy",
+      "The hypervisor gave CPU time to other guests",
+      "A process is stealing memory",
+      "Swap is in use"
+     ],
+     "answer": 1,
+     "explain": "The VM wanted CPU but the host was busy."
+    },
+    {
+     "q": "One CPU is at 100% and seven are idle. `top` shows 12% for the whole machine. What does this suggest?",
+     "options": [
+      "Everything is fine",
+      "A single-threaded bottleneck",
+      "A memory leak",
+      "Disk I/O"
+     ],
+     "answer": 1,
+     "explain": "Look per CPU with mpstat -P ALL."
+    },
+    {
+     "q": "Non-voluntary context switches rising mean...",
+     "options": [
+      "The task blocks often",
+      "The scheduler preempts the task: CPU competition",
+      "Swap",
+      "A signal"
+     ],
+     "answer": 1,
+     "explain": "The task was forced off the CPU."
+    },
+    {
+     "q": "Which tool samples one process's CPU use every second?",
+     "options": [
+      "pidstat -u -p PID 1",
+      "free",
+      "ss",
+      "df"
+     ],
+     "answer": 0,
+     "explain": "pidstat."
+    }
+   ],
+   "check": {
+    "scenario": "`top` shows `%Cpu: 5 us, 3 sy, 0 id, 92 wa`. What is the machine doing and what do you check next?",
+    "answer": "It is almost entirely waiting for I/O (`wa`), not computing. Check `iostat -x 1` for the busy device (`%util`, `await`), `ps -eo pid,stat,wchan,comm | awk '$2 ~ /^D/'` for the waiting tasks, `iotop`/`pidstat -d` for who generates the I/O, and storage or NFS health."
+   }
+  },
+  {
+   "id": "perf-stat-record",
+   "title": "perf: counting and profiling where the CPU time goes",
+   "level": "advanced",
+   "goal": "Use `perf stat` to count events and `perf record`/`perf report` to find the function that burns the CPU.\n\nWhy it matters: `top` tells you *which process*; `perf` tells you *which function*. It is the standard tool for \"why is this program slow\" on Linux, without changing the program.",
+   "setup": {
+    "note": "Programs are small C files (gcc needed). perf, sysstat (mpstat, pidstat) are used; install with `dnf install perf sysstat`.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A program with a hot spot",
+     "text": "`hot.c` runs two functions: `heavy` (square root and sine) and `light` (a simple sum). One of them takes almost all the time. Compile with `-g` and keep frame pointers so call chains work.",
+     "code": {
+      "file": "hot.c",
+      "lang": "c",
+      "src": "#include <math.h>\n#include <stdio.h>\n\nstatic double heavy(long n) {\n    double s = 0;\n    for (long i = 1; i <= n; i++)\n        s += sqrt((double)i) * sin((double)i);\n    return s;\n}\n\nstatic double light(long n) {\n    double s = 0;\n    for (long i = 1; i <= n; i++)\n        s += i * 0.5;\n    return s;\n}\n\nint main(void) {\n    double t = 0;\n    for (int r = 0; r < 30; r++) {\n        t += heavy(1500000);\n        t += light(1500000);\n    }\n    printf(\"%f\\n\", t);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -O1 -g -fno-omit-frame-pointer -o hot hot.c -lm",
+       "output": ""
+      },
+      {
+       "cmd": "{ TIMEFORMAT='%R s'; time ./hot > /dev/null; } 2>&1",
+       "output": "1.326 s"
+      }
+     ]
+    },
+    {
+     "title": "perf stat: count events",
+     "text": "`perf stat` runs the command and prints counters: `task-clock` (CPU time), context switches, migrations, page faults, and (if the hardware allows) CPU cycles and instructions. A VM may not expose hardware counters; software ones always work.",
+     "run": [
+      {
+       "cmd": "perf stat -e task-clock,context-switches,cpu-migrations,page-faults ./hot 2>&1 >/dev/null | grep -E 'task-clock|context|migr|faults' | sed -E 's/ +/ /g; s/#.*//'",
+       "output": " 854.46 msec task-clock:u \n 0 context-switches:u \n 0 cpu-migrations:u \n 57 page-faults:u "
+      }
+     ]
+    },
+    {
+     "title": "perf record: sample the program",
+     "text": "`perf record -F 499 -g` interrupts the program 499 times per second, and each time stores the **instruction pointer** and the **call chain**. Functions that run longer are sampled more often. The samples go to `perf.data`.",
+     "run": [
+      {
+       "cmd": "perf record -q -F 499 -g -o perf.data ./hot > /dev/null 2>&1; ls -s perf.data | awk '{print \"perf.data written\"}'",
+       "output": "perf.data written"
+      }
+     ]
+    },
+    {
+     "title": "perf report: the answer",
+     "text": "`perf report --no-children` lists functions by their **own** share of samples. The hot function is at the top. `--stdio` prints text instead of the interactive screen.",
+     "run": [
+      {
+       "cmd": "perf report -i perf.data --stdio --no-children --percent-limit 2 2>/dev/null | grep -E '^ +[0-9.]+%' | awk '{print $1, $2, $5}'",
+       "output": "86.78% hot sinf32x\n12.72% hot main"
+      }
+     ],
+     "after": "Almost all samples fall in `sinf32x`, the libm sine function called from `heavy`. `light` is hardly visible. Without the profiler we might have optimised the wrong function."
+    },
+    {
+     "title": "Who calls it?",
+     "text": "With call graphs (`-g`), the report also shows the chain of callers. `perf annotate` goes further and shows the hot instructions. For a running process use `perf top -p PID` or `perf record -p PID -- sleep 10`.",
+     "run": [
+      {
+       "cmd": "perf report -i perf.data --stdio --no-children --percent-limit 20 -G 2>/dev/null | grep -E 'main|sinf32x|heavy' | head -n 3 | sed -E 's/^[ |-]+//' | cut -c1-60",
+       "output": "86.78%  hot      libm.so.6              [.] sinf32x\n__libc_start_main@@GLIBC_2.34\n__libc_start_call_main"
+      }
+     ],
+     "under": "perf uses the kernel's `perf_event_open` system call. The sampling interrupt comes from a **hardware performance counter** overflowing (cycles) or from a timer (`cpu-clock`) when counters are not available, as on many VMs. The kernel stores samples in a lock-free ring buffer shared with the `perf` process. Flame graphs (Brendan Gregg) draw the same data as a stack-based picture: wide boxes are hot."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `perf record -g` add compared to plain `perf record`?",
+     "options": [
+      "Graphs of memory",
+      "Call chains for each sample",
+      "A GUI",
+      "Root access"
+     ],
+     "answer": 1,
+     "explain": "It records stacks."
+    },
+    {
+     "q": "What does `perf stat` give you?",
+     "options": [
+      "A profile by function",
+      "Counts of events for a whole run",
+      "Memory leaks",
+      "Network traces"
+     ],
+     "answer": 1,
+     "explain": "Totals such as task-clock and context-switches."
+    },
+    {
+     "q": "Why compile with -fno-omit-frame-pointer for profiling?",
+     "options": [
+      "Speed",
+      "So call chains can be unwound reliably",
+      "Security",
+      "Smaller binary"
+     ],
+     "answer": 1,
+     "explain": "Frame pointers let perf walk the stack."
+    },
+    {
+     "q": "Hardware counters are not available in a VM. What does perf use for sampling?",
+     "options": [
+      "Nothing",
+      "A software timer event (cpu-clock)",
+      "The disk",
+      "ptrace"
+     ],
+     "answer": 1,
+     "explain": "Timer-based sampling."
+    }
+   ],
+   "check": {
+    "scenario": "A service uses 80% CPU in production, you cannot restart it and you have no source. How do you find the hot function?",
+    "answer": "`sudo perf record -F 99 -g -p PID -- sleep 30`, then `perf report --stdio --no-children | head -50` (or generate a flame graph). Symbols need debug info or at least unstripped binaries; for JIT languages use their perf map support. Sampling at 99 Hz has negligible overhead, so it is safe in production."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What do us, sy, id, wa and st mean in top?",
+   "a": "User time, kernel time, idle, idle while waiting for I/O, and steal (CPU time taken by the hypervisor for other VMs). See [the lesson](#/lesson/42/top-mpstat-pidstat).",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you find a single-threaded bottleneck?",
+   "a": "`mpstat -P ALL 1` shows one CPU at 100% while the average is low; `pidstat -t` or `top -H` shows the busy thread.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What are voluntary and non-voluntary context switches?",
+   "a": "Voluntary: the task blocked (I/O, lock, sleep). Non-voluntary: the scheduler preempted it, typically because other tasks wanted the CPU.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you profile a running process without restarting it?",
+   "a": "`perf record -F 99 -g -p PID -- sleep 30` then `perf report`, or `perf top -p PID`. See [the lesson](#/lesson/42/perf-stat-record).",
+   "level": "advanced"
+  },
+  {
+   "q": "Difference between perf stat and perf record?",
+   "a": "stat counts events over the whole run; record samples the instruction pointer and call stack to attribute time to functions.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is a flame graph?",
+   "a": "A visualisation of sampled stacks where box width is the share of samples; wide boxes at the top are the hot functions.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "steal time",
+   "def": "CPU time a VM wanted but the hypervisor gave to others (st).",
+   "lesson": "42/top-mpstat-pidstat"
+  },
+  {
+   "term": "Context switch",
+   "def": "The kernel stops one task and runs another on a CPU.",
+   "lesson": "42/top-mpstat-pidstat"
+  },
+  {
+   "term": "perf",
+   "def": "The Linux profiling and tracing tool built on perf_event_open.",
+   "lesson": "42/perf-stat-record"
+  },
+  {
+   "term": "Sampling profiler",
+   "def": "A profiler that records where the CPU is at regular intervals.",
+   "lesson": "42/perf-stat-record"
+  },
+  {
+   "term": "Call chain",
+   "def": "The stack of functions that led to a sampled instruction.",
+   "lesson": "42/perf-stat-record"
+  },
+  {
+   "term": "Flame graph",
+   "def": "A picture of sampled stacks where width shows time share.",
+   "lesson": "42/perf-stat-record"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "top -b -n 1",
+   "desc": "One snapshot of top in batch mode.",
+   "topic": "Performance",
+   "lesson": "42/top-mpstat-pidstat"
+  },
+  {
+   "cmd": "mpstat -P ALL 1",
+   "desc": "Per-CPU breakdown each second.",
+   "topic": "Performance",
+   "lesson": "42/top-mpstat-pidstat"
+  },
+  {
+   "cmd": "pidstat -u -w -p PID 1",
+   "desc": "CPU and context switches of a process.",
+   "topic": "Performance",
+   "lesson": "42/top-mpstat-pidstat"
+  },
+  {
+   "cmd": "vmstat 1",
+   "desc": "System-wide summary each second.",
+   "topic": "Performance",
+   "lesson": "42/top-mpstat-pidstat"
+  },
+  {
+   "cmd": "perf stat CMD",
+   "desc": "Count CPU events of a run.",
+   "topic": "Performance",
+   "lesson": "42/perf-stat-record"
+  },
+  {
+   "cmd": "perf record -F 99 -g -p PID -- sleep 30",
+   "desc": "Sample a running process.",
+   "topic": "Performance",
+   "lesson": "42/perf-stat-record"
+  },
+  {
+   "cmd": "perf report --stdio --no-children",
+   "desc": "Show where samples fell.",
+   "topic": "Performance",
+   "lesson": "42/perf-stat-record"
+  },
+  {
+   "cmd": "perf top",
+   "desc": "Live view of the hottest functions.",
+   "topic": "Performance",
+   "lesson": "42/perf-stat-record"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

@@ -1,0 +1,450 @@
+{
+ "title": "NFS, iSCSI and network storage",
+ "lessons": [
+  {
+   "id": "nfs-loopback",
+   "title": "NFS: a network file system, server and client",
+   "level": "intermediate",
+   "goal": "Export a directory with NFS, mount it, use it, and see how users and permissions behave across the network mount.\n\nWhy it matters: NFS is the standard way to share files between Linux servers (home directories, shared data, container volumes). Its failure modes (hangs, stale handles, root squashing) show up in incidents.",
+   "setup": {
+    "note": "This lesson runs an NFS server and client **on the same machine**, bound to nothing but your own firewall's allowed ports (only ssh here). Use a throwaway machine. Needs `nfs-utils`.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo umount /tmp/lab/nfs 2>/dev/null; sudo systemctl stop nfs-server 2>/dev/null; sudo rm -rf /srv/lab-nfs /etc/exports.d/lab.exports; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "What NFS is",
+     "text": "**NFS** (Network File System) shares a directory over the network as a **file system**: the client mounts it, and programs use normal file calls. The server decides who may mount it (`/etc/exports`). NFSv4 uses one TCP port (2049). We run both sides here.",
+     "run": [
+      {
+       "cmd": "rpm -q nfs-utils | sed 's/-[0-9].*//'",
+       "output": "nfs-utils"
+      },
+      {
+       "cmd": "grep -c nfs /proc/filesystems",
+       "output": "3"
+      }
+     ]
+    },
+    {
+     "title": "Server: create a directory and export it",
+     "text": "Each line of `/etc/exports` names a directory, the clients allowed, and options. `rw` read-write, `sync` reply after data is on disk, `root_squash` (default) maps the client's root to an unprivileged user. Only `127.0.0.1` may mount this export.",
+     "run": [
+      {
+       "cmd": "sudo mkdir -p /srv/lab-nfs; echo 'hello from the server' | sudo tee /srv/lab-nfs/hello.txt > /dev/null; sudo chown $(id -un): /srv/lab-nfs",
+       "output": ""
+      },
+      {
+       "cmd": "echo '/srv/lab-nfs 127.0.0.1(rw,sync,no_subtree_check)' | sudo tee /etc/exports.d/lab.exports",
+       "output": "/srv/lab-nfs 127.0.0.1(rw,sync,no_subtree_check)"
+      },
+      {
+       "cmd": "sudo systemctl start nfs-server; sudo exportfs -v | tr -s ' \\t' ' '",
+       "output": "/srv/lab-nfs 127.0.0.1(sync,wdelay,hide,no_subtree_check,sec=sys,rw,secure,root_squash,no_all_squash)"
+      }
+     ]
+    },
+    {
+     "title": "Client: mount it",
+     "text": "`mount -t nfs4 SERVER:/path DIR`. The options in effect show what was negotiated: protocol version, `hard` (retry forever), transfer sizes, and the security flavour `sys` (trust the UID the client sends).",
+     "run": [
+      {
+       "cmd": "sudo mkdir -p /tmp/lab/nfs && sudo mount -t nfs4 127.0.0.1:/srv/lab-nfs /tmp/lab/nfs",
+       "output": ""
+      },
+      {
+       "cmd": "findmnt -no FSTYPE,SOURCE /tmp/lab/nfs",
+       "output": "nfs4   127.0.0.1:/srv/lab-nfs"
+      },
+      {
+       "cmd": "findmnt -no OPTIONS /tmp/lab/nfs | tr ',' '\\n' | grep -E '^(vers|hard|proto|sec|rsize)' | tr '\\n' ' '; echo",
+       "output": "vers=4.2 rsize=1048576 hard proto=tcp sec=sys "
+      }
+     ]
+    },
+    {
+     "title": "Use it like a local directory",
+     "text": "Reads and writes go over the network. File owners are sent as **numbers**: `opc` has the same UID on both sides, so ownership matches. If UIDs differ between machines, files appear owned by the wrong user (NFSv4 also maps names with `idmapd`).",
+     "run": [
+      {
+       "cmd": "cat /tmp/lab/nfs/hello.txt",
+       "output": "hello from the server"
+      },
+      {
+       "cmd": "echo 'written by the client' > /tmp/lab/nfs/new.txt; ls -l /srv/lab-nfs | awk 'NR>1 {print $3, $9}'",
+       "output": "root hello.txt\nopc new.txt"
+      }
+     ]
+    },
+    {
+     "title": "root_squash",
+     "text": "On the server, remote **root is not trusted**: it is mapped to `nobody`. So root on the client cannot write into a directory owned by another user, even though `sudo` works locally.",
+     "run": [
+      {
+       "cmd": "sudo touch /tmp/lab/nfs/by-root 2>&1",
+       "output": "touch: cannot touch '/tmp/lab/nfs/by-root': Permission denied"
+      }
+     ],
+     "after": "`Permission denied` for root is the point of `root_squash`. `no_root_squash` disables it and should be avoided."
+    },
+    {
+     "title": "Where the kernel shows it",
+     "text": "The NFS client keeps a table of servers. A **hard** mount (the default) makes processes wait forever if the server is down; they sit in uninterruptible sleep (`D`), the most common cause of \"load average high, CPU idle\" on NFS clients. A **soft** mount returns errors after a timeout but can corrupt data on writes.",
+     "run": [
+      {
+       "cmd": "cat /proc/fs/nfsfs/servers | awk '{print $1, $4, $5}'",
+       "output": "NV USE HOSTNAME\nv4 1 127.0.0.1"
+      },
+      {
+       "cmd": "systemctl stop nfs-server; ls /tmp/lab/nfs",
+       "explanationOnly": true,
+       "reason": "this would hang the shell in D state with a hard mount"
+      }
+     ],
+     "under": "NFS is **stateless by design** in v2/v3 (each request is self-contained, identified by a file handle) and stateful in v4 (open files, locks and delegations tracked with leases). A **stale file handle** error means the client holds a handle for a file the server no longer has (deleted, or the export changed)."
+    },
+    {
+     "title": "Clean up",
+     "text": "Unmount on the client, then un-export and stop the server.",
+     "run": [
+      {
+       "cmd": "sudo umount /tmp/lab/nfs; sudo exportfs -ua; sudo systemctl stop nfs-server; sudo rm -rf /etc/exports.d/lab.exports /srv/lab-nfs; echo cleaned",
+       "output": "cleaned"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does NFS share?",
+     "options": [
+      "Raw disks",
+      "Directories, as a file system",
+      "Printers",
+      "Memory"
+     ],
+     "answer": 1,
+     "explain": "NFS is file-level sharing."
+    },
+    {
+     "q": "What does root_squash do?",
+     "options": [
+      "Compresses root's files",
+      "Maps the client's root to an unprivileged user",
+      "Blocks root logins",
+      "Hides root's files"
+     ],
+     "answer": 1,
+     "explain": "Remote root is not trusted."
+    },
+    {
+     "q": "What happens to a process using a hard-mounted NFS file when the server dies?",
+     "options": [
+      "It gets an error at once",
+      "It waits (state D) until the server returns",
+      "It is killed",
+      "The mount disappears"
+     ],
+     "answer": 1,
+     "explain": "Hard mounts retry forever."
+    },
+    {
+     "q": "Which port does NFSv4 use?",
+     "options": [
+      "111",
+      "2049",
+      "3260",
+      "445"
+     ],
+     "answer": 1,
+     "explain": "TCP 2049."
+    }
+   ],
+   "check": {
+    "scenario": "Load average on an application server jumps to 80 with the CPU idle, right after a storage maintenance window. Where do you look?",
+    "answer": "At processes in `D` state (`ps -eo pid,stat,wchan:30,comm | awk '$2 ~ /^D/'`) waiting in `nfs_*` or `rpc_*` functions, and at `mount | grep nfs` for hard mounts. The NFS server or network path is probably down or slow. Fix the server side; do not reboot the clients first. For new mounts consider `soft,timeo=,retrans=` only for read-only data, and use `intr`-safe tools."
+   }
+  },
+  {
+   "id": "iscsi-loopback",
+   "title": "iSCSI: a network block device, target and initiator",
+   "level": "advanced",
+   "goal": "Build an iSCSI target, log in with an initiator, and use the result as a local disk.\n\nWhy it matters: iSCSI is how many SANs and cloud block volumes are attached. You will meet its vocabulary (target, initiator, IQN, LUN, portal) in storage and virtualization.",
+   "setup": {
+    "note": "This lesson runs an iSCSI **target** and **initiator** on the same machine, with the portal bound to 127.0.0.1 only. Needs `targetcli` and `iscsi-initiator-utils`. Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo iscsiadm -m node -u 2>/dev/null; sudo iscsiadm -m node -o delete 2>/dev/null; sudo targetcli clearconfig confirm=True >/dev/null 2>&1; sudo rm -f /var/tmp/lab-iscsi.img; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Block versus file sharing",
+     "text": "**NFS** shares a *file system*; the server owns the files. **iSCSI** shares a *block device*: the client gets a raw disk over the network (SCSI commands over TCP) and puts its **own** file system on it. Only one client at a time should mount an ordinary file system on it.\n\nTerms: the **target** exports storage, the **initiator** uses it, an **IQN** is a unique name (`iqn.YEAR-MM.reversed-domain:name`), a **LUN** is one exported volume, the **portal** is the address and port (3260).",
+     "run": [
+      {
+       "cmd": "sudo truncate -s 64M /var/tmp/lab-iscsi.img; ls -l /var/tmp/lab-iscsi.img | awk '{print $5, \"bytes\"}'",
+       "output": "67108864 bytes"
+      }
+     ]
+    },
+    {
+     "title": "Target: create a file-backed volume",
+     "text": "`targetcli` (LIO, the kernel's iSCSI target) builds the configuration as a tree. We use a file as the backing store, create a target, bind its portal to the loopback address only, expose the volume as LUN 0 and let any initiator log in (a lab shortcut: use authentication in real life).",
+     "run": [
+      {
+       "cmd": "sudo targetcli /backstores/fileio create name=lab0 file_or_dev=/var/tmp/lab-iscsi.img 2>&1 | tail -n 1",
+       "output": "Created fileio lab0 with size 67108864"
+      },
+      {
+       "cmd": "sudo targetcli /iscsi create iqn.2026-11.com.example:lab 2>&1 | tail -n 1",
+       "output": "Created default portal listening on all IPs (0.0.0.0), port 3260."
+      },
+      {
+       "cmd": "sudo targetcli /iscsi/iqn.2026-11.com.example:lab/tpg1/portals delete 0.0.0.0 3260 2>&1 | tail -n 1; sudo targetcli /iscsi/iqn.2026-11.com.example:lab/tpg1/portals create 127.0.0.1 3260 2>&1 | tail -n 1",
+       "output": "Deleted network portal 0.0.0.0:3260\nCreated network portal 127.0.0.1:3260."
+      },
+      {
+       "cmd": "sudo targetcli /iscsi/iqn.2026-11.com.example:lab/tpg1/luns create /backstores/fileio/lab0 2>&1 | tail -n 1; sudo targetcli /iscsi/iqn.2026-11.com.example:lab/tpg1 set attribute generate_node_acls=1 authentication=0 demo_mode_write_protect=0 > /dev/null 2>&1; echo configured",
+       "output": "Created LUN 0.\nconfigured"
+      },
+      {
+       "cmd": "ss -ltn | awk '/:3260 /{print $4}'",
+       "output": "127.0.0.1:3260"
+      }
+     ]
+    },
+    {
+     "title": "Initiator: discover and log in",
+     "text": "`iscsiadm -m discovery` asks the portal which targets it has. `--login` opens the session. The kernel then creates a SCSI disk.",
+     "run": [
+      {
+       "cmd": "sudo systemctl start iscsid; sudo iscsiadm -m discovery -t sendtargets -p 127.0.0.1:3260",
+       "output": "127.0.0.1:3260,1 iqn.2026-11.com.example:lab"
+      },
+      {
+       "cmd": "sudo iscsiadm -m node -T iqn.2026-11.com.example:lab -p 127.0.0.1:3260 --login 2>&1 | tail -n 1 | sed 's/^Login to .*\\(successful\\)/Login \\1/'",
+       "output": "Login successful."
+      },
+      {
+       "cmd": "sleep 2; lsblk -d -o NAME,SIZE,TRAN,VENDOR,MODEL | grep -E 'NAME|iscsi'",
+       "output": "NAME SIZE TRAN   VENDOR   MODEL\nsdb   64M iscsi  LIO-ORG  lab0"
+      }
+     ],
+     "after": "A new disk of 64 MB appeared. `TRAN` is `iscsi`, and the vendor `LIO-ORG` is the Linux target. The device name (`sdb` here) depends on your machine."
+    },
+    {
+     "title": "Use it as a local disk",
+     "text": "Stable names exist under `/dev/disk/by-path/`. Make a file system and mount it like any disk.",
+     "run": [
+      {
+       "cmd": "D=$(readlink -f /dev/disk/by-path/*iscsi*lun-0); sudo mkfs.ext4 -q $D; sudo mkdir -p /tmp/lab/iscsi && sudo mount $D /tmp/lab/iscsi",
+       "output": ""
+      },
+      {
+       "cmd": "echo 'stored over iSCSI' | sudo tee /tmp/lab/iscsi/f.txt; findmnt -no FSTYPE,SOURCE /tmp/lab/iscsi | sed -E 's#/dev/sd[a-z]+#/dev/sdX#'",
+       "output": "stored over iSCSI\next4   /dev/sdX"
+      },
+      {
+       "cmd": "sudo umount /tmp/lab/iscsi; sudo iscsiadm -m session -P1 | grep -E 'Current Portal|iSCSI Connection State' | sed 's/^ *//'",
+       "output": "\tCurrent Portal: 127.0.0.1:3260,1\n\t\tiSCSI Connection State: LOGGED IN"
+      }
+     ],
+     "under": "The initiator sends SCSI commands (READ, WRITE) wrapped in iSCSI PDUs over TCP. The kernel's SCSI layer treats the result like any SCSI disk, so everything above it (partitions, LVM, file systems) is unchanged. Production setups add authentication (CHAP), **multipath** (several portals for redundancy, `dm-multipath`) and a dedicated storage network."
+    },
+    {
+     "title": "Clean up",
+     "text": "Log out, delete the node record, remove the target configuration and the backing file.",
+     "run": [
+      {
+       "cmd": "sudo iscsiadm -m node -T iqn.2026-11.com.example:lab -p 127.0.0.1:3260 --logout 2>&1 | tail -n 1 | sed 's/^Logout of .*\\(successful\\)/Logout \\1/'; sudo iscsiadm -m node -o delete -T iqn.2026-11.com.example:lab; sudo targetcli clearconfig confirm=True 2>&1 | tail -n 1; sudo rm -f /var/tmp/lab-iscsi.img; sudo systemctl stop iscsid.service iscsid.socket; echo cleaned",
+       "output": "Logout successful.\nAll configuration cleared\ncleaned"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does iSCSI give the client?",
+     "options": [
+      "A shared directory",
+      "A block device over TCP",
+      "A web page",
+      "A print queue"
+     ],
+     "answer": 1,
+     "explain": "A remote raw disk."
+    },
+    {
+     "q": "What is an IQN?",
+     "options": [
+      "An IP address",
+      "A unique name of a target or initiator",
+      "A disk label",
+      "A port"
+     ],
+     "answer": 1,
+     "explain": "iSCSI Qualified Name."
+    },
+    {
+     "q": "What is a LUN?",
+     "options": [
+      "A network card",
+      "One numbered volume exported by a target",
+      "A login",
+      "A cache"
+     ],
+     "answer": 1,
+     "explain": "Logical Unit Number."
+    },
+    {
+     "q": "Which mount-sharing rule applies to an ordinary ext4 file system on an iSCSI LUN?",
+     "options": [
+      "Mount on many clients at once",
+      "Mount on one client at a time",
+      "Never mount",
+      "Mount read-only only"
+     ],
+     "answer": 1,
+     "explain": "Ordinary file systems are not cluster-aware; use a cluster file system for sharing."
+    }
+   ],
+   "check": {
+    "scenario": "A VM sees its iSCSI volume as /dev/sdc, but after a reboot the same volume is /dev/sdb and a service writes to the wrong disk. How do you prevent this?",
+    "answer": "Never rely on `/dev/sdX` names. Use stable names: `/dev/disk/by-path/...iscsi...`, `by-id/wwn-...`, or the file system `UUID=` in `/etc/fstab` (with `_netdev` so mounting waits for the network). With multipath use `/dev/mapper/mpathX`."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "NFS or iSCSI: what is the difference?",
+   "a": "NFS shares files (the server owns the file system); iSCSI shares a raw block device (the client owns the file system). See [NFS](#/lesson/23/nfs-loopback) and [iSCSI](#/lesson/23/iscsi-loopback).",
+   "level": "beginner"
+  },
+  {
+   "q": "What is root_squash?",
+   "a": "An NFS export option that maps the client's root user to an unprivileged user, so a compromised client root cannot act as root on the server's files.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why is a hung NFS mount dangerous?",
+   "a": "With a hard mount, processes wait forever in uninterruptible sleep (D) when the server is unreachable, raising load average with idle CPU and blocking shutdowns.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is a stale file handle?",
+   "a": "The client uses a file handle the server no longer recognises (the file was deleted/replaced or the export changed). Remount or reopen the file.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Name the iSCSI roles and identifiers.",
+   "a": "Target (exports storage), initiator (uses it), portal (IP:3260), IQN (unique names), LUN (volume number), CHAP for authentication, multipath for redundancy.",
+   "level": "advanced"
+  },
+  {
+   "q": "Which ports do NFSv4 and iSCSI use?",
+   "a": "NFSv4: TCP 2049. iSCSI: TCP 3260. NFSv3 also needs rpcbind (111), mountd and statd.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "NFS",
+   "def": "Network File System: shares directories between hosts as a file system.",
+   "lesson": "23/nfs-loopback"
+  },
+  {
+   "term": "Export",
+   "def": "A directory a NFS server offers to clients, listed in /etc/exports.",
+   "lesson": "23/nfs-loopback"
+  },
+  {
+   "term": "root_squash",
+   "def": "NFS option mapping the client's root to an unprivileged user.",
+   "lesson": "23/nfs-loopback"
+  },
+  {
+   "term": "Stale file handle",
+   "def": "An NFS error: the client's reference to a file is no longer valid on the server.",
+   "lesson": "23/nfs-loopback"
+  },
+  {
+   "term": "iSCSI",
+   "def": "SCSI storage commands over TCP; exports block devices over the network.",
+   "lesson": "23/iscsi-loopback"
+  },
+  {
+   "term": "Target",
+   "def": "The iSCSI server side that exports storage.",
+   "lesson": "23/iscsi-loopback"
+  },
+  {
+   "term": "Initiator",
+   "def": "The iSCSI client side that attaches remote storage.",
+   "lesson": "23/iscsi-loopback"
+  },
+  {
+   "term": "IQN",
+   "def": "iSCSI Qualified Name: a unique identifier for targets and initiators.",
+   "lesson": "23/iscsi-loopback"
+  },
+  {
+   "term": "LUN",
+   "def": "Logical Unit Number: one volume exported by an iSCSI target.",
+   "lesson": "23/iscsi-loopback"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "sudo exportfs -v",
+   "desc": "Show active NFS exports.",
+   "topic": "Network storage",
+   "lesson": "23/nfs-loopback"
+  },
+  {
+   "cmd": "sudo mount -t nfs4 SERVER:/path DIR",
+   "desc": "Mount an NFS export.",
+   "topic": "Network storage",
+   "lesson": "23/nfs-loopback"
+  },
+  {
+   "cmd": "nfsstat -c",
+   "desc": "Show NFS client statistics.",
+   "topic": "Network storage",
+   "lesson": "23/nfs-loopback"
+  },
+  {
+   "cmd": "cat /proc/fs/nfsfs/servers",
+   "desc": "List NFS servers the client uses.",
+   "topic": "Network storage",
+   "lesson": "23/nfs-loopback"
+  },
+  {
+   "cmd": "sudo iscsiadm -m discovery -t sendtargets -p IP",
+   "desc": "Discover iSCSI targets.",
+   "topic": "Network storage",
+   "lesson": "23/iscsi-loopback"
+  },
+  {
+   "cmd": "sudo iscsiadm -m node -T IQN -p IP --login",
+   "desc": "Log in to a target.",
+   "topic": "Network storage",
+   "lesson": "23/iscsi-loopback"
+  },
+  {
+   "cmd": "sudo iscsiadm -m session -P1",
+   "desc": "Show iSCSI sessions.",
+   "topic": "Network storage",
+   "lesson": "23/iscsi-loopback"
+  },
+  {
+   "cmd": "lsblk -d -o NAME,SIZE,TRAN",
+   "desc": "Show the transport (iscsi, sata, nvme) of each disk.",
+   "topic": "Network storage",
+   "lesson": "23/iscsi-loopback"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

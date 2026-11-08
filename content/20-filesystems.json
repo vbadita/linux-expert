@@ -1,0 +1,585 @@
+{
+ "title": "Filesystems",
+ "lessons": [
+  {
+   "id": "mkfs-and-mount",
+   "title": "Creating and mounting ext4, xfs and btrfs",
+   "level": "beginner",
+   "goal": "Learn the steps from a raw block device to a usable directory: `mkfs`, `mount`, use, `umount`, and compare the three main Linux file systems.\n\nWhy it matters: choosing and creating a file system is a day-one admin task. Each has different strengths, and you cannot shrink some of them later.",
+   "setup": {
+    "note": "These steps use sudo, loop devices and RAM-light image files. They never touch real disks. Each lesson unmounts and detaches everything at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A file system turns blocks into files",
+     "text": "A raw disk is just numbered blocks. A **file system** adds structure: directories, names, permissions, free space tracking. `mkfs.TYPE` writes that structure (the **superblock**, inode tables, free-space maps). Our current root file system:",
+     "run": [
+      {
+       "cmd": "findmnt -no FSTYPE,SIZE /",
+       "output": "xfs    29.4G"
+      }
+     ]
+    },
+    {
+     "title": "ext4",
+     "text": "The traditional Linux file system: robust, journaled, can grow and shrink (offline). We create a 256 MB image, attach it, format it and mount it.",
+     "run": [
+      {
+       "cmd": "truncate -s 256M ext4.img; L1=$(sudo losetup -f --show ext4.img)",
+       "output": ""
+      },
+      {
+       "cmd": "sudo mkfs.ext4 -q $L1; sudo mkdir -p /tmp/lab/m1 && sudo mount $L1 /tmp/lab/m1 && sudo chown $(id -un): /tmp/lab/m1",
+       "output": ""
+      },
+      {
+       "cmd": "echo hello > /tmp/lab/m1/hello.txt; ls /tmp/lab/m1",
+       "output": "hello.txt\nlost+found"
+      },
+      {
+       "cmd": "findmnt -no FSTYPE,SIZE /tmp/lab/m1",
+       "output": "ext4   229.9M"
+      }
+     ],
+     "after": "`lost+found` is created by ext4 for `fsck` to put recovered fragments in."
+    },
+    {
+     "title": "xfs",
+     "text": "A high-performance journaled file system, strong with big files and parallel I/O, default on Red Hat family systems. It can **grow but not shrink**.",
+     "run": [
+      {
+       "cmd": "truncate -s 512M xfs.img; L2=$(sudo losetup -f --show xfs.img)",
+       "output": ""
+      },
+      {
+       "cmd": "sudo mkfs.xfs -q $L2; sudo mkdir -p /tmp/lab/m2 && sudo mount $L2 /tmp/lab/m2 && sudo chown $(id -un): /tmp/lab/m2",
+       "output": ""
+      },
+      {
+       "cmd": "echo hello > /tmp/lab/m2/hello.txt; ls /tmp/lab/m2",
+       "output": "hello.txt"
+      },
+      {
+       "cmd": "sudo xfs_info /tmp/lab/m2 | grep -E '^(meta-data|data  )' | sed -E 's#/dev/loop[0-9]+#DEV#' | cut -c1-90",
+       "output": "meta-data=DEV             isize=512    agcount=4, agsize=32768 blks\ndata     =                       bsize=4096   blocks=131072, imaxpct=25"
+      }
+     ]
+    },
+    {
+     "title": "btrfs",
+     "text": "A copy-on-write file system with checksums, snapshots, subvolumes and compression built in. It can grow and shrink online.",
+     "run": [
+      {
+       "cmd": "truncate -s 256M btrfs.img; L3=$(sudo losetup -f --show btrfs.img)",
+       "output": ""
+      },
+      {
+       "cmd": "sudo mkfs.btrfs -q $L3; sudo mkdir -p /tmp/lab/m3 && sudo mount $L3 /tmp/lab/m3 && sudo chown $(id -un): /tmp/lab/m3",
+       "output": ""
+      },
+      {
+       "cmd": "echo hello > /tmp/lab/m3/hello.txt; ls /tmp/lab/m3",
+       "output": "hello.txt"
+      },
+      {
+       "cmd": "findmnt -no FSTYPE,SIZE /tmp/lab/m3",
+       "output": "btrfs   256M"
+      }
+     ]
+    },
+    {
+     "title": "Compare and clean up",
+     "text": "All three are now mounted in the same tree, and programs cannot tell them apart. Unmount before you detach the device.",
+     "run": [
+      {
+       "cmd": "findmnt -o TARGET,FSTYPE | grep -E '/tmp/lab/m[123]'",
+       "output": "├─/tmp/lab/m1                                                                                       ext4\n├─/tmp/lab/m2                                                                                       xfs\n└─/tmp/lab/m3                                                                                       btrfs"
+      },
+      {
+       "cmd": "sudo umount /tmp/lab/m1 /tmp/lab/m2 /tmp/lab/m3; sudo losetup -d $L1 $L2 $L3; echo detached",
+       "output": "detached"
+      }
+     ],
+     "under": "Choosing: **ext4** when you want the most proven general-purpose choice; **xfs** for large file systems and heavy parallel workloads (and you will not need to shrink); **btrfs** (or ZFS) when you want snapshots, checksums and cheap clones. The VFS (module 17) hides the differences from programs."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `mkfs.ext4` do?",
+     "options": [
+      "Mounts a disk",
+      "Writes the file system structures to a device",
+      "Checks a disk",
+      "Partitions a disk"
+     ],
+     "answer": 1,
+     "explain": "It creates the superblock, inode tables and so on."
+    },
+    {
+     "q": "Which of these file systems cannot be shrunk?",
+     "options": [
+      "ext4",
+      "xfs",
+      "btrfs",
+      "all can"
+     ],
+     "answer": 1,
+     "explain": "xfs can only grow."
+    },
+    {
+     "q": "Which is created by ext4 for fsck to place recovered files?",
+     "options": [
+      "/tmp",
+      "lost+found",
+      "/recovery",
+      ".fsck"
+     ],
+     "answer": 1,
+     "explain": "lost+found."
+    },
+    {
+     "q": "Which file system has built-in snapshots?",
+     "options": [
+      "ext4",
+      "xfs",
+      "btrfs",
+      "FAT"
+     ],
+     "answer": 2,
+     "explain": "btrfs."
+    }
+   ],
+   "check": {
+    "scenario": "A new 20 TB data volume will hold huge video files with many parallel readers and writers. Which file system do you pick, and what must you accept?",
+    "answer": "**xfs**: it scales to large file systems and parallel I/O. Accept that it cannot be shrunk (plan the size) and that repairs use `xfs_repair` offline. Format with `mkfs.xfs` and mount with `noatime` if access times are not needed."
+   }
+  },
+  {
+   "id": "fstab-and-mount-options",
+   "title": "/etc/fstab and mount options",
+   "level": "intermediate",
+   "goal": "Learn the six fields of `/etc/fstab`, how to test a line **before** a reboot, and how mount options such as `ro`, `noexec` and `nosuid` change behaviour.\n\nWhy it matters: a wrong fstab line can stop a server from booting. Options are a cheap and effective security and safety tool.",
+   "setup": {
+    "note": "These steps use sudo, loop devices and RAM-light image files. They never touch real disks. Each lesson unmounts and detaches everything at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A file system to practise on",
+     "text": "We create an ext4 image and read its UUID.",
+     "run": [
+      {
+       "cmd": "truncate -s 64M fs.img; L=$(sudo losetup -f --show fs.img); sudo mkfs.ext4 -q $L; U=$(sudo blkid -s UUID -o value $L); echo \"UUID has ${#U} characters\"",
+       "output": "UUID has 36 characters"
+      },
+      {
+       "cmd": "sudo mkdir -p /tmp/lab/mnt",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "The six fields",
+     "text": "A line in `/etc/fstab` has six fields:\n\n1. **device** (best: `UUID=...`)\n2. **mount point**\n3. **file system type**\n4. **options** (comma separated)\n5. **dump** flag (0 = ignore; legacy)\n6. **fsck order** (1 for root, 2 for others, 0 = skip)\n\nWe write a sample file of our own, not the real fstab.",
+     "run": [
+      {
+       "cmd": "echo \"UUID=$U /tmp/lab/mnt ext4 defaults,noexec,nosuid 0 2\" > sample.fstab; sed \"s/$U/<uuid>/\" sample.fstab",
+       "output": "UUID=<uuid> /tmp/lab/mnt ext4 defaults,noexec,nosuid 0 2"
+      }
+     ]
+    },
+    {
+     "title": "Verify before you reboot",
+     "text": "`findmnt --verify` checks a table for mistakes (missing mount point, unknown type, missing device). Run it on the real `/etc/fstab` after every edit. `mount -a` also tests all lines at once.",
+     "run": [
+      {
+       "cmd": "sudo findmnt --verify --tab-file sample.fstab 2>&1 | sed 's/UUID=[0-9a-f-]*/UUID=<uuid>/'",
+       "output": "Success, no errors or warnings detected"
+      }
+     ]
+    },
+    {
+     "title": "Mount using the table",
+     "text": "`mount -T FILE MOUNTPOINT` reads the entry for that mount point from the given table.",
+     "run": [
+      {
+       "cmd": "sudo mount -T sample.fstab /tmp/lab/mnt && findmnt -no OPTIONS /tmp/lab/mnt | tr ',' '\\n' | grep -E '^(rw|noexec|nosuid)$' | tr '\\n' ' '; echo",
+       "output": "rw nosuid noexec "
+      }
+     ]
+    },
+    {
+     "title": "noexec blocks running programs",
+     "text": "With `noexec`, files on the file system cannot be executed. Attackers who can write to a directory like `/tmp` often try to run a program from there, so many systems mount it `noexec`.",
+     "run": [
+      {
+       "cmd": "sudo cp /usr/bin/true /tmp/lab/mnt/prog; /tmp/lab/mnt/prog; echo \"exit code: $?\"",
+       "output": "bash: /tmp/lab/mnt/prog: Permission denied\nexit code: 126"
+      },
+      {
+       "cmd": "sudo mount -o remount,exec /tmp/lab/mnt; /tmp/lab/mnt/prog; echo \"exit code: $?\"",
+       "output": "exit code: 0"
+      }
+     ]
+    },
+    {
+     "title": "ro, and remount",
+     "text": "`remount` changes options on a live mount. A read-only file system rejects all writes with `Read-only file system`. The kernel also remounts a damaged file system read-only on its own, to protect the data (lab: read-only filesystem).",
+     "run": [
+      {
+       "cmd": "sudo mount -o remount,ro /tmp/lab/mnt; sudo touch /tmp/lab/mnt/x 2>&1",
+       "output": "touch: cannot touch '/tmp/lab/mnt/x': Read-only file system"
+      },
+      {
+       "cmd": "sudo mount -o remount,rw /tmp/lab/mnt; sudo touch /tmp/lab/mnt/x && echo 'write works again'",
+       "output": "write works again"
+      },
+      {
+       "cmd": "sudo umount /tmp/lab/mnt; sudo losetup -d $L; echo cleaned",
+       "output": "cleaned"
+      }
+     ],
+     "under": "`mount` calls the `mount(2)` system call with the device, target, type, flags and a string of file-system-specific options. Flags like `MS_NOEXEC` are stored in the **mount** (not in the file system), which is why the same disk can be mounted `rw` here and `ro` elsewhere, and why bind mounts can have different options."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is the sixth field of an fstab line?",
+     "options": [
+      "Mount point",
+      "fsck pass order",
+      "Options",
+      "Type"
+     ],
+     "answer": 1,
+     "explain": "0 skips fsck; 1 is for the root file system; 2 for the rest."
+    },
+    {
+     "q": "Which command checks an fstab file for errors?",
+     "options": [
+      "mount -v",
+      "findmnt --verify",
+      "blkid",
+      "fsck -N"
+     ],
+     "answer": 1,
+     "explain": "`findmnt --verify` (and `mount -a`)."
+    },
+    {
+     "q": "What does `noexec` do?",
+     "options": [
+      "Hides files",
+      "Forbids executing programs from the file system",
+      "Disables writes",
+      "Disables sync"
+     ],
+     "answer": 1,
+     "explain": "Step 5: Permission denied."
+    },
+    {
+     "q": "What does the option `nofail` do in fstab?",
+     "options": [
+      "Ignores errors in files",
+      "Boot continues if the device is missing",
+      "Skips fsck",
+      "Mounts read-only"
+     ],
+     "answer": 1,
+     "explain": "A missing non-essential disk does not stop boot."
+    }
+   ],
+   "check": {
+    "scenario": "You added a line for a new data disk to /etc/fstab, ran `reboot`, and the server never came back (emergency mode). How do you avoid and fix this?",
+    "answer": "Avoid: use UUIDs, add `nofail` for non-critical disks, and run `findmnt --verify` and `mount -a` before rebooting. Fix: log in on the console, `mount -o remount,rw /`, correct or comment the line in `/etc/fstab`, `systemctl daemon-reload`, and reboot."
+   }
+  },
+  {
+   "id": "journal-fsck-cow",
+   "title": "Journaling, fsck repair and copy-on-write",
+   "level": "advanced",
+   "goal": "Learn how a journal makes a file system crash-safe, repair a deliberately damaged ext4 with `e2fsck`, and see how btrfs copy-on-write makes clones free.\n\nWhy it matters: after a crash or a power loss you must know what the file system promises, how to check it, and when a repair is safe.",
+   "setup": {
+    "note": "These steps use sudo, loop devices and RAM-light image files. They never touch real disks. Each lesson unmounts and detaches everything at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The journal",
+     "text": "A crash in the middle of a metadata update (for example: allocate a block, update the inode, update the directory) could leave the file system inconsistent. A **journal** is a log area: the file system first writes what it is about to do, then does it. After a crash it replays or discards the log, in seconds, instead of scanning the whole disk.",
+     "run": [
+      {
+       "cmd": "truncate -s 128M ext4.img; L=$(sudo losetup -f --show ext4.img); sudo mkfs.ext4 -q $L",
+       "output": ""
+      },
+      {
+       "cmd": "sudo dumpe2fs -h $L 2>/dev/null | grep -E '^(Filesystem features|Journal size|Journal features)' | cut -c1-100",
+       "output": "Filesystem features:      has_journal ext_attr resize_inode dir_index filetype extent 64bit flex_bg \nJournal features:         (none)"
+      }
+     ]
+    },
+    {
+     "title": "fsck on a clean file system",
+     "text": "`e2fsck -fn` forces a full check (`-f`) and only reports (`-n`): it changes nothing. Exit code 0 means no problems.",
+     "run": [
+      {
+       "cmd": "sudo e2fsck -fn $L; echo \"exit code: $?\"",
+       "output": "e2fsck 1.47.1 (20-May-2024)\nPass 1: Checking inodes, blocks, and sizes\nPass 2: Checking directory structure\nPass 3: Checking directory connectivity\nPass 4: Checking reference counts\nPass 5: Checking group summary information\n/dev/loop0: 11/32768 files (0.0% non-contiguous), 13883/131072 blocks\nexit code: 0"
+      }
+     ]
+    },
+    {
+     "title": "Damage it on purpose",
+     "text": "We create a file, unmount, and then **clear its inode** with `debugfs`. The directory still lists the name, but the inode is gone: a typical corruption.",
+     "run": [
+      {
+       "cmd": "sudo mkdir -p /tmp/lab/m1 && sudo mount $L /tmp/lab/m1 && sudo sh -c 'echo precious > /tmp/lab/m1/victim.txt'; ino=$(stat -c %i /tmp/lab/m1/victim.txt); echo \"inode of victim.txt: $ino\"",
+       "output": "inode of victim.txt: 12"
+      },
+      {
+       "cmd": "sudo umount /tmp/lab/m1; sudo debugfs -w -R \"clri <$ino>\" $L 2>&1 | tail -n 1; echo cleared",
+       "output": "debugfs 1.47.1 (20-May-2024)\ncleared"
+      }
+     ]
+    },
+    {
+     "title": "Check, then repair",
+     "text": "Always run a read-only check first. Then repair with `-y` (answer yes). `fsck` must run on an **unmounted** file system.",
+     "run": [
+      {
+       "cmd": "sudo e2fsck -fn $L 2>&1 | sed -n '2,6p'; echo \"exit code: ${PIPESTATUS[0]}\"",
+       "output": "Pass 1: Checking inodes, blocks, and sizes\nPass 2: Checking directory structure\nEntry 'victim.txt' in / (2) has deleted/unused inode 12.  Clear? no\n\nEntry 'victim.txt' in / (2) has an incorrect filetype (was 1, should be 0).\nexit code: 4"
+      },
+      {
+       "cmd": "sudo e2fsck -fy $L 2>&1 | sed -n '2,5p'",
+       "output": "Pass 1: Checking inodes, blocks, and sizes\nPass 2: Checking directory structure\nEntry 'victim.txt' in / (2) has deleted/unused inode 12.  Clear? yes"
+      },
+      {
+       "cmd": "sudo e2fsck -fn $L 2>&1 | tail -n 1",
+       "output": "/dev/loop0: 11/32768 files (0.0% non-contiguous), 13883/131072 blocks"
+      }
+     ],
+     "under": "`fsck` works pass by pass: inodes, directory structure, connectivity (every inode reachable), reference counts, and the free-space bitmaps. A journal only protects against **crash** inconsistency, not against bad blocks, bugs or someone running `clri`. Always keep backups: repair can lose data.",
+     "after": "The first check lists the problems and exits with 4 (errors left uncorrected). `-fy` clears the dangling directory entry (the file is lost) and fixes the counters. The last check is clean."
+    },
+    {
+     "title": "Copy-on-write on btrfs",
+     "text": "btrfs never overwrites live data: it writes new blocks and then switches the pointers. This makes a **reflink** copy free: two files share the same blocks until one changes.",
+     "run": [
+      {
+       "cmd": "sudo losetup -d $L; truncate -s 256M btrfs.img; B=$(sudo losetup -f --show btrfs.img); sudo mkfs.btrfs -q $B; sudo mkdir -p /tmp/lab/m3; sudo mount $B /tmp/lab/m3; sudo chown $(id -un): /tmp/lab/m3",
+       "output": ""
+      },
+      {
+       "cmd": "dd if=/dev/urandom of=/tmp/lab/m3/big bs=1M count=20 status=none; cp --reflink=always /tmp/lab/m3/big /tmp/lab/m3/clone; sync",
+       "output": ""
+      },
+      {
+       "cmd": "sudo btrfs filesystem du -s /tmp/lab/m3 | awk 'NR==1 {print} NR==2 {print $1, $2, $3}'",
+       "output": "     Total   Exclusive  Set shared  Filename\n40.00MiB 0.00B 20.00MiB"
+      },
+      {
+       "cmd": "sudo umount /tmp/lab/m3; sudo losetup -d $B; echo cleaned",
+       "output": "cleaned"
+      }
+     ],
+     "after": "Two 20 MB files, but the data is stored **once**: Total is 40 MB, Exclusive is 0 (nothing belongs to one file only) and the whole 20 MB is Set shared."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does a journal protect against?",
+     "options": [
+      "Bad sectors",
+      "Inconsistent metadata after a crash",
+      "Deleted files",
+      "Viruses"
+     ],
+     "answer": 1,
+     "explain": "It lets the file system recover quickly after an unclean shutdown."
+    },
+    {
+     "q": "Which `e2fsck` option only reports problems?",
+     "options": [
+      "-y",
+      "-n",
+      "-p",
+      "-f"
+     ],
+     "answer": 1,
+     "explain": "`-n` answers no to every question."
+    },
+    {
+     "q": "When must you run fsck on a file system?",
+     "options": [
+      "While mounted read-write",
+      "While unmounted (or read-only)",
+      "Never",
+      "Only at boot"
+     ],
+     "answer": 1,
+     "explain": "Repairing a mounted file system corrupts it."
+    },
+    {
+     "q": "What is a reflink copy on btrfs?",
+     "options": [
+      "A symbolic link",
+      "A copy that shares data blocks with the original until changed",
+      "A hard link",
+      "A compressed copy"
+     ],
+     "answer": 1,
+     "explain": "Copy-on-write sharing."
+    }
+   ],
+   "check": {
+    "scenario": "After a power loss an xfs file system refuses to mount: `mount: wrong fs type, bad superblock`, log corruption. What are the steps?",
+    "answer": "Unmount if mounted, then try `mount` once more (it replays the log). If the log is bad: `xfs_repair -n DEV` (dry run), then `xfs_repair DEV`; only if it says the log is dirty and cannot be replayed use `xfs_repair -L` (zeroes the log: **last resort**, recent changes are lost). Restore from backup if the data matters."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is a journal in a file system?",
+   "a": "A log where the file system records pending metadata changes before applying them, so after a crash it can replay or discard them quickly. See [the lesson](#/lesson/20/journal-fsck-cow).",
+   "level": "intermediate"
+  },
+  {
+   "q": "ext4 vs xfs vs btrfs?",
+   "a": "ext4: proven, general, can shrink offline. xfs: scalable, parallel I/O, cannot shrink. btrfs: copy-on-write, snapshots, checksums, compression. See [the lesson](#/lesson/20/mkfs-and-mount).",
+   "level": "beginner"
+  },
+  {
+   "q": "What are the fields of /etc/fstab?",
+   "a": "device (UUID), mount point, type, options, dump, fsck order. See [the lesson](#/lesson/20/fstab-and-mount-options).",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you avoid an unbootable server after editing fstab?",
+   "a": "Use UUIDs, `nofail` for non-critical disks, and test with `findmnt --verify` and `mount -a` before rebooting.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you repair a damaged ext4 file system?",
+   "a": "Unmount it, run `e2fsck -fn` to see the damage, then `e2fsck -fy` to repair; restore from backup for lost data. Use `xfs_repair` for xfs.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What does noexec/nosuid/nodev do?",
+   "a": "noexec: no program execution from the mount. nosuid: ignore setuid/setgid bits. nodev: ignore device files. Used on /tmp, /var/tmp and removable media.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "File system",
+   "def": "The on-disk structure that organises files, directories and free space on a block device.",
+   "lesson": "20/mkfs-and-mount"
+  },
+  {
+   "term": "Superblock",
+   "def": "The file system's main metadata block: size, features, UUID.",
+   "lesson": "20/mkfs-and-mount"
+  },
+  {
+   "term": "fstab",
+   "def": "/etc/fstab: the table of file systems to mount at boot.",
+   "lesson": "20/fstab-and-mount-options"
+  },
+  {
+   "term": "Mount option",
+   "def": "A setting such as ro, noexec or nosuid applied to a mount.",
+   "lesson": "20/fstab-and-mount-options"
+  },
+  {
+   "term": "Journal",
+   "def": "A log of pending metadata changes used for fast crash recovery.",
+   "lesson": "20/journal-fsck-cow"
+  },
+  {
+   "term": "fsck",
+   "def": "File system consistency check and repair tool.",
+   "lesson": "20/journal-fsck-cow"
+  },
+  {
+   "term": "Copy-on-write",
+   "def": "Writing changed data to new blocks instead of overwriting; enables cheap snapshots and clones.",
+   "lesson": "20/journal-fsck-cow"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "sudo mkfs.ext4 DEV",
+   "desc": "Create an ext4 file system.",
+   "topic": "Filesystems",
+   "lesson": "20/mkfs-and-mount"
+  },
+  {
+   "cmd": "sudo mkfs.xfs DEV",
+   "desc": "Create an xfs file system.",
+   "topic": "Filesystems",
+   "lesson": "20/mkfs-and-mount"
+  },
+  {
+   "cmd": "sudo mkfs.btrfs DEV",
+   "desc": "Create a btrfs file system.",
+   "topic": "Filesystems",
+   "lesson": "20/mkfs-and-mount"
+  },
+  {
+   "cmd": "sudo mount DEV DIR",
+   "desc": "Mount a file system.",
+   "topic": "Filesystems",
+   "lesson": "20/mkfs-and-mount"
+  },
+  {
+   "cmd": "sudo umount DIR",
+   "desc": "Unmount a file system.",
+   "topic": "Filesystems",
+   "lesson": "20/mkfs-and-mount"
+  },
+  {
+   "cmd": "findmnt --verify",
+   "desc": "Check /etc/fstab for errors.",
+   "topic": "Filesystems",
+   "lesson": "20/fstab-and-mount-options"
+  },
+  {
+   "cmd": "sudo mount -o remount,ro DIR",
+   "desc": "Remount read-only.",
+   "topic": "Filesystems",
+   "lesson": "20/fstab-and-mount-options"
+  },
+  {
+   "cmd": "sudo e2fsck -fn DEV",
+   "desc": "Check ext4 without changing it.",
+   "topic": "Filesystems",
+   "lesson": "20/journal-fsck-cow"
+  },
+  {
+   "cmd": "sudo xfs_repair -n DEV",
+   "desc": "Check xfs without changing it.",
+   "topic": "Filesystems",
+   "lesson": "20/journal-fsck-cow"
+  },
+  {
+   "cmd": "cp --reflink=always A B",
+   "desc": "Clone a file without copying data (btrfs, xfs).",
+   "topic": "Filesystems",
+   "lesson": "20/journal-fsck-cow"
+  },
+  {
+   "cmd": "sudo dumpe2fs -h DEV",
+   "desc": "Show ext4 superblock and journal info.",
+   "topic": "Filesystems",
+   "lesson": "20/journal-fsck-cow"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

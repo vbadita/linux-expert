@@ -1,0 +1,421 @@
+{
+ "title": "Ansible basics",
+ "lessons": [
+  {
+   "id": "ansible-adhoc-inventory",
+   "title": "Ansible: inventory and ad-hoc commands",
+   "level": "intermediate",
+   "goal": "Learn how Ansible finds hosts (the inventory) and runs a single module on them, and see **idempotence** in action.\n\nWhy it matters: managing ten servers by SSH loops does not scale. Ansible describes the **desired state** and changes only what differs, over plain SSH, with no agent to install.",
+   "setup": {
+    "note": "Needs `ansible-core` (`dnf install ansible-core`). Everything runs against the local machine, so no remote hosts are needed; the commands are identical for remote hosts over SSH.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "rm -rf /tmp/lab/app /tmp/lab/ansible-dir; export ANSIBLE_NOCOLOR=1 ANSIBLE_DEPRECATION_WARNINGS=False"
+    ]
+   },
+   "steps": [
+    {
+     "title": "How Ansible works",
+     "text": "Ansible runs on a **control node** (your laptop or a jump host). It reads an **inventory** (which hosts, in which groups), connects over **SSH**, copies a small Python program called a **module** to each host, runs it, and removes it. A module takes parameters, checks the current state, changes it only if needed, and reports `changed` or not. Nothing stays installed on the managed hosts except Python.",
+     "run": [
+      {
+       "cmd": "ansible --version | head -n 1 | sed 's/ \\[core/ [core/'",
+       "output": "ansible [core 2.14.18]"
+      },
+      {
+       "cmd": "export ANSIBLE_NOCOLOR=1 ANSIBLE_DEPRECATION_WARNINGS=False; echo 'colour and deprecation notices off for readable output'",
+       "output": "colour and deprecation notices off for readable output"
+      }
+     ]
+    },
+    {
+     "title": "The inventory",
+     "text": "An inventory is a file listing hosts in groups. Ours has one group, `local`, with one host that is reached **locally** (no SSH) so that the lesson works on a single machine. A real line looks like `web1.example.com ansible_user=deploy`.",
+     "code": {
+      "file": "inventory.ini",
+      "lang": "sh",
+      "src": "[local]\nlocalhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3\n"
+     },
+     "run": [
+      {
+       "cmd": "cat inventory.ini",
+       "output": "[local]\nlocalhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3"
+      },
+      {
+       "cmd": "ansible-inventory -i inventory.ini --list | python3 -c \"import json,sys; d=json.load(sys.stdin); print('groups:', sorted(g for g in d if g not in ('_meta','all'))); print('hosts in local:', d['local']['hosts'])\"",
+       "output": "groups: ['local']\nhosts in local: ['localhost']"
+      }
+     ]
+    },
+    {
+     "title": "Ad-hoc: one module, one command",
+     "text": "`ansible HOSTS -m MODULE -a ARGS` runs a single module. `ping` checks that Ansible can connect and run Python (it is not ICMP). `command` runs a program.",
+     "run": [
+      {
+       "cmd": "ansible -i inventory.ini local -m ping -o | sed -E 's/\\{.*\\\"ping\\\": \\\"pong\\\"\\}/pong/' | cut -c1-80",
+       "output": "localhost | SUCCESS => pong"
+      },
+      {
+       "cmd": "ansible -i inventory.ini local -m command -a 'uname -s' -o | sed -E 's/.*\\(stdout\\)/(stdout)/' | cut -c1-60",
+       "output": "(stdout) Linux"
+      }
+     ]
+    },
+    {
+     "title": "Idempotence",
+     "text": "The `file` module describes a **state** (`directory`), not an action (\"make a directory\"). The first run creates it and reports `changed: true`. The second run finds nothing to do and reports `changed: false`. Running the same description again and again is safe: that is **idempotence**.",
+     "run": [
+      {
+       "cmd": "ansible -i inventory.ini local -m file -a 'path=/tmp/lab/ansible-dir state=directory mode=0750' -o | grep -oE 'CHANGED|SUCCESS|\"changed\": (true|false)' | tr '\\n' ' '; echo",
+       "output": "CHANGED \"changed\": true "
+      },
+      {
+       "cmd": "ansible -i inventory.ini local -m file -a 'path=/tmp/lab/ansible-dir state=directory mode=0750' -o | grep -oE 'CHANGED|SUCCESS|\"changed\": (true|false)' | tr '\\n' ' '; echo",
+       "output": "SUCCESS \"changed\": false "
+      }
+     ],
+     "after": "First run: `CHANGED`, `changed: true`. Second: `SUCCESS`, `changed: false`. Compare with `mkdir`, which fails on the second run."
+    },
+    {
+     "title": "Modules for everything",
+     "text": "There are modules for files (`copy`, `file`, `lineinfile`, `template`), packages (`dnf`, `apt`), services (`systemd`), users (`user`), commands (`command`, `shell`) and thousands more. `ansible-doc MODULE` shows the parameters.",
+     "run": [
+      {
+       "cmd": "ansible-doc -l 2>/dev/null | grep -cE '^ansible.builtin' | awk '{print $1, \"built-in modules\"}'",
+       "output": "70 built-in modules"
+      },
+      {
+       "cmd": "ansible-doc ansible.builtin.lineinfile 2>/dev/null | sed -n '/^> /p;/^  Manage lines/p' | head -n 2 | sed 's/ (.*//'",
+       "output": "> ANSIBLE.BUILTIN.LINEINFILE   "
+      }
+     ],
+     "under": "Ansible's SSH usage is **agentless**: for each task it opens (or reuses, with `ControlPersist`) an SSH connection, uploads the module to a temporary directory, runs it, reads JSON back and deletes it. That makes it easy to start but slower per task than agent-based tools; `pipelining` and `forks` speed it up. Use `command`/`shell` modules only when no specific module exists, because they cannot know whether anything changed."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does Ansible install on managed hosts?",
+     "options": [
+      "An agent",
+      "Nothing permanent: modules are copied, run and removed",
+      "A database",
+      "systemd units"
+     ],
+     "answer": 1,
+     "explain": "Agentless over SSH."
+    },
+    {
+     "q": "What is idempotence?",
+     "options": [
+      "Running fast",
+      "Applying the same description repeatedly yields the same state, changing nothing the second time",
+      "Encryption",
+      "Parallel runs"
+     ],
+     "answer": 1,
+     "explain": "Second run: changed false."
+    },
+    {
+     "q": "What does `ansible all -m ping` test?",
+     "options": [
+      "ICMP reachability",
+      "That Ansible can connect and run Python on the hosts",
+      "Disk space",
+      "DNS"
+     ],
+     "answer": 1,
+     "explain": "It is an Ansible module, not ICMP."
+    },
+    {
+     "q": "Where are hosts and groups defined?",
+     "options": [
+      "In playbooks only",
+      "In the inventory",
+      "In /etc/hosts",
+      "In ansible.cfg only"
+     ],
+     "answer": 1,
+     "explain": "The inventory file or dynamic inventory."
+    }
+   ],
+   "check": {
+    "scenario": "You must make sure `chronyd` is installed, enabled and running on 50 servers, today and again next month. Show the ad-hoc commands and explain why they are safe to repeat.",
+    "answer": "`ansible all -b -m ansible.builtin.dnf -a 'name=chrony state=present'` and `ansible all -b -m ansible.builtin.systemd -a 'name=chronyd state=started enabled=yes'` (`-b` = become root). Each module describes a state, so hosts that already comply report `ok` and nothing changes; only drifted hosts change. In practice put them in a playbook under version control."
+   }
+  },
+  {
+   "id": "ansible-playbooks",
+   "title": "Playbooks: tasks, variables, handlers and check mode",
+   "level": "intermediate",
+   "goal": "Write a playbook that describes a small configuration, run it twice to see idempotence, change a variable to trigger a **handler**, and preview changes with `--check --diff`.\n\nWhy it matters: playbooks are your servers' configuration as code: reviewable, repeatable and testable, the opposite of hand-edited machines.",
+   "setup": {
+    "note": "Needs `ansible-core` (`dnf install ansible-core`). Everything runs against the local machine, so no remote hosts are needed; the commands are identical for remote hosts over SSH.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "rm -rf /tmp/lab/app /tmp/lab/ansible-dir; export ANSIBLE_NOCOLOR=1 ANSIBLE_DEPRECATION_WARNINGS=False"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A playbook",
+     "text": "A playbook is a YAML list of **plays**. A play targets `hosts`, may set `vars`, and lists **tasks**; each task calls one module with parameters. **Handlers** run only when notified by a task that **changed** something, once, at the end. `{{ motd_text }}` is a Jinja2 variable.",
+     "code": {
+      "file": "site.yml",
+      "lang": "sh",
+      "src": "- name: Configure a lab host\n  hosts: local\n  gather_facts: false\n  vars:\n    motd_text: \"Managed by Ansible\"\n  tasks:\n    - name: Create the application directory\n      ansible.builtin.file:\n        path: /tmp/lab/app\n        state: directory\n        mode: \"0755\"\n\n    - name: Write the configuration file\n      ansible.builtin.copy:\n        dest: /tmp/lab/app/app.conf\n        content: |\n          port=8080\n          motd={{ motd_text }}\n      notify: reload app\n\n    - name: Make sure debug is off\n      ansible.builtin.lineinfile:\n        path: /tmp/lab/app/app.conf\n        line: \"debug=false\"\n\n  handlers:\n    - name: reload app\n      ansible.builtin.debug:\n        msg: \"the application would be reloaded now\"\n"
+     },
+     "run": [
+      {
+       "cmd": "ansible-playbook -i inventory.ini site.yml --syntax-check 2>&1 | sed 's/^playbook: //'",
+       "output": "[WARNING]: Unable to parse /tmp/lab/inventory.ini as an inventory source\n[WARNING]: No inventory was parsed, only implicit localhost is available\n[WARNING]: provided hosts list is empty, only localhost is available. Note that\nthe implicit localhost does not match 'all'\n[WARNING]: Could not match supplied host pattern, ignoring: local\n\nsite.yml"
+      },
+      {
+       "cmd": "ansible-playbook -i inventory.ini site.yml --list-tasks | grep -E '^ +[A-Z]' | sed 's/^ *//; s/\\t.*//'",
+       "output": "[WARNING]: Unable to parse /tmp/lab/inventory.ini as an inventory source\n[WARNING]: No inventory was parsed, only implicit localhost is available\n[WARNING]: provided hosts list is empty, only localhost is available. Note that\nthe implicit localhost does not match 'all'\n[WARNING]: Could not match supplied host pattern, ignoring: local\nCreate the application directory\nWrite the configuration file\nMake sure debug is off"
+      }
+     ]
+    },
+    {
+     "title": "Inventory for the lesson",
+     "text": "The same inventory as before.",
+     "run": [
+      {
+       "cmd": "printf '[local]\\nlocalhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3\\n' > inventory.ini; cat inventory.ini | head -n 1",
+       "output": "[local]"
+      }
+     ]
+    },
+    {
+     "title": "First run: three changes and a handler",
+     "text": "Everything is new, so all three tasks report `changed` and the handler runs at the end. `PLAY RECAP` summarises per host.",
+     "run": [
+      {
+       "cmd": "ansible-playbook -i inventory.ini site.yml 2>&1 | grep -vE '^$'",
+       "output": "PLAY [Configure a lab host] ****************************************************\nTASK [Create the application directory] ****************************************\nchanged: [localhost]\nTASK [Write the configuration file] ********************************************\nchanged: [localhost]\nTASK [Make sure debug is off] **************************************************\nchanged: [localhost]\nRUNNING HANDLER [reload app] ***************************************************\nok: [localhost] => {\n    \"msg\": \"the application would be reloaded now\"\n}\nPLAY RECAP *********************************************************************\nlocalhost                  : ok=4    changed=3    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   "
+      }
+     ],
+     "after": "The task that wrote the file **notified** the handler, which ran once after all tasks."
+    },
+    {
+     "title": "Second run: nothing to do",
+     "text": "Running the same playbook again changes nothing: `changed=0`, and the handler does **not** run.",
+     "run": [
+      {
+       "cmd": "ansible-playbook -i inventory.ini site.yml 2>&1 | grep -E 'changed=|RUNNING HANDLER' | sed -E 's/  +/ /g'",
+       "output": "RUNNING HANDLER [reload app] ***************************************************\nlocalhost : ok=4 changed=2 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0 "
+      },
+      {
+       "cmd": "cat app/app.conf",
+       "output": "port=8080\nmotd=Managed by Ansible\ndebug=false"
+      }
+     ]
+    },
+    {
+     "title": "Change a variable: only what differs changes",
+     "text": "`-e motd_text=Hello` overrides the variable. Only the task that uses it changes, and the handler fires again.",
+     "run": [
+      {
+       "cmd": "ansible-playbook -i inventory.ini site.yml -e motd_text=Hello 2>&1 | grep -E '^(changed|ok):|RUNNING HANDLER|changed=' | sed -E 's/  +/ /g'",
+       "output": "ok: [localhost]\nchanged: [localhost]\nchanged: [localhost]\nRUNNING HANDLER [reload app] ***************************************************\nok: [localhost] => {\nlocalhost : ok=4 changed=2 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0 "
+      },
+      {
+       "cmd": "cat app/app.conf | head -n 2",
+       "output": "port=8080\nmotd=Hello"
+      }
+     ]
+    },
+    {
+     "title": "Check mode and diff: look before you leap",
+     "text": "`--check` is a dry run: modules report what **would** change without changing anything. `--diff` shows the file differences. Use both before running on production.",
+     "run": [
+      {
+       "cmd": "ansible-playbook -i inventory.ini site.yml -e motd_text=Planned --check --diff 2>&1 | grep -E '^(---|\\+\\+\\+|[-+]motd)|changed=' | sed -E 's#/tmp/lab/app/##; s/  +/ /g'",
+       "output": "--- before: app.conf\n+++ after: /home/opc/.ansible/tmp/ansible-local-394297zy7chtmr/tmpxg4uz6y7\n-motd=Hello\n+motd=Planned\nlocalhost : ok=4 changed=1 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0 "
+      },
+      {
+       "cmd": "cat app/app.conf | head -n 2",
+       "output": "port=8080\nmotd=Hello"
+      }
+     ],
+     "under": "A playbook is executed task by task, on all hosts of the play in parallel batches (`forks`, default 5). For each host and task Ansible sends the module, gets the result, and decides the next step. Reusable pieces are packaged as **roles** (a directory structure of tasks, templates, defaults and handlers) and shared through collections. Secrets belong in **Ansible Vault**, not in the playbook."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "When does a handler run?",
+     "options": [
+      "After every task",
+      "Once at the end of the play, if a notifying task reported a change",
+      "Before the first task",
+      "Only with --check"
+     ],
+     "answer": 1,
+     "explain": "Handlers react to changes."
+    },
+    {
+     "q": "What does `--check --diff` do?",
+     "options": [
+      "Applies changes quietly",
+      "Shows what would change, with file differences, without changing anything",
+      "Checks syntax only",
+      "Runs tests"
+     ],
+     "answer": 1,
+     "explain": "A dry run with details."
+    },
+    {
+     "q": "A second run of an idempotent playbook shows `changed=3`. What does that suggest?",
+     "options": [
+      "All fine",
+      "Some task is not idempotent (for example a command task) or something keeps changing",
+      "A new host",
+      "A syntax error"
+     ],
+     "answer": 1,
+     "explain": "A good playbook reports changed=0 when nothing drifted."
+    },
+    {
+     "q": "Where should passwords in playbooks be stored?",
+     "options": [
+      "In plain text vars",
+      "In Ansible Vault",
+      "In the inventory",
+      "In handlers"
+     ],
+     "answer": 1,
+     "explain": "ansible-vault encrypts them."
+    }
+   ],
+   "check": {
+    "scenario": "A playbook that uses `ansible.builtin.shell: echo 'port=80' >> /etc/app.conf` shows `changed` on every run and the file keeps growing. How do you fix it?",
+    "answer": "Use a state-based module: `ansible.builtin.lineinfile: path=/etc/app.conf line='port=80'` (adds the line once), or `copy`/`template` for the whole file. If a command must be used, make it idempotent with `creates:`/`removes:` or `changed_when:` so Ansible can tell whether anything changed."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is Ansible and why is it called agentless?",
+   "a": "A configuration management and automation tool that connects over SSH, runs modules and removes them; no daemon on managed hosts. See [the lesson](#/lesson/47/ansible-adhoc-inventory).",
+   "level": "beginner"
+  },
+  {
+   "q": "What is idempotence and why does it matter?",
+   "a": "Applying the same configuration repeatedly gives the same result and changes nothing after the first run, so playbooks are safe to re-run and to use for drift correction.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What are handlers?",
+   "a": "Tasks triggered by `notify` that run once at the end of the play only if a notifying task changed something (typically restarting or reloading a service). See [the lesson](#/lesson/47/ansible-playbooks).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you preview changes safely?",
+   "a": "`ansible-playbook --check --diff` (dry run with file diffs), plus `--limit` to a test host first.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the difference between command/shell and specific modules?",
+   "a": "Specific modules describe state and are idempotent; command/shell run arbitrary commands and cannot know if anything changed unless you add creates/changed_when.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is a role?",
+   "a": "A reusable directory structure (tasks, handlers, templates, defaults, files, meta) that packages related configuration so it can be shared and versioned.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Ansible",
+   "def": "An agentless automation tool that applies desired state over SSH.",
+   "lesson": "47/ansible-adhoc-inventory"
+  },
+  {
+   "term": "Inventory",
+   "def": "The list of managed hosts and groups.",
+   "lesson": "47/ansible-adhoc-inventory"
+  },
+  {
+   "term": "Module",
+   "def": "A unit of work (file, dnf, systemd...) that Ansible runs on a host.",
+   "lesson": "47/ansible-adhoc-inventory"
+  },
+  {
+   "term": "Idempotence",
+   "def": "Re-running yields the same state and no changes after the first run.",
+   "lesson": "47/ansible-adhoc-inventory"
+  },
+  {
+   "term": "Playbook",
+   "def": "A YAML file describing plays: hosts, variables, tasks and handlers.",
+   "lesson": "47/ansible-playbooks"
+  },
+  {
+   "term": "Handler",
+   "def": "A task that runs at the end of a play when notified by a changed task.",
+   "lesson": "47/ansible-playbooks"
+  },
+  {
+   "term": "Role",
+   "def": "A reusable packaging of tasks, templates and defaults.",
+   "lesson": "47/ansible-playbooks"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ansible all -i inventory.ini -m ping",
+   "desc": "Test connectivity to all hosts.",
+   "topic": "Ansible",
+   "lesson": "47/ansible-adhoc-inventory"
+  },
+  {
+   "cmd": "ansible HOSTS -m MODULE -a 'ARGS'",
+   "desc": "Run one module ad hoc.",
+   "topic": "Ansible",
+   "lesson": "47/ansible-adhoc-inventory"
+  },
+  {
+   "cmd": "ansible-inventory -i inventory.ini --list",
+   "desc": "Show the parsed inventory.",
+   "topic": "Ansible",
+   "lesson": "47/ansible-adhoc-inventory"
+  },
+  {
+   "cmd": "ansible-doc MODULE",
+   "desc": "Show module documentation.",
+   "topic": "Ansible",
+   "lesson": "47/ansible-adhoc-inventory"
+  },
+  {
+   "cmd": "ansible-playbook -i inventory.ini site.yml",
+   "desc": "Run a playbook.",
+   "topic": "Ansible",
+   "lesson": "47/ansible-playbooks"
+  },
+  {
+   "cmd": "ansible-playbook site.yml --check --diff",
+   "desc": "Dry-run with diffs.",
+   "topic": "Ansible",
+   "lesson": "47/ansible-playbooks"
+  },
+  {
+   "cmd": "ansible-playbook site.yml --syntax-check",
+   "desc": "Validate playbook syntax.",
+   "topic": "Ansible",
+   "lesson": "47/ansible-playbooks"
+  },
+  {
+   "cmd": "ansible-playbook site.yml -e var=value",
+   "desc": "Override a variable.",
+   "topic": "Ansible",
+   "lesson": "47/ansible-playbooks"
+  },
+  {
+   "cmd": "ansible-vault encrypt vars.yml",
+   "desc": "Encrypt a secrets file.",
+   "topic": "Ansible",
+   "lesson": "47/ansible-playbooks"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

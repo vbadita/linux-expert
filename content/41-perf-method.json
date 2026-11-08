@@ -1,0 +1,362 @@
+{
+ "title": "Performance methodology",
+ "lessons": [
+  {
+   "id": "load-average",
+   "title": "Load average and uptime",
+   "level": "beginner",
+   "goal": "Learn what the three load average numbers mean, how to compare them with the number of CPUs, and why a high load does not always mean a busy CPU.\n\nWhy it matters: load average is the most quoted and most misread number in Linux. Reading it correctly is the first step of every performance investigation.",
+   "setup": {
+    "note": "Steps start a few busy loops (`sh -c 'while :; do :; done'`) and stop them again. This machine has 1 CPU, which makes load easy to read.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Where to read it",
+     "text": "`uptime` prints the time since boot, the number of users and the **load averages** for the last 1, 5 and 15 minutes. The same numbers are the first three fields of `/proc/loadavg`; the fourth is `running/total` tasks and the fifth the last PID.",
+     "run": [
+      {
+       "cmd": "uptime | sed -E 's/^.*(load average:)/\\1/'",
+       "output": "load average: 7.27, 5.71, 3.92"
+      },
+      {
+       "cmd": "cat /proc/loadavg | awk '{print \"1 min:\", $1, \" 5 min:\", $2, \" 15 min:\", $3, \" running/total:\", $4}'",
+       "output": "1 min: 6.93  5 min: 5.67  15 min: 3.91  running/total: 4/898"
+      },
+      {
+       "cmd": "nproc | awk '{print $1, \"CPU(s)\"}'",
+       "output": "1 CPU(s)"
+      }
+     ]
+    },
+    {
+     "title": "What is being averaged",
+     "text": "Every few seconds the kernel counts the tasks that are **runnable** (running or waiting for a CPU, state `R`) **plus** those in **uninterruptible sleep** (`D`, usually waiting for disk or NFS), and keeps three exponentially damped averages of that count. So load measures **demand** for CPU *and* for I/O, not CPU use.",
+     "run": [
+      {
+       "cmd": "grep procs_running /proc/stat",
+       "output": "procs_running 6"
+      },
+      {
+       "cmd": "ps -eo stat | grep -c '^D' | awk '{print $1, \"task(s) in D state now\"}'",
+       "output": "0 task(s) in D state now"
+      }
+     ]
+    },
+    {
+     "title": "Make load by hand",
+     "text": "We start three busy loops for 30 seconds. On one CPU, one is running and two are waiting. The load rises toward 3, but slowly, because it is a damped average.",
+     "run": [
+      {
+       "cmd": "before=$(cut -d' ' -f1 /proc/loadavg); pids=\"\"; for i in 1 2 3; do sh -c 'while :; do :; done' & pids=\"$pids $!\"; done; sleep 30; after=$(cut -d' ' -f1 /proc/loadavg); echo \"1-minute load before: $before, after 30 s: $after\"; grep procs_running /proc/stat",
+       "output": "[1] 421289\n[2] 421290\n[3] 421291\n1-minute load before: 6.93, after 30 s: 7.72\nprocs_running 11"
+      },
+      {
+       "cmd": "kill $pids; wait 2>/dev/null; sleep 1; grep procs_running /proc/stat",
+       "output": "procs_running 5"
+      }
+     ],
+     "after": "`procs_running` counted our three loops (plus the command reading it). The 1-minute value had moved up but not yet to 3: a 1-minute average needs about 3 minutes to settle."
+    },
+    {
+     "title": "Reading the numbers",
+     "text": "Compare the load with the number of CPUs:\n\n- load **below** the CPU count: spare capacity.\n- load **at** the CPU count: fully busy but not waiting.\n- load **above** it: tasks are queuing.\n\nThe three averages show the trend: `1 > 5 > 15` means it is getting busier, `1 < 5 < 15` means it is calming down. A load of 40 with idle CPUs means many tasks in `D` state (I/O or NFS stalls): look at `ps -eo stat,wchan` (lab: \"high load with idle CPU\").",
+     "run": [
+      {
+       "cmd": "ps -eo stat,comm | awk '$1 ~ /^R/ {r++} $1 ~ /^D/ {d++} END {print \"runnable:\", r+0, \" uninterruptible:\", d+0}'",
+       "output": "runnable: 1  uninterruptible: 0"
+      }
+     ],
+     "under": "The kernel updates the averages every 5 seconds with `load = load * e + n * (1 - e)`, where `n` is the current count and `e` is `exp(-5/60)` for the 1-minute average (`exp(-5/300)` and `exp(-5/900)` for the others). That is why changes show up slowly. Other systems (Solaris, BSD) count only CPU demand; Linux's inclusion of `D` state is deliberate: it measures *tasks wanting resources*."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does a Linux load average of 4.0 on a 4-CPU machine mean?",
+     "options": [
+      "Four users",
+      "On average four tasks wanted a CPU (or waited for I/O): the CPUs are just fully used",
+      "400% CPU is wasted",
+      "The disk is full"
+     ],
+     "answer": 1,
+     "explain": "Load equal to the CPU count is full use without queuing."
+    },
+    {
+     "q": "Which states count toward Linux load?",
+     "options": [
+      "R only",
+      "R and D",
+      "S and D",
+      "All states"
+     ],
+     "answer": 1,
+     "explain": "Runnable and uninterruptible."
+    },
+    {
+     "q": "Load average is 30, CPU is 95% idle. What is the most likely cause?",
+     "options": [
+      "Too many users",
+      "Many tasks stuck in D state waiting for I/O",
+      "A busy loop",
+      "Swap off"
+     ],
+     "answer": 1,
+     "explain": "Blocked tasks count but use no CPU."
+    },
+    {
+     "q": "`load average: 1.5, 3.2, 6.8` means the system is...",
+     "options": [
+      "Getting busier",
+      "Calming down",
+      "Idle",
+      "Broken"
+     ],
+     "answer": 1,
+     "explain": "1 < 5 < 15: recently lighter."
+    }
+   ],
+   "check": {
+    "scenario": "A monitoring alert says \"load 12 on an 8-CPU database server\", but `top` shows 30% CPU. What are your next two commands and what do you look for?",
+    "answer": "`vmstat 1 5` (columns `r` run queue, `b` blocked, `wa` I/O wait, `si/so` swap) and `ps -eo pid,stat,wchan:30,comm | awk '$2 ~ /^D/'` to list tasks in D state and where they wait. A high `b`/`wa` with D-state tasks points to storage (see `iostat -x`) or NFS; a high `r` with low idle points to real CPU saturation."
+   }
+  },
+  {
+   "id": "use-method",
+   "title": "The USE method: utilization, saturation, errors",
+   "level": "intermediate",
+   "goal": "Apply a simple checklist to every resource (CPU, memory, disk, network): how **utilised** is it, is work **queueing** (saturation), and are there **errors**.\n\nWhy it matters: instead of running random tools, USE gives a fixed order of questions that finds most bottlenecks quickly, and tells you when a resource is fine and you can stop looking at it.",
+   "setup": {
+    "note": "Steps start a few busy loops (`sh -c 'while :; do :; done'`) and stop them again. This machine has 1 CPU, which makes load easy to read.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The method",
+     "text": "For each resource ask three questions: **U**tilization (how busy: percent of time or capacity used), **S**aturation (is there extra work waiting: a queue, swapping), **E**rrors (counters of failures). Check errors first (they are cheap and decisive), then saturation, then utilization.\n\n| Resource | Utilization | Saturation | Errors |\n|---|---|---|---|\n| CPU | `mpstat`: %usr+%sys | run queue `vmstat r` > CPUs | machine check, `dmesg` |\n| Memory | `free`: used/available | swapping `si/so`, OOM kills | `dmesg` OOM, failed allocations |\n| Disk | `iostat %util` | `aqu-sz`, `await` | `dmesg` I/O errors, SMART |\n| Network | `sar -n DEV` vs link speed | drops, retransmits | `ip -s link` errors |"
+    },
+    {
+     "title": "CPU: utilization and saturation",
+     "text": "`vmstat 1 3` prints one line per second. `r` is the number of runnable tasks (saturation if above the CPU count); `us`, `sy`, `id`, `wa`, `st` are the CPU shares (utilization). The first line is the average since boot; ignore it for current state.",
+     "run": [
+      {
+       "cmd": "vmstat 1 3 | awk 'NR==2 {print \"r b | us sy id wa st\"} NR>2 {print $1, $2, \"|\", $13, $14, $15, $16, $17}'",
+       "output": "r b | us sy id wa st\n3 0 | 6 3 81 7 2\n1 0 | 13 11 73 1 1\n0 0 | 21 10 66 1 2"
+      }
+     ]
+    },
+    {
+     "title": "Memory",
+     "text": "Utilization is **used** and **available** in `free`. Saturation is swapping: `si`/`so` in `vmstat` (pages swapped in and out per second). Errors are OOM kills in the kernel log.",
+     "run": [
+      {
+       "cmd": "free -m | awk 'NR==1 {print \"      total used free available\"} NR==2 {print \"Mem:  \", $2, $3, $4, $7}'",
+       "output": "      total used free available\nMem:   5642 3552 469 2090"
+      },
+      {
+       "cmd": "vmstat 1 2 | tail -n 1 | awk '{print \"swap in/out per s:\", $7, $8}'",
+       "output": "swap in/out per s: 176 0"
+      },
+      {
+       "cmd": "sudo dmesg | grep -ci 'out of memory' | awk '{print $1, \"OOM message(s) in the kernel log\"}'",
+       "output": "9 OOM message(s) in the kernel log"
+      }
+     ]
+    },
+    {
+     "title": "Disk",
+     "text": "`iostat -x` gives `%util` (utilization), `aqu-sz` and `await` (saturation and latency) per device. Errors show in `dmesg` and SMART.",
+     "run": [
+      {
+       "cmd": "iostat -dx 1 2 sda | awk '/^Device/ {for (i=1;i<=NF;i++) c[$i]=i} $1==\"sda\" {u=$c[\"%util\"]; q=$c[\"aqu-sz\"]; a=$c[\"w_await\"]} END {print \"sda: %util\", u, \" aqu-sz\", q, \" w_await ms\", a}'",
+       "output": "sda: %util 1.60  aqu-sz 0.02  w_await ms 0.00"
+      },
+      {
+       "cmd": "sudo dmesg | grep -ciE 'I/O error.*(sd[a-z]|nvme)' | awk '{print $1, \"I/O error message(s) for physical disks\"}'",
+       "output": "0 I/O error message(s) for physical disks"
+      }
+     ]
+    },
+    {
+     "title": "Network",
+     "text": "`ip -s link` shows packet and byte counters plus **errors** and **drops** per interface. On loopback there should be none. For real NICs compare throughput with the link speed.",
+     "run": [
+      {
+       "cmd": "ip -s link show lo | awk 'NR==3 {h=$0} NR==4 {print \"RX:\", \"packets\", $2, \"errors\", $3, \"dropped\", $4}'",
+       "output": "RX: packets 2073521 errors 0 dropped 0"
+      },
+      {
+       "cmd": "sar -n DEV 1 1 | grep -E 'Average.*[[:space:]]lo[[:space:]]' | awk '{print \"lo rx kB/s:\", $5, \"tx kB/s:\", $6}'",
+       "output": "lo rx kB/s: 0.00 tx kB/s: 0.00"
+      }
+     ],
+     "under": "USE comes from Brendan Gregg's performance work. Its strength is **completeness**: you walk through every resource instead of guessing. Its limit: it finds resource bottlenecks, not software ones (lock contention, slow queries). For those use latency-oriented methods (RED for services: Rate, Errors, Duration) and profilers."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What do the letters in USE stand for?",
+     "options": [
+      "Users, Sessions, Errors",
+      "Utilization, Saturation, Errors",
+      "Usage, Speed, Efficiency",
+      "Uptime, Swap, Errors"
+     ],
+     "answer": 1,
+     "explain": "Per resource."
+    },
+    {
+     "q": "Which `vmstat` column indicates CPU saturation when higher than the CPU count?",
+     "options": [
+      "b",
+      "r",
+      "wa",
+      "bo"
+     ],
+     "answer": 1,
+     "explain": "The run queue."
+    },
+    {
+     "q": "What is saturation for memory?",
+     "options": [
+      "High `used`",
+      "Swapping (si/so) and OOM events",
+      "Many processes",
+      "Large page cache"
+     ],
+     "answer": 1,
+     "explain": "Work waiting for memory means paging or killing."
+    },
+    {
+     "q": "Why check errors first?",
+     "options": [
+      "They are the most common",
+      "They are cheap to check and decisive when present",
+      "Utilization is useless",
+      "Required by the method order only"
+     ],
+     "answer": 1,
+     "explain": "A failing disk explains everything quickly."
+    }
+   ],
+   "check": {
+    "scenario": "A web server is slow. Walk through USE for the four resources in a sentence each, naming the command.",
+    "answer": "CPU: `mpstat -P ALL 1` and `vmstat r` (busy or queueing?). Memory: `free -m` and `vmstat si so` plus `dmesg | grep -i oom`. Disk: `iostat -x 1` (`%util`, `await`, `aqu-sz`) and `dmesg` for I/O errors. Network: `sar -n DEV 1` against link speed, `ip -s link` and `ss -s`/`nstat` for drops and retransmits. The first resource with high utilization **and** saturation (or any errors) is the lead."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is load average?",
+   "a": "An exponentially damped average (1, 5, 15 minutes) of the number of tasks that are runnable or in uninterruptible sleep. See [the lesson](#/lesson/41/load-average).",
+   "level": "beginner"
+  },
+  {
+   "q": "Is a load of 10 bad?",
+   "a": "Only relative to the number of CPUs and to what is queueing. 10 on 16 CPUs is fine; 10 on 2 CPUs means queueing. And D-state tasks raise it without using CPU.",
+   "level": "beginner"
+  },
+  {
+   "q": "Explain the USE method.",
+   "a": "For every resource check Utilization, Saturation and Errors, errors first. See [the lesson](#/lesson/41/use-method).",
+   "level": "intermediate"
+  },
+  {
+   "q": "High load, idle CPU: what is it?",
+   "a": "Many tasks in D state (disk or NFS waits). Find them with `ps -eo stat,wchan` and check `iostat -x` and NFS mounts.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why does the 1-minute load average lag?",
+   "a": "It is a damped average updated every 5 seconds; a change takes minutes to be fully reflected.",
+   "level": "advanced"
+  },
+  {
+   "q": "USE versus RED?",
+   "a": "USE is for resources (hosts, disks, links); RED (Rate, Errors, Duration) is for request-driven services. Use both: services on top of resources.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Load average",
+   "def": "The damped average of runnable plus uninterruptible tasks over 1, 5 and 15 minutes.",
+   "lesson": "41/load-average"
+  },
+  {
+   "term": "Run queue",
+   "def": "The tasks waiting for a CPU.",
+   "lesson": "41/load-average"
+  },
+  {
+   "term": "USE method",
+   "def": "A checklist: utilization, saturation and errors for every resource.",
+   "lesson": "41/use-method"
+  },
+  {
+   "term": "Saturation",
+   "def": "Extra work waiting because a resource is fully used (queues, swapping).",
+   "lesson": "41/use-method"
+  },
+  {
+   "term": "iowait",
+   "def": "CPU idle time during which tasks waited for I/O.",
+   "lesson": "41/use-method"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "uptime",
+   "desc": "Show load averages.",
+   "topic": "Performance",
+   "lesson": "41/load-average"
+  },
+  {
+   "cmd": "cat /proc/loadavg",
+   "desc": "Show load and running/total tasks.",
+   "topic": "Performance",
+   "lesson": "41/load-average"
+  },
+  {
+   "cmd": "nproc",
+   "desc": "Number of CPUs.",
+   "topic": "Performance",
+   "lesson": "41/load-average"
+  },
+  {
+   "cmd": "vmstat 1 5",
+   "desc": "System-wide CPU, memory, swap and I/O each second.",
+   "topic": "Performance",
+   "lesson": "41/use-method"
+  },
+  {
+   "cmd": "free -m",
+   "desc": "Memory and swap in MB.",
+   "topic": "Performance",
+   "lesson": "41/use-method"
+  },
+  {
+   "cmd": "iostat -dx 1",
+   "desc": "Per-disk utilization and latency.",
+   "topic": "Performance",
+   "lesson": "41/use-method"
+  },
+  {
+   "cmd": "ip -s link",
+   "desc": "Interface counters including errors and drops.",
+   "topic": "Performance",
+   "lesson": "41/use-method"
+  },
+  {
+   "cmd": "sar -n DEV 1",
+   "desc": "Network throughput per interface.",
+   "topic": "Performance",
+   "lesson": "41/use-method"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

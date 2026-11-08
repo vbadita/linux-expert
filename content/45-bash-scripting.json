@@ -1,0 +1,575 @@
+{
+ "title": "Bash scripting",
+ "lessons": [
+  {
+   "id": "variables-conditions-loops",
+   "title": "Bash scripting: variables, conditions, loops",
+   "level": "beginner",
+   "goal": "Write a first useful script: arguments with defaults, `if/elif/else`, `for` and `while` loops, and the special variables.\n\nWhy it matters: shell scripts glue together everything on a Linux system: deployments, backups, health checks, cron jobs. A few constructs cover most of them.",
+   "setup": {
+    "note": "Each script is saved in a scratch directory and run with `bash` or as an executable.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A first script",
+     "text": "A script is a text file with a **shebang** (`#!/bin/bash`) naming its interpreter. `chmod +x` makes it executable. Variables are set as `name=value` (no spaces around `=`) and read as `$name`. `${1:-world}` means \"the first argument, or `world` if none\".",
+     "code": {
+      "file": "greet.sh",
+      "lang": "sh",
+      "src": "#!/bin/bash\nname=${1:-world}              # first argument, or \"world\" if missing\ncount=3\n\necho \"Hello, $name!\"\n\nif [ \"$name\" = \"root\" ]; then\n    echo \"careful with that account\"\nelif [[ $name == a* ]]; then\n    echo \"your name starts with a\"\nelse\n    echo \"a regular name\"\nfi\n\nfor i in $(seq 1 $count); do\n    echo \"for: $i\"\ndone\n\nn=0\nwhile [ $n -lt 2 ]; do\n    echo \"while: n=$n\"\n    n=$((n + 1))\ndone\n"
+     },
+     "run": [
+      {
+       "cmd": "chmod +x greet.sh; ./greet.sh",
+       "output": "Hello, world!\na regular name\nfor: 1\nfor: 2\nfor: 3\nwhile: n=0\nwhile: n=1"
+      },
+      {
+       "cmd": "./greet.sh alice",
+       "output": "Hello, alice!\nyour name starts with a\nfor: 1\nfor: 2\nfor: 3\nwhile: n=0\nwhile: n=1"
+      },
+      {
+       "cmd": "./greet.sh root",
+       "output": "Hello, root!\ncareful with that account\nfor: 1\nfor: 2\nfor: 3\nwhile: n=0\nwhile: n=1"
+      }
+     ]
+    },
+    {
+     "title": "Special variables",
+     "text": "`$0` script name, `$1`... arguments, `$#` count, `$@` all arguments (quote it: `\"$@\"`), `$?` exit status of the last command, `$$` PID, `$!` PID of the last background job.",
+     "run": [
+      {
+       "cmd": "bash -c 'echo \"name=$0 first=$1 count=$# all=$@\"' prog a b c",
+       "output": "name=prog first=a count=3 all=a b c"
+      },
+      {
+       "cmd": "ls /nonexistent 2> /dev/null; echo \"status of the last command: $?\"",
+       "output": "status of the last command: 2"
+      }
+     ]
+    },
+    {
+     "title": "Tests: [ ] and [[ ]]",
+     "text": "`[ ... ]` is the classic test command; `[[ ... ]]` is a bash keyword with fewer pitfalls (no word splitting, pattern matching with `==`, `&&`/`||` inside). Numbers use `-eq -ne -lt -gt`, strings use `= !=`, files `-f -d -e -r -w -x -s`.",
+     "run": [
+      {
+       "cmd": "[ 10 -gt 9 ] && echo 'numeric: 10 > 9'",
+       "output": "numeric: 10 > 9"
+      },
+      {
+       "cmd": "[[ 10 > 9 ]] && echo 'string compare: 10 > 9' || echo 'string compare: \"10\" sorts BEFORE \"9\"'",
+       "output": "string compare: \"10\" sorts BEFORE \"9\""
+      },
+      {
+       "cmd": "touch present.txt; [ -f present.txt ] && echo 'file exists'; [ -d /tmp ] && echo 'directory exists'; [[ present.txt == *.txt ]] && echo 'pattern matched'",
+       "output": "file exists\ndirectory exists\npattern matched"
+      }
+     ],
+     "after": "The classic trap: inside `[[ ]]` the operators `<` and `>` compare **strings**. Use `-gt`/`-lt` or `(( 10 > 9 ))` for numbers."
+    },
+    {
+     "title": "&& and ||",
+     "text": "`cmd1 && cmd2` runs cmd2 only if cmd1 succeeded; `cmd1 || cmd2` only if it failed. They are the shortest conditionals.",
+     "run": [
+      {
+       "cmd": "true && echo 'ran because the first succeeded'",
+       "output": "ran because the first succeeded"
+      },
+      {
+       "cmd": "false || echo 'ran because the first failed'",
+       "output": "ran because the first failed"
+      },
+      {
+       "cmd": "mkdir -p newdir && cd newdir && pwd | sed 's#.*/##'; cd ..",
+       "output": "newdir"
+      }
+     ]
+    },
+    {
+     "title": "case",
+     "text": "`case` matches a value against patterns: good for options and file types.",
+     "run": [
+      {
+       "cmd": "f=report.pdf; case $f in *.txt) echo text;; *.pdf|*.ps) echo 'document';; *) echo other;; esac",
+       "output": "document"
+      }
+     ]
+    },
+    {
+     "title": "Loops over words, files and numbers",
+     "text": "`for x in LIST` loops over words; a glob gives file names; `seq` or `{1..3}` numbers; `while read` processes lines. Always quote variables that may contain spaces.",
+     "run": [
+      {
+       "cmd": "for f in *.sh; do echo \"script: $f\"; done",
+       "output": "script: greet.sh"
+      },
+      {
+       "cmd": "for i in {1..3}; do echo -n \"$i \"; done; echo",
+       "output": "1 2 3 "
+      },
+      {
+       "cmd": "printf 'one\\ntwo words\\nthree\\n' | while read -r line; do echo \"[$line]\"; done",
+       "output": "[one]\n[two words]\n[three]"
+      }
+     ]
+    },
+    {
+     "title": "Arithmetic and reading input",
+     "text": "`$(( ))` calculates with integers, `(( ))` tests. `read -r VAR` reads a line; `<<<` feeds a string (a here-string).",
+     "run": [
+      {
+       "cmd": "x=7; echo $((x * 6)); (( x > 5 )) && echo 'x is bigger than 5'",
+       "output": "42\nx is bigger than 5"
+      },
+      {
+       "cmd": "read -r a b <<< 'first second third'; echo \"a=$a b=$b\"",
+       "output": "a=first b=second third"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is wrong with `name = bob` in bash?",
+     "options": [
+      "Nothing",
+      "Spaces around `=`: bash runs a command called name",
+      "Missing $",
+      "Needs quotes"
+     ],
+     "answer": 1,
+     "explain": "Assignments take no spaces."
+    },
+    {
+     "q": "What does `${1:-default}` do?",
+     "options": [
+      "Sets $1",
+      "Uses $1, or `default` if it is unset or empty",
+      "Removes $1",
+      "Shifts"
+     ],
+     "answer": 1,
+     "explain": "A default value."
+    },
+    {
+     "q": "Which test compares numbers correctly?",
+     "options": [
+      "[[ 10 > 9 ]]",
+      "[ 10 -gt 9 ]",
+      "[ 10 > 9 ]",
+      "[ \"10\" = \"9\" ]"
+     ],
+     "answer": 1,
+     "explain": "`>` inside [[ ]] compares strings."
+    },
+    {
+     "q": "What does `cmd1 || cmd2` do?",
+     "options": [
+      "Runs both",
+      "Runs cmd2 only if cmd1 failed",
+      "Pipes",
+      "Runs in parallel"
+     ],
+     "answer": 1,
+     "explain": "OR list."
+    }
+   ],
+   "check": {
+    "scenario": "A script must do something only when a file `/etc/app.conf` exists and is not empty. Write the test.",
+    "answer": "`if [ -s /etc/app.conf ]; then ...; fi` (`-s` means exists and size greater than zero). Use `[ -f FILE ] && [ -s FILE ]` if you must also be sure it is a regular file."
+   }
+  },
+  {
+   "id": "functions-arrays",
+   "title": "Functions, arrays and associative arrays",
+   "level": "intermediate",
+   "goal": "Structure scripts with functions (and know how they return values), and store lists and key/value pairs in arrays.\n\nWhy it matters: arrays avoid the quoting bugs of space-separated strings, and functions make scripts readable and testable.",
+   "setup": {
+    "note": "Each script is saved in a scratch directory and run with `bash` or as an executable.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The script",
+     "text": "Run it first, then we explain the parts.",
+     "code": {
+      "file": "lib.sh",
+      "lang": "sh",
+      "src": "#!/bin/bash\nfruits=(apple banana cherry)\necho \"count: ${#fruits[@]}, second: ${fruits[1]}\"\nfruits+=(date)\nfor f in \"${fruits[@]}\"; do echo \"- $f\"; done\n\ndeclare -A age=([alice]=30 [bob]=25)\nage[carol]=41\nfor k in \"${!age[@]}\"; do echo \"$k is ${age[$k]}\"; done | sort\n\nsquare() {\n    local n=$1                 # local: invisible outside the function\n    echo $((n * n))\n}\necho \"square(7) = $(square 7)\"\n\nis_even() { (( $1 % 2 == 0 )); }     # the exit status is the result\nif is_even 10; then echo \"10 is even\"; fi\nif ! is_even 7; then echo \"7 is odd\"; fi\n"
+     },
+     "run": [
+      {
+       "cmd": "bash lib.sh",
+       "output": "count: 3, second: banana\n- apple\n- banana\n- cherry\n- date\nalice is 30\nbob is 25\ncarol is 41\nsquare(7) = 49\n10 is even\n7 is odd"
+      }
+     ]
+    },
+    {
+     "title": "Indexed arrays",
+     "text": "`arr=(a b c)` creates an array; `${arr[1]}` is one element; `${#arr[@]}` the count; `\"${arr[@]}\"` all elements **as separate words, even if they contain spaces**; `arr+=(x)` appends; `${arr[@]:1:2}` is a slice.",
+     "run": [
+      {
+       "cmd": "files=('my notes.txt' 'plan b.md' 'x.sh'); echo \"count: ${#files[@]}\"; for f in \"${files[@]}\"; do echo \"[$f]\"; done",
+       "output": "count: 3\n[my notes.txt]\n[plan b.md]\n[x.sh]"
+      },
+      {
+       "cmd": "echo \"slice: ${files[@]:1:2}\"; echo \"unquoted splits at spaces:\"; for f in ${files[@]}; do echo \"[$f]\"; done | wc -l",
+       "output": "slice: plan b.md x.sh\nunquoted splits at spaces:\n5"
+      }
+     ],
+     "after": "Quoted `\"${files[@]}\"` gives 3 words; unquoted it gives 5, breaking names with spaces. This is the main reason to use arrays."
+    },
+    {
+     "title": "Associative arrays",
+     "text": "`declare -A` creates a key/value map (bash 4+). `${!age[@]}` lists the keys. Order is **not** guaranteed: sort when you need stable output.",
+     "run": [
+      {
+       "cmd": "declare -A port=([http]=80 [https]=443 [ssh]=22); port[dns]=53; for k in \"${!port[@]}\"; do echo \"$k=${port[$k]}\"; done | sort",
+       "output": "dns=53\nhttp=80\nhttps=443\nssh=22"
+      },
+      {
+       "cmd": "echo \"has ssh: ${port[ssh]:-no}, has ftp: ${port[ftp]:-no}\"",
+       "output": "has ssh: 22, has ftp: no"
+      }
+     ]
+    },
+    {
+     "title": "Functions return text or a status",
+     "text": "A function **outputs** values (captured with `$(...)`) and **returns** a small status (0 to 255) that `if` tests. Never use `return` for data. Variables set in a function are global unless declared `local`.",
+     "run": [
+      {
+       "cmd": "f() { x=1; local y=2; echo \"inside: $x $y\"; }; f; echo \"outside: x=$x y=${y:-unset}\"",
+       "output": "inside: 1 2\noutside: x=1 y=unset"
+      },
+      {
+       "cmd": "ok() { return 0; }; bad() { return 3; }; ok; echo \"ok -> $?\"; bad; echo \"bad -> $?\"",
+       "output": "ok -> 0\nbad -> 3"
+      }
+     ],
+     "under": "A function runs in the **current shell**, not in a new process, which is why it can change your variables and `cd`. Calling it in `$(...)` or a pipeline runs it in a subshell, so its variable changes are lost. Functions are looked up before programs, which is why `type NAME` shows `NAME is a function`."
+    },
+    {
+     "title": "Arguments inside functions",
+     "text": "Functions have their own `$1`, `$@`, `$#`. Pass all arguments through with `\"$@\"`.",
+     "run": [
+      {
+       "cmd": "show() { echo \"got $# args: first=$1\"; for a in \"$@\"; do echo \"  <$a>\"; done; }; show 'a b' c",
+       "output": "got 2 args: first=a b\n  <a b>\n  <c>"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `\"${arr[@]}\"` expand to?",
+     "options": [
+      "One word with all elements",
+      "Each element as a separate word, spaces preserved",
+      "The array length",
+      "The first element"
+     ],
+     "answer": 1,
+     "explain": "Always quote it."
+    },
+    {
+     "q": "How do you get a function's data into a variable?",
+     "options": [
+      "return",
+      "x=$(func)",
+      "export func",
+      "func > x"
+     ],
+     "answer": 1,
+     "explain": "Output is captured; return is only a status."
+    },
+    {
+     "q": "What does `local` do?",
+     "options": [
+      "Makes a variable global",
+      "Limits a variable to the function",
+      "Exports it",
+      "Makes it read-only"
+     ],
+     "answer": 1,
+     "explain": "Function scope."
+    },
+    {
+     "q": "Is the key order of an associative array stable?",
+     "options": [
+      "Yes, insertion order",
+      "No, sort the keys if you need order",
+      "Yes, alphabetical",
+      "Only for numbers"
+     ],
+     "answer": 1,
+     "explain": "Order is unspecified."
+    }
+   ],
+   "check": {
+    "scenario": "A script loops over `$(ls)` and breaks on files with spaces. Give the robust rewrite.",
+    "answer": "Use a glob, not `ls`: `for f in ./*; do [ -e \"$f\" ] || continue; echo \"$f\"; done`, or an array: `files=(./*); for f in \"${files[@]}\"; do ...; done`. For recursive lists use `find ... -print0 | while IFS= read -r -d '' f; do ...; done`."
+   }
+  },
+  {
+   "id": "strict-mode-errors",
+   "title": "Error handling: set -euo pipefail, trap and exit codes",
+   "level": "intermediate",
+   "goal": "Make scripts fail loudly and clean up after themselves: `set -e`, `-u`, `pipefail`, `trap`, and the traps of `set -e`.\n\nWhy it matters: by default bash **continues after errors**. A script that deletes `$DIR/*` with an empty `$DIR` is a famous disaster. Strict mode and cleanup traps prevent most of them.",
+   "setup": {
+    "note": "Each script is saved in a scratch directory and run with `bash` or as an executable.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Default: errors are ignored",
+     "text": "Without options, a failing command only sets `$?`. The script goes on.",
+     "run": [
+      {
+       "cmd": "bash -c 'false; echo \"still running after a failure\"'",
+       "output": "still running after a failure"
+      }
+     ]
+    },
+    {
+     "title": "set -e: stop at the first failure",
+     "text": "`set -e` exits the script when a command fails (returns non-zero).",
+     "run": [
+      {
+       "cmd": "bash -c 'set -e; false; echo \"never printed\"'; echo \"exit status: $?\"",
+       "output": "exit status: 1"
+      }
+     ]
+    },
+    {
+     "title": "set -u: unset variables are errors",
+     "text": "`set -u` makes using an undefined variable an error instead of an empty string. It would catch `rm -rf \"$DIR/\"*` with a mistyped variable name.",
+     "run": [
+      {
+       "cmd": "bash -c 'set -u; echo \"value: $undefined_name\"' 2>&1 | sed 's/^bash: line [0-9]*: //'; echo \"exit status: ${PIPESTATUS[0]}\"",
+       "output": "undefined_name: unbound variable\nexit status: 127"
+      }
+     ]
+    },
+    {
+     "title": "pipefail: failures inside pipelines",
+     "text": "The status of a pipeline is normally that of the **last** command, so `false | true` succeeds. `set -o pipefail` makes the pipeline fail if **any** command in it failed.",
+     "run": [
+      {
+       "cmd": "bash -c 'false | true; echo \"without pipefail: $?\"'",
+       "output": "without pipefail: 0"
+      },
+      {
+       "cmd": "bash -c 'set -o pipefail; false | true; echo \"with pipefail: $?\"'",
+       "output": "with pipefail: 1"
+      }
+     ]
+    },
+    {
+     "title": "trap: always clean up",
+     "text": "`trap 'commands' EXIT` runs the commands whenever the script ends, success or failure. Together with `mktemp -d` it guarantees no temporary files are left behind.",
+     "code": {
+      "file": "safe.sh",
+      "lang": "sh",
+      "src": "#!/bin/bash\nset -euo pipefail\ntmp=$(mktemp -d)\ntrap 'rm -rf \"$tmp\"; echo \"cleaned up\"' EXIT\n\necho \"working in a temporary directory\"\necho data > \"$tmp/file\"\ncat \"$tmp/missing\"           # fails: the script stops here\necho \"not reached\"\n"
+     },
+     "run": [
+      {
+       "cmd": "bash safe.sh 2>&1 | sed -E 's#/tmp/tmp\\.[A-Za-z0-9]+#/tmp/tmp.XXXX#; s/^safe.sh: line [0-9]+: //'; echo \"script exit status: ${PIPESTATUS[0]}\"",
+       "output": "working in a temporary directory\ncat: /tmp/tmp.XXXX/missing: No such file or directory\ncleaned up\nscript exit status: 1"
+      }
+     ]
+    },
+    {
+     "title": "The traps of set -e",
+     "text": "`set -e` is **not** triggered inside `if`, `while` conditions and in the left part of `&&`/`||`. And an arithmetic expression that evaluates to 0 returns status 1: `((i++))` with `i=0` kills the script.",
+     "run": [
+      {
+       "cmd": "bash -c 'set -e; i=0; ((i++)); echo \"reached\"'; echo \"exit status: $?\"",
+       "output": "exit status: 1"
+      },
+      {
+       "cmd": "bash -c 'set -e; i=0; i=$((i + 1)); echo \"reached with i=$i\"'",
+       "output": "reached with i=1"
+      },
+      {
+       "cmd": "bash -c 'set -e; if false; then echo no; fi; false || echo \"handled: || suppresses -e\"; echo \"still running\"'",
+       "output": "handled: || suppresses -e\nstill running"
+      }
+     ],
+     "under": "Because of these exceptions many experts prefer **explicit** checks (`cmd || { echo failed >&2; exit 1; }`) over relying on `set -e` alone. A good template starts with `#!/usr/bin/env bash`, `set -euo pipefail`, `IFS=$'\\n\\t'`, a `trap` for cleanup, and `main \"$@\"`. Run `shellcheck` (a static checker) on every script."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `set -o pipefail` change?",
+     "options": [
+      "Pipes run faster",
+      "A pipeline fails if any command in it fails",
+      "Errors are hidden",
+      "stdout is buffered"
+     ],
+     "answer": 1,
+     "explain": "Otherwise only the last command's status counts."
+    },
+    {
+     "q": "When does `trap '...' EXIT` run?",
+     "options": [
+      "Only on success",
+      "Whenever the script ends, including after errors",
+      "Only on Ctrl-C",
+      "Never with set -e"
+     ],
+     "answer": 1,
+     "explain": "On every exit."
+    },
+    {
+     "q": "Why can `((i++))` kill a `set -e` script?",
+     "options": [
+      "Syntax error",
+      "The expression's value is 0 when i=0, giving exit status 1",
+      "It overflows",
+      "i is unset"
+     ],
+     "answer": 1,
+     "explain": "Arithmetic commands return 1 for a zero result."
+    },
+    {
+     "q": "What does `set -u` protect against?",
+     "options": [
+      "Slow loops",
+      "Using a variable that was never set",
+      "Wrong permissions",
+      "Missing files"
+     ],
+     "answer": 1,
+     "explain": "Typos in variable names."
+    }
+   ],
+   "check": {
+    "scenario": "Review this line: `rm -rf \"$BUILD_DIR\"/*`. What can go wrong and how do you make it safe?",
+    "answer": "If `BUILD_DIR` is unset or empty it becomes `rm -rf /*`. Use `set -u` and the guard `rm -rf \"${BUILD_DIR:?BUILD_DIR must be set}\"/*`, which aborts with an error when the variable is empty. Also quote it and prefer deleting a known sub-directory (`rm -rf -- \"$BUILD_DIR/out\"`)."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What does set -euo pipefail do?",
+   "a": "-e exits on a failing command, -u errors on unset variables, -o pipefail makes a pipeline fail if any stage fails. See [the lesson](#/lesson/45/strict-mode-errors).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why quote \"$var\"?",
+   "a": "To stop word splitting and globbing: an unquoted value with spaces becomes several words. See [expansion order](#/lesson/1/expansion-order).",
+   "level": "beginner"
+  },
+  {
+   "q": "[ ] versus [[ ]]?",
+   "a": "[ is the test command (POSIX); [[ ]] is a bash keyword with pattern matching, && and || inside and no word splitting. Inside [[ ]], < and > compare strings.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How does a function return a value?",
+   "a": "It prints it (captured with $(...)); `return` only sets an exit status 0 to 255.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you clean up temp files reliably?",
+   "a": "`tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT`.",
+   "level": "intermediate"
+  },
+  {
+   "q": "When does set -e not stop the script?",
+   "a": "In conditions (`if`, `while`), in `&&`/`||` lists except the last command, and in commands whose status is tested. See [the lesson](#/lesson/45/strict-mode-errors).",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Shebang",
+   "def": "The first line (#!/bin/bash) naming the interpreter of a script.",
+   "lesson": "45/variables-conditions-loops"
+  },
+  {
+   "term": "Exit status",
+   "def": "The number a command returns: 0 success, non-zero failure; in $?.",
+   "lesson": "45/variables-conditions-loops"
+  },
+  {
+   "term": "Array",
+   "def": "A bash variable holding a list of words (indexed) or key/value pairs (associative).",
+   "lesson": "45/functions-arrays"
+  },
+  {
+   "term": "Strict mode",
+   "def": "set -euo pipefail: stop on errors, unset variables and failed pipeline stages.",
+   "lesson": "45/strict-mode-errors"
+  },
+  {
+   "term": "trap",
+   "def": "A bash builtin that runs commands on signals or at exit.",
+   "lesson": "45/strict-mode-errors"
+  },
+  {
+   "term": "mktemp",
+   "def": "Creates a temporary file or directory with a unique name.",
+   "lesson": "45/strict-mode-errors"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "chmod +x script.sh",
+   "desc": "Make a script executable.",
+   "topic": "Scripting",
+   "lesson": "45/variables-conditions-loops"
+  },
+  {
+   "cmd": "[ -f FILE ] && echo yes",
+   "desc": "Test if a file exists.",
+   "topic": "Scripting",
+   "lesson": "45/variables-conditions-loops"
+  },
+  {
+   "cmd": "for f in ./*; do echo \"$f\"; done",
+   "desc": "Loop over files safely.",
+   "topic": "Scripting",
+   "lesson": "45/variables-conditions-loops"
+  },
+  {
+   "cmd": "arr=(a b c); echo \"${arr[@]}\"",
+   "desc": "Create and print an array.",
+   "topic": "Scripting",
+   "lesson": "45/functions-arrays"
+  },
+  {
+   "cmd": "declare -A map=([k]=v)",
+   "desc": "Create an associative array.",
+   "topic": "Scripting",
+   "lesson": "45/functions-arrays"
+  },
+  {
+   "cmd": "set -euo pipefail",
+   "desc": "Strict mode at the top of a script.",
+   "topic": "Scripting",
+   "lesson": "45/strict-mode-errors"
+  },
+  {
+   "cmd": "trap 'rm -rf \"$tmp\"' EXIT",
+   "desc": "Clean up at exit.",
+   "topic": "Scripting",
+   "lesson": "45/strict-mode-errors"
+  },
+  {
+   "cmd": "${VAR:?message}",
+   "desc": "Abort if VAR is unset or empty.",
+   "topic": "Scripting",
+   "lesson": "45/strict-mode-errors"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

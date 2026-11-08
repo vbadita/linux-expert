@@ -1,0 +1,421 @@
+{
+ "title": "The boot process",
+ "lessons": [
+  {
+   "id": "boot-sequence",
+   "title": "The boot process: firmware, boot loader, kernel, initramfs, systemd",
+   "level": "intermediate",
+   "goal": "Follow a Linux machine from power-on to a login prompt, and find the evidence for each stage on a running system.\n\nWhy it matters: when a server does not boot, the stage where it stops tells you where to look. Knowing the chain turns \"it won't boot\" into a short list of suspects.",
+   "setup": {
+    "note": "Most steps only read boot information (some need sudo to read /boot). Nothing is changed.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The chain",
+     "text": "1. **Firmware** (UEFI, or legacy BIOS) initialises hardware and finds a boot loader.\n2. The **boot loader** (GRUB2) shows a menu, loads the **kernel** and the **initramfs** into memory and passes the command line.\n3. The **kernel** starts, initialises drivers, unpacks the initramfs as a temporary root.\n4. The **initramfs** (early user space, built by `dracut`) loads storage drivers, unlocks and assembles disks (LVM, RAID, LUKS) and mounts the real root.\n5. It switches to the real root and starts **PID 1**, `systemd`, which starts everything else up to the default **target**.",
+     "run": [
+      {
+       "cmd": "[ -d /sys/firmware/efi ] && echo 'this machine booted with UEFI' || echo 'this machine booted with BIOS'",
+       "output": "this machine booted with UEFI"
+      }
+     ]
+    },
+    {
+     "title": "Stage 1: firmware and the EFI system partition",
+     "text": "UEFI loads a boot loader from the **EFI system partition** (ESP), a small FAT partition. Its partition type marks it. The `efivars` directory is the firmware's variable store.",
+     "run": [
+      {
+       "cmd": "ls /sys/firmware/efi | tr '\\n' ' '; echo",
+       "output": "efivars fw_platform_size mok-variables systab "
+      },
+      {
+       "cmd": "sudo lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME /dev/sda | sed -n '1,4p'",
+       "output": "NAME                SIZE FSTYPE      PARTTYPENAME\nsda                  50G             \n├─sda1              100M vfat        EFI System\n├─sda2                2G xfs         Linux filesystem"
+      }
+     ]
+    },
+    {
+     "title": "Stage 2: the boot loader entry",
+     "text": "GRUB reads boot entries (BLS format in `/boot/loader/entries`). Each lists the kernel, the initramfs and the command line. We print the first entry's key lines.",
+     "run": [
+      {
+       "cmd": "sudo sh -c 'cat /boot/loader/entries/*.conf' | grep -v rescue | grep -E '^(title|version|linux|initrd)' | sed -E 's/[0-9a-f]{32}/<id>/g' | head -n 4",
+       "output": "title Oracle Linux Server (6.12.0-206.104.4.4.el9uek.aarch64 with Unbreakable Enterprise Kernel) 9.8\nversion 6.12.0-206.104.4.4.el9uek.aarch64\nlinux /vmlinuz-6.12.0-206.104.4.4.el9uek.aarch64\ninitrd /initramfs-6.12.0-206.104.4.4.el9uek.aarch64.img $tuned_initrd"
+      }
+     ]
+    },
+    {
+     "title": "Stage 3: the kernel's first messages",
+     "text": "The kernel keeps a ring buffer of messages. The first lines show the kernel version and the command line it received.",
+     "run": [
+      {
+       "cmd": "sudo dmesg | sed -n '1,3p' | sed -E 's/^\\[[^]]*\\] //' | cut -d'(' -f1",
+       "output": "Booting Linux on physical CPU 0x0000000000 [0x413fd0c1]\nLinux version 6.12.0-206.104.4.4.el9uek.aarch64 \nKASLR enabled"
+      },
+      {
+       "cmd": "tr ' ' '\\n' < /proc/cmdline | grep -E '^(root|rd\\.lvm\\.lv)='",
+       "output": "root=/dev/mapper/ocivolume-root\nrd.lvm.lv=ocivolume/root"
+      }
+     ]
+    },
+    {
+     "title": "Stage 4: the initramfs",
+     "text": "The initramfs is a compressed archive. `lsinitrd` lists it: a tiny root with `systemd`, the storage drivers and tools needed to find the real root.",
+     "run": [
+      {
+       "cmd": "sudo lsinitrd /boot/initramfs-$(uname -r).img | sed -n '1,3p' | cut -c1-90",
+       "output": "Image: /boot/initramfs-6.12.0-206.104.4.4.el9uek.aarch64.img: 76M\n========================================================================\nVersion: dracut-057-120.git20260728.0.2.el9_8"
+      },
+      {
+       "cmd": "sudo lsinitrd -m /boot/initramfs-$(uname -r).img | grep -E '^(systemd|lvm|dm|crypt|nvme)' | tr '\\n' ' '; echo",
+       "output": "systemd systemd-initrd systemd-sysusers crypt dm lvm "
+      },
+      {
+       "cmd": "sudo lsinitrd /boot/initramfs-$(uname -r).img | grep -E ' init -> ' | sed -E 's/.* (init -> .*)/\\1/'",
+       "output": "init -> usr/lib/systemd/systemd"
+      }
+     ],
+     "under": "The kernel unpacks the initramfs into a RAM file system (`rootfs`) and runs `/init` from it (which is `systemd` in dracut). When the real root is mounted at `/sysroot`, `systemd` performs `switch-root`: it moves the mounts, makes `/sysroot` the new `/`, frees the initramfs memory and executes the real `systemd`."
+    },
+    {
+     "title": "Stage 5: systemd and the default target",
+     "text": "systemd starts units to reach the **default target**. `multi-user.target` is a text server, `graphical.target` adds a display manager. `systemd-analyze` shows the time spent in each stage.",
+     "run": [
+      {
+       "cmd": "systemctl get-default",
+       "output": "multi-user.target"
+      },
+      {
+       "cmd": "systemd-analyze | sed 's/ = .*//' ",
+       "output": "Startup finished in 1.054s (kernel) + 5.628s (initrd) + 43.312s (userspace)\nmulti-user.target reached after 29.901s in userspace."
+      },
+      {
+       "cmd": "systemd-analyze critical-chain --no-pager | sed -n '1,6p' | cut -c1-80",
+       "output": "The time when unit became active or started is printed after the \"@\" character.\nThe time the unit took to start is printed after the \"+\" character.\n\nmulti-user.target @29.901s\n└─pmie.service @16.065s +1.551s\n  └─pmcd.service @13.898s +2.128s"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What loads the kernel and initramfs?",
+     "options": [
+      "systemd",
+      "The boot loader (GRUB)",
+      "udev",
+      "init.d"
+     ],
+     "answer": 1,
+     "explain": "The boot loader loads both into memory."
+    },
+    {
+     "q": "What is the initramfs for?",
+     "options": [
+      "Swap",
+      "Early user space that makes the real root file system available",
+      "Logs",
+      "Firmware updates"
+     ],
+     "answer": 1,
+     "explain": "It finds and mounts the root."
+    },
+    {
+     "q": "Which process is PID 1 on modern distributions?",
+     "options": [
+      "init (SysV)",
+      "systemd",
+      "grub",
+      "bash"
+     ],
+     "answer": 1,
+     "explain": "systemd, after switch-root."
+    },
+    {
+     "q": "Where does UEFI look for the boot loader?",
+     "options": [
+      "MBR",
+      "The EFI system partition (FAT)",
+      "/etc",
+      "The kernel"
+     ],
+     "answer": 1,
+     "explain": "On the ESP."
+    }
+   ],
+   "check": {
+    "scenario": "A server stops at `Dropping to initramfs` / `dracut-initqueue: timeout, still waiting for /dev/mapper/vg-root`. Which stage failed and what do you check?",
+    "answer": "The kernel started and the initramfs ran, but it could not find the root device: a storage driver missing from the initramfs, a wrong `root=` or `rd.lvm.lv=` on the command line, a missing disk, or a broken LVM/RAID. Use the dracut shell: `lsblk`, `lvm vgscan; lvm vgchange -ay`, `cat /proc/cmdline`, `dmesg | tail`. Fix by rebuilding the initramfs (`dracut --force`) from a rescue boot."
+   }
+  },
+  {
+   "id": "boot-debugging",
+   "title": "Boot targets, rescue modes and boot analysis",
+   "level": "advanced",
+   "goal": "Learn the recovery levers: which targets exist, how to boot into a minimal one, how to inspect a failed boot, and how to see what slows a boot down.\n\nWhy it matters: these are the tools for a server that boots to emergency mode or takes 10 minutes to come up.",
+   "setup": {
+    "note": "Most steps only read boot information (some need sudo to read /boot). Nothing is changed.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Targets are the goals of a boot",
+     "text": "A **target** groups units and represents a state. Common ones: `rescue.target` (single-user root shell with basic services), `emergency.target` (root shell with only the root file system read-only), `multi-user.target`, `graphical.target`. `systemctl list-dependencies` shows what a target pulls in.",
+     "run": [
+      {
+       "cmd": "systemctl list-dependencies multi-user.target --no-pager | grep -E 'atd|auditd|chronyd|crond|firewalld|sshd' | sed 's/^● //'",
+       "output": "├─atd.service\n├─auditd.service\n├─chronyd.service\n├─crond.service\n├─firewalld.service\n├─sshd.service\n│ ├─rpc-statd-notify.service\n    ├─rpc-statd-notify.service"
+      },
+      {
+       "cmd": "systemctl list-units --type=target --no-pager | awk 'NR>1 && $1 ~ /target/ {print $1}' | head -n 8 | tr '\\n' ' '; echo",
+       "output": "basic.target cloud-config.target cloud-init.target cryptsetup.target dtrace-usdt.target getty.target integritysetup.target local-fs-pre.target "
+      }
+     ]
+    },
+    {
+     "title": "Booting into a minimal target (not run)",
+     "text": "At the GRUB menu press `e`, add one of these to the end of the `linux` line, and press `Ctrl-x`:\n\n- `systemd.unit=rescue.target` or `emergency.target`\n- `rd.break` stops inside the initramfs before the root is switched, for recovering a root password or repairing the root file system\n- `single` or `1` is a shortcut for rescue\n\nOn a running machine: `systemctl isolate rescue.target` (kills your session).",
+     "run": [
+      {
+       "cmd": "systemctl isolate rescue.target",
+       "explanationOnly": true,
+       "reason": "it would stop network and user sessions on this machine"
+      },
+      {
+       "cmd": "grubby --update-kernel=ALL --args='systemd.unit=rescue.target'",
+       "explanationOnly": true,
+       "reason": "it changes the boot configuration of this machine"
+      }
+     ]
+    },
+    {
+     "title": "Failed units after a boot",
+     "text": "`systemctl --failed` lists units that failed. `systemctl status UNIT` and `journalctl -u UNIT -b` give the reason. A boot that reaches emergency mode usually has a failed **mount** unit from `/etc/fstab`.",
+     "run": [
+      {
+       "cmd": "systemctl --failed --no-legend --no-pager | wc -l",
+       "output": "8"
+      },
+      {
+       "cmd": "systemctl list-units --type=mount --no-pager --no-legend | awk '{print $1, $3, $4}' | head -n 4",
+       "output": "-.mount active mounted\nboot-efi.mount active mounted\nboot.mount active mounted\ndev-hugepages.mount active mounted"
+      }
+     ]
+    },
+    {
+     "title": "Logs of this and earlier boots",
+     "text": "The journal can keep several boots. `-b` selects one, `-p err` shows only errors and worse, `-k` shows kernel messages.",
+     "run": [
+      {
+       "cmd": "journalctl --list-boots --no-pager | wc -l",
+       "output": "2"
+      },
+      {
+       "cmd": "journalctl -b -k -p warning -o cat --no-pager | wc -l",
+       "output": "160"
+      },
+      {
+       "cmd": "journalctl -b -p err -o cat --no-pager | wc -l",
+       "output": "149"
+      }
+     ]
+    },
+    {
+     "title": "What made the boot slow?",
+     "text": "`systemd-analyze blame` lists units by time to start. `critical-chain` shows the dependency path that determined the total. Services that run for minutes (like timers started at boot) do not delay the target if nothing waits for them.",
+     "run": [
+      {
+       "cmd": "systemd-analyze blame --no-pager | grep -E 'kdump|ksplice|cloud-init' | head -n 3",
+       "output": "     29.058s kdump.service\n     23.706s ksplice.service\n      4.109s cloud-init.service"
+      },
+      {
+       "cmd": "systemd-analyze time | head -n 1",
+       "output": "Startup finished in 1.054s (kernel) + 5.628s (initrd) + 43.312s (userspace) = 49.996s "
+      }
+     ],
+     "under": "Boot time = firmware + loader + kernel + initrd + userspace. `systemd-analyze` splits the last three. Typical fixes: remove services that wait for a network that is not there (`NetworkManager-wait-online`), make fstab entries `nofail`, enable `systemd-resolved` caches, and run slow jobs after boot."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which kernel argument stops the boot inside the initramfs?",
+     "options": [
+      "single",
+      "rd.break",
+      "quiet",
+      "ro"
+     ],
+     "answer": 1,
+     "explain": "rd.break gives a shell before switch-root."
+    },
+    {
+     "q": "Which target gives a root shell with only the root file system, read-only?",
+     "options": [
+      "multi-user.target",
+      "emergency.target",
+      "graphical.target",
+      "reboot.target"
+     ],
+     "answer": 1,
+     "explain": "emergency.target."
+    },
+    {
+     "q": "What command lists units that failed?",
+     "options": [
+      "systemctl --failed",
+      "systemctl list-boots",
+      "journalctl --failed",
+      "dmesg -f"
+     ],
+     "answer": 0,
+     "explain": "`systemctl --failed`."
+    },
+    {
+     "q": "A boot reached emergency mode right after you edited /etc/fstab. First suspect?",
+     "options": [
+      "Kernel bug",
+      "A failed mount unit from a bad fstab entry",
+      "Firmware",
+      "DNS"
+     ],
+     "answer": 1,
+     "explain": "Mount failures stop boot; use nofail for optional disks."
+    }
+   ],
+   "check": {
+    "scenario": "You forgot the root password of a server (no sudo user). How do you reset it on RHEL/Oracle Linux, with console access?",
+    "answer": "Interrupt GRUB, press `e`, append `rd.break` to the `linux` line, boot (`Ctrl-x`). In the initramfs shell: `mount -o remount,rw /sysroot`, `chroot /sysroot`, `passwd root`, `touch /.autorelabel` (SELinux), `exit`, `exit`. The relabel takes a moment on the next boot. With SELinux enforcing, skipping the relabel makes the new password unusable."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "Describe the Linux boot process.",
+   "a": "Firmware (UEFI) loads the boot loader from the EFI system partition; GRUB loads the kernel and initramfs; the kernel starts and runs the initramfs, which mounts the real root; systemd becomes PID 1 and starts units up to the default target. See [the lesson](#/lesson/24/boot-sequence).",
+   "level": "beginner"
+  },
+  {
+   "q": "What does the initramfs do and why is it needed?",
+   "a": "It is a small early root with the drivers and tools (LVM, RAID, LUKS, storage, network) to find and mount the real root file system, which the kernel alone cannot always do.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the difference between rescue.target and emergency.target?",
+   "a": "Rescue starts basic services and mounts local file systems (single-user). Emergency starts almost nothing and mounts only the root read-only.",
+   "level": "intermediate"
+  },
+  {
+   "q": "A server does not boot after a kernel update. What do you do?",
+   "a": "Choose the previous kernel in the GRUB menu, check `journalctl -b -1`, rebuild the initramfs or reinstall the kernel, and set the working kernel as default with `grubby --set-default`. See [debugging](#/lesson/24/boot-debugging).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you reset a lost root password?",
+   "a": "Boot with `rd.break`, remount /sysroot read-write, chroot, run `passwd`, `touch /.autorelabel`, exit and reboot.",
+   "level": "advanced"
+  },
+  {
+   "q": "How do you find out why a boot is slow?",
+   "a": "`systemd-analyze`, `systemd-analyze blame` and `critical-chain`, then fix waiting units (network wait, fstab entries without nofail).",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "UEFI",
+   "def": "Modern firmware that loads boot loaders from the EFI system partition.",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "term": "ESP",
+   "def": "EFI System Partition: a small FAT partition holding boot loaders.",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "term": "GRUB2",
+   "def": "The common Linux boot loader.",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "term": "initramfs",
+   "def": "Early user space loaded with the kernel to mount the real root file system.",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "term": "dracut",
+   "def": "The tool that builds initramfs images on Red Hat family systems.",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "term": "Target",
+   "def": "A systemd unit that groups units to represent a system state (multi-user, rescue).",
+   "lesson": "24/boot-debugging"
+  },
+  {
+   "term": "switch-root",
+   "def": "The step where the system moves from the initramfs to the real root file system.",
+   "lesson": "24/boot-sequence"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "systemd-analyze",
+   "desc": "Show boot time per stage.",
+   "topic": "Boot",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "cmd": "systemd-analyze blame",
+   "desc": "List units by start time.",
+   "topic": "Boot",
+   "lesson": "24/boot-debugging"
+  },
+  {
+   "cmd": "systemd-analyze critical-chain",
+   "desc": "Show the path that limited boot speed.",
+   "topic": "Boot",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "cmd": "systemctl get-default",
+   "desc": "Show the default target.",
+   "topic": "Boot",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "cmd": "systemctl --failed",
+   "desc": "List failed units.",
+   "topic": "Boot",
+   "lesson": "24/boot-debugging"
+  },
+  {
+   "cmd": "journalctl -b -1",
+   "desc": "Show the previous boot's log.",
+   "topic": "Boot",
+   "lesson": "24/boot-debugging"
+  },
+  {
+   "cmd": "sudo lsinitrd IMG",
+   "desc": "List an initramfs.",
+   "topic": "Boot",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "cmd": "sudo dracut --force",
+   "desc": "Rebuild the initramfs of the running kernel.",
+   "topic": "Boot",
+   "lesson": "24/boot-sequence"
+  },
+  {
+   "cmd": "sudo grubby --set-default KERNEL",
+   "desc": "Choose the default boot kernel.",
+   "topic": "Boot",
+   "lesson": "24/boot-debugging"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

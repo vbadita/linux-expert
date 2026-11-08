@@ -1,0 +1,356 @@
+{
+ "title": "RAID, I/O schedulers, iostat",
+ "lessons": [
+  {
+   "id": "mdadm-raid",
+   "title": "Software RAID with mdadm",
+   "level": "intermediate",
+   "goal": "Build a RAID 1 (mirror) from two disks, watch it survive the failure of one, and rebuild it.\n\nWhy it matters: RAID protects against disk failure (not against deletion or corruption: it is not a backup). Knowing the commands is essential when a disk dies at 3 a.m.",
+   "setup": {
+    "note": "These steps use sudo and loop devices (image files acting as disks). They create a volume group called `labvg` and remove it at the end. They never touch real disks.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "RAID levels in short",
+     "text": "- **RAID 0**: striping, speed, no protection.\n- **RAID 1**: mirror, survives one disk loss, half the capacity.\n- **RAID 5**: striping with one parity, survives one disk, needs 3+.\n- **RAID 6**: two parities, survives two disks.\n- **RAID 10**: striped mirrors: speed and protection.\n\nLinux software RAID is the `md` driver, managed by `mdadm`. We use two 100 MB loop devices.",
+     "run": [
+      {
+       "cmd": "truncate -s 100M r1.img r2.img; L1=$(sudo losetup -f --show r1.img); L2=$(sudo losetup -f --show r2.img); echo $L1 $L2",
+       "output": "/dev/loop0 /dev/loop1"
+      }
+     ]
+    },
+    {
+     "title": "Create a mirror",
+     "text": "`--level=1 --raid-devices=2` builds a RAID 1 from the two devices. The new device appears as `/dev/md/labmd` (a link to `/dev/mdN`).",
+     "run": [
+      {
+       "cmd": "sudo mdadm --create /dev/md/labmd --level=1 --raid-devices=2 --metadata=1.2 --run $L1 $L2 2>&1 | grep -v -i 'metadata\\|defaulting' | sed 's#/dev/loop[0-9]*#DISK#g'",
+       "output": "mdadm: array /dev/md/labmd started."
+      },
+      {
+       "cmd": "cat /proc/mdstat | grep -A1 '^md' | sed -E 's/loop[0-9]+/loopN/g'",
+       "output": "md127 : active raid1 loopN[1] loopN[0]\n      101376 blocks super 1.2 [2/2] [UU]"
+      }
+     ]
+    },
+    {
+     "title": "Inspect the array",
+     "text": "`mdadm --detail` shows the state, number of devices and each member.",
+     "run": [
+      {
+       "cmd": "sudo mdadm --detail /dev/md/labmd | grep -E 'Raid Level|Array Size|State :|Active Devices|Working Devices|Failed Devices' | sed 's/^ *//'",
+       "output": "Raid Level : raid1\nArray Size : 101376 (99.00 MiB 103.81 MB)\nState : clean \nActive Devices : 2\nWorking Devices : 2\nFailed Devices : 0"
+      }
+     ]
+    },
+    {
+     "title": "Use it",
+     "text": "It is a normal block device. We put a file system on it and write a file.",
+     "run": [
+      {
+       "cmd": "sudo mkfs.ext4 -q /dev/md/labmd; sudo mkdir -p /tmp/lab/raid && sudo mount /dev/md/labmd /tmp/lab/raid && sudo chown $(id -un): /tmp/lab/raid; echo 'survives a disk failure' > /tmp/lab/raid/data.txt; sync; cat /tmp/lab/raid/data.txt",
+       "output": "survives a disk failure"
+      }
+     ]
+    },
+    {
+     "title": "Fail one disk",
+     "text": "`--fail` marks a member as faulty (as the kernel does when it sees I/O errors). The array becomes **degraded** but keeps working. The `_` in `[U_]` marks the missing member.",
+     "run": [
+      {
+       "cmd": "sudo mdadm /dev/md/labmd --fail $L1 2>&1 | sed 's#/dev/loop[0-9]*#DISK#'",
+       "output": ""
+      },
+      {
+       "cmd": "cat /proc/mdstat | grep -A1 '^md' | tail -n 1 | sed -E 's/^ *[0-9]+ blocks //'",
+       "output": "super 1.2 [2/1] [_U]"
+      },
+      {
+       "cmd": "cat /tmp/lab/raid/data.txt; echo 'written while degraded' >> /tmp/lab/raid/data.txt; sync; wc -l < /tmp/lab/raid/data.txt",
+       "output": "survives a disk failure\n2"
+      }
+     ]
+    },
+    {
+     "title": "Replace and rebuild",
+     "text": "Remove the failed member, add a (new) one, and the array **resyncs** in the background. With a real replacement disk you would `--add` the new device.",
+     "run": [
+      {
+       "cmd": "sudo mdadm /dev/md/labmd --remove $L1 2>&1 | sed 's#/dev/loop[0-9]*#DISK#'; sudo mdadm /dev/md/labmd --add $L1 2>&1 | sed 's#/dev/loop[0-9]*#DISK#'; sleep 2",
+       "output": "mdadm: hot removed DISK from /dev/md/labmd\nmdadm: added DISK"
+      },
+      {
+       "cmd": "cat /proc/mdstat | grep -A1 '^md' | tail -n 1 | sed -E 's/^ *[0-9]+ blocks //'",
+       "output": "super 1.2 [2/2] [UU]"
+      },
+      {
+       "cmd": "sudo mdadm --detail /dev/md/labmd | grep -E 'State :' | sed 's/^ *//'",
+       "output": "State : clean "
+      }
+     ]
+    },
+    {
+     "title": "Clean up",
+     "text": "Unmount, stop the array, wipe the RAID metadata, detach the loops.",
+     "run": [
+      {
+       "cmd": "sudo umount /tmp/lab/raid; sudo mdadm --stop /dev/md/labmd 2>&1 | sed -E 's#/dev/md[0-9]+#/dev/mdN#'; sudo mdadm --zero-superblock $L1 $L2; sudo losetup -d $L1 $L2; echo cleaned",
+       "output": "mdadm: stopped /dev/md/labmd\ncleaned"
+      }
+     ],
+     "under": "Each member has an **md superblock** (metadata 1.2 near the start of the device) with the array UUID, level, and an event counter. At assembly the kernel compares event counters to find which member is stale. RAID is **availability**, not backup: it faithfully mirrors a deleted file or a ransomware-encrypted one."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "How many disk failures does RAID 1 with two disks survive?",
+     "options": [
+      "0",
+      "1",
+      "2",
+      "3"
+     ],
+     "answer": 1,
+     "explain": "One: the other copy remains."
+    },
+    {
+     "q": "What does `[U_]` in /proc/mdstat mean?",
+     "options": [
+      "Both disks up",
+      "One member is missing (degraded)",
+      "Resyncing",
+      "Stopped"
+     ],
+     "answer": 1,
+     "explain": "U = up, _ = missing."
+    },
+    {
+     "q": "Is RAID a backup?",
+     "options": [
+      "Yes",
+      "No, it mirrors mistakes and deletions too",
+      "Only RAID 6",
+      "Only with LVM"
+     ],
+     "answer": 1,
+     "explain": "RAID protects against hardware failure only."
+    },
+    {
+     "q": "Which tool manages Linux software RAID?",
+     "options": [
+      "lvm",
+      "mdadm",
+      "parted",
+      "fsck"
+     ],
+     "answer": 1,
+     "explain": "mdadm manages md arrays."
+    }
+   ],
+   "check": {
+    "scenario": "The monitoring shows `md0` degraded, `[U_]`. Walk through the replacement.",
+    "answer": "`mdadm --detail /dev/md0` and `cat /proc/mdstat` to see which member failed; `smartctl` to confirm; `mdadm /dev/md0 --fail /dev/sdb1 --remove /dev/sdb1` if not already removed; replace the disk, copy the partition table (`sfdisk -d /dev/sda | sfdisk /dev/sdb`), `mdadm /dev/md0 --add /dev/sdb1`, watch the resync in `/proc/mdstat`, and reinstall the boot loader on the new disk if it is a boot array."
+   }
+  },
+  {
+   "id": "io-schedulers-iostat",
+   "title": "I/O schedulers and iostat",
+   "level": "intermediate",
+   "goal": "Learn how the kernel orders disk requests (the I/O scheduler), how to see the current one, and how to read `iostat` to judge whether a disk is busy.\n\nWhy it matters: \"the disk is slow\" is easy to say and hard to prove. `iostat -x` shows utilisation, latency and queue depth, so you can prove it.",
+   "setup": {
+    "note": "These steps use sudo and loop devices (image files acting as disks). They create a volume group called `labvg` and remove it at the end. They never touch real disks.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The schedulers",
+     "text": "The **I/O scheduler** sits between the file system and the disk driver. Modern multi-queue (`blk-mq`) kernels offer: `none` (no reordering: best for fast NVMe SSDs), `mq-deadline` (guarantees each request a deadline, good default), `kyber` (latency targets for fast devices) and `bfq` (fair sharing between processes, good for desktops and slow disks).",
+     "run": [
+      {
+       "cmd": "cat /sys/block/sda/queue/scheduler",
+       "output": "none [mq-deadline] kyber bfq "
+      },
+      {
+       "cmd": "cat /sys/block/sda/queue/rotational",
+       "output": "1"
+      }
+     ]
+    },
+    {
+     "title": "Change it (until reboot)",
+     "text": "Write a name into the file as root. Persist it with a udev rule or a tuned profile. We test on a loop device.",
+     "run": [
+      {
+       "cmd": "truncate -s 300M s.img; L=$(sudo losetup -f --show s.img); b=$(basename $L); cat /sys/block/$b/queue/scheduler",
+       "output": "[none] mq-deadline kyber bfq "
+      },
+      {
+       "cmd": "echo mq-deadline | sudo tee /sys/block/$b/queue/scheduler; cat /sys/block/$b/queue/scheduler",
+       "output": "mq-deadline\nnone [mq-deadline] kyber bfq "
+      },
+      {
+       "cmd": "echo none | sudo tee /sys/block/$b/queue/scheduler; cat /sys/block/$b/queue/scheduler",
+       "output": "none\n[none] mq-deadline kyber bfq "
+      }
+     ]
+    },
+    {
+     "title": "Generate I/O and watch with iostat",
+     "text": "`iostat -x 1 2` prints extended statistics per device. The first report is the average since boot; the second covers the last second. We write to the loop device in the background while iostat samples it.",
+     "run": [
+      {
+       "cmd": "sudo dd if=/dev/zero of=$L bs=1M count=250 oflag=direct status=none & sleep 0.5; iostat -dx 1 2 $b | awk '$1==\"'$b'\" {w=$8; k=$9; a=$12; u=$NF} END {print \"device w/s wkB/s w_await %util\"; print \"'$b'\", w, k, a, u}'; wait",
+       "output": "[1] 3470829\ndevice w/s wkB/s w_await %util\nloop0 0.00 0.00 0.00 0.00"
+      }
+     ],
+     "after": "Columns to read first: `w/s` (writes per second), `wkB/s` (throughput), `w_await` (average write latency in ms) and `%util` (how busy the device was). Because loop devices sit on a file, the numbers are only illustrative."
+    },
+    {
+     "title": "How to read it",
+     "text": "- **%util** near 100% on a single disk means saturated (not meaningful for SSDs/arrays that serve many requests in parallel).\n- **await** (ms per request, queue + service) rising under load means queuing.\n- **aqu-sz** (average queue size) above the number of parallel units means a backlog.\n- High `%util` with low throughput suggests random small I/O.",
+     "run": [
+      {
+       "cmd": "sudo losetup -d $L; echo detached",
+       "output": "detached"
+      }
+     ],
+     "under": "Throughput and latency are different questions. A disk can show 100% util at 5 MB/s (random 4 KB reads) and low util at 500 MB/s (sequential). Look at `await` and `aqu-sz` together with the workload type. `iotop`/`pidstat -d` attribute the I/O to processes."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which scheduler is usually best for fast NVMe SSDs?",
+     "options": [
+      "bfq",
+      "none",
+      "cfq",
+      "noop-rotational"
+     ],
+     "answer": 1,
+     "explain": "`none` avoids needless work on fast devices."
+    },
+    {
+     "q": "Which iostat column is the average time a request waits and is served?",
+     "options": [
+      "%util",
+      "await",
+      "r/s",
+      "rkB/s"
+     ],
+     "answer": 1,
+     "explain": "await (r_await / w_await)."
+    },
+    {
+     "q": "A single HDD shows %util 100 and await 80 ms. Is it saturated?",
+     "options": [
+      "Probably yes",
+      "No",
+      "Cannot be",
+      "It is idle"
+     ],
+     "answer": 0,
+     "explain": "High utilisation with high latency means it cannot keep up."
+    },
+    {
+     "q": "How do you persist an I/O scheduler choice?",
+     "options": [
+      "echo into sysfs only",
+      "udev rule or tuned profile",
+      "/etc/fstab",
+      "sysctl"
+     ],
+     "answer": 1,
+     "explain": "sysfs writes are lost at reboot."
+    }
+   ],
+   "check": {
+    "scenario": "An application complains of slow disk I/O. `iostat -x 1` shows `%util` 35% and `await` 2 ms on the data disk. What is your conclusion and next step?",
+    "answer": "The disk is **not** the bottleneck: it is lightly used and fast. Look elsewhere: CPU (`mpstat`), memory pressure (`vmstat`), network or storage latency from the application's point of view (strace/`pidstat -d`), locks, or an NFS/remote volume instead of this disk."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "RAID 1, 5, 6 and 10: capacities and failures survived?",
+   "a": "RAID 1: 50% capacity, 1 failure. RAID 5: N-1 disks, 1 failure. RAID 6: N-2, 2 failures. RAID 10: 50%, one per mirror pair (at least 1). See [the lesson](#/lesson/22/mdadm-raid).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Is RAID a backup?",
+   "a": "No. It protects against disk failure only. Deletion, corruption and ransomware are mirrored. You still need versioned backups.",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you decide whether a disk is the bottleneck?",
+   "a": "`iostat -x`: high %util with rising await and a growing queue (aqu-sz) mean saturation; low util means the problem is elsewhere. See [the lesson](#/lesson/22/io-schedulers-iostat).",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "RAID",
+   "def": "Redundant Array of Independent Disks: combining disks for speed and/or protection.",
+   "lesson": "22/mdadm-raid"
+  },
+  {
+   "term": "Degraded array",
+   "def": "A RAID array with a failed or missing member that still serves data.",
+   "lesson": "22/mdadm-raid"
+  },
+  {
+   "term": "I/O scheduler",
+   "def": "The kernel component that orders block I/O requests.",
+   "lesson": "22/io-schedulers-iostat"
+  },
+  {
+   "term": "await",
+   "def": "iostat: average time a request spends queued and served, in ms.",
+   "lesson": "22/io-schedulers-iostat"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "cat /proc/mdstat",
+   "desc": "Show software RAID status.",
+   "topic": "RAID",
+   "lesson": "22/mdadm-raid"
+  },
+  {
+   "cmd": "sudo mdadm --detail /dev/mdN",
+   "desc": "Show RAID array details.",
+   "topic": "RAID",
+   "lesson": "22/mdadm-raid"
+  },
+  {
+   "cmd": "sudo mdadm /dev/mdN --fail DEV --remove DEV",
+   "desc": "Fail and remove a member.",
+   "topic": "RAID",
+   "lesson": "22/mdadm-raid"
+  },
+  {
+   "cmd": "sudo mdadm /dev/mdN --add DEV",
+   "desc": "Add a member and resync.",
+   "topic": "RAID",
+   "lesson": "22/mdadm-raid"
+  },
+  {
+   "cmd": "iostat -x 1",
+   "desc": "Show per-device I/O statistics each second.",
+   "topic": "Performance",
+   "lesson": "22/io-schedulers-iostat"
+  },
+  {
+   "cmd": "cat /sys/block/DEV/queue/scheduler",
+   "desc": "Show the I/O scheduler of a disk.",
+   "topic": "Performance",
+   "lesson": "22/io-schedulers-iostat"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

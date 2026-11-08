@@ -1,0 +1,455 @@
+{
+ "title": "Network troubleshooting",
+ "lessons": [
+  {
+   "id": "symptoms-and-errors",
+   "title": "Reading the symptom: unreachable, refused, timed out",
+   "level": "intermediate",
+   "goal": "Learn that each network error message points at a different layer, reproduce the common ones, and know which command to run for each.\n\nWhy it matters: \"the network doesn't work\" is not a diagnosis. `Network is unreachable`, `No route to host`, `Connection refused` and `Connection timed out` have different causes and different fixes.",
+   "setup": {
+    "note": "These steps build three network namespaces joined by virtual cables (veth pairs): lab-a (10.200.1.1) <-> lab-b, the router (10.200.1.2 and 10.200.2.1) <-> lab-c (10.200.2.2). They use sudo, do not touch your real network, and are removed at the end. A small web server runs in lab-c on port 8080. Needs sudo, tcpdump, nc, mtr, traceroute and curl.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "for n in lab-a lab-b lab-c; do sudo ip netns del $n 2>/dev/null; done; true",
+     "for n in lab-a lab-b lab-c; do sudo ip netns add $n; sudo ip -n $n link set lo up; done",
+     "sudo ip link add va type veth peer name vb1; sudo ip link set va netns lab-a; sudo ip link set vb1 netns lab-b",
+     "sudo ip link add vb2 type veth peer name vc; sudo ip link set vb2 netns lab-b; sudo ip link set vc netns lab-c",
+     "sudo ip -n lab-a addr add 10.200.1.1/24 dev va; sudo ip -n lab-b addr add 10.200.1.2/24 dev vb1; sudo ip -n lab-b addr add 10.200.2.1/24 dev vb2; sudo ip -n lab-c addr add 10.200.2.2/24 dev vc",
+     "sudo ip -n lab-a link set va up; sudo ip -n lab-b link set vb1 up; sudo ip -n lab-b link set vb2 up; sudo ip -n lab-c link set vc up",
+     "sudo ip netns exec lab-b sysctl -qw net.ipv4.ip_forward=1",
+     "sudo ip -n lab-a route add 10.200.2.0/24 via 10.200.1.2; sudo ip -n lab-c route add 10.200.1.0/24 via 10.200.2.1"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Method: go up the layers",
+     "text": "Test from the bottom: (1) the link is up, (2) the address and route are right, (3) the next hop answers, (4) the port is open, (5) the application answers. The error message already tells you where to start. First a baseline where everything works.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-c python3 -m http.server 8080 --bind 10.200.2.2 > /dev/null 2>&1 & echo $! > srv.pid; sleep 1; sudo ip netns exec lab-a curl -s -m 2 -o /dev/null -w 'baseline: http=%{http_code}\\n' http://10.200.2.2:8080/",
+       "output": "[1] 3480713\nbaseline: http=200"
+      }
+     ]
+    },
+    {
+     "title": "Network is unreachable: no route",
+     "text": "The kernel has **no route** for the destination, so nothing is even sent. We delete the route in `lab-a` to the other network.",
+     "run": [
+      {
+       "cmd": "sudo ip -n lab-a route del 10.200.2.0/24",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a ping -c 1 -W 1 10.200.2.2 2>&1 | head -n 1; echo \"exit code: ${PIPESTATUS[0]}\"",
+       "output": "ping: connect: Network is unreachable\nexit code: 2"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a curl -s -m 2 http://10.200.2.2:8080/ ; echo \"curl exit code: $?\"",
+       "output": "curl exit code: 7"
+      },
+      {
+       "cmd": "sudo ip -n lab-a route add 10.200.2.0/24 via 10.200.1.2",
+       "output": ""
+      }
+     ],
+     "after": "`ping` says `Network is unreachable` at once and curl exits with code 7. Look at `ip route get DEST`."
+    },
+    {
+     "title": "Destination Host Unreachable: the next hop does not answer ARP",
+     "text": "A route exists, but the machine cannot find the **next hop's MAC address** (ARP gets no reply): the gateway is down, unplugged, or on another VLAN. We take the router's interface down.",
+     "run": [
+      {
+       "cmd": "sudo ip -n lab-b link set vb1 down; sudo ip -n lab-a neigh flush all",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a ping -c 1 -W 1 10.200.2.2 2>&1 | grep -E 'Unreachable|transmitted' | sed -E 's/, time [0-9]+ms//'",
+       "output": "1 packets transmitted, 0 received, 100% packet loss"
+      },
+      {
+       "cmd": "sudo ip -n lab-a neigh | sed -E 's/lladdr [0-9a-f:]+/lladdr <mac>/'",
+       "output": "10.200.1.2 dev va INCOMPLETE "
+      },
+      {
+       "cmd": "sudo ip -n lab-b link set vb1 up; sleep 1; sudo ip netns exec lab-a ping -c 1 -W 1 10.200.2.2 | grep -E 'transmitted' | sed -E 's/, time [0-9]+ms//'",
+       "output": "1 packets transmitted, 1 received, 0% packet loss"
+      }
+     ],
+     "after": "The neighbour entry is `FAILED`: ARP got no answer. After the link is up again the ping works."
+    },
+    {
+     "title": "Connection refused: the host answers, nobody listens",
+     "text": "The packet arrived, and the host's kernel **replied with a TCP reset**, because no process is listening on that port. This is good news: the network is fine. `curl` and `nc` both show it.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-a curl -s -m 2 -o /dev/null http://10.200.2.2:8081/; echo \"curl exit code: $?\"",
+       "output": "curl exit code: 7"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a nc -zv -w 2 10.200.2.2 8081 2>&1 | sed -E 's/^Ncat: //'",
+       "output": "Version 7.92 ( https://nmap.org/ncat )\nConnection refused."
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a nc -zv -w 2 10.200.2.2 8080 2>&1 | sed -E 's/^Ncat: //; s/[0-9.]+ seconds/N seconds/'",
+       "output": "Version 7.92 ( https://nmap.org/ncat )\nConnected to 10.200.2.2:8080.\n0 bytes sent, 0 bytes received in N seconds."
+      }
+     ]
+    },
+    {
+     "title": "Connection timed out: silence",
+     "text": "Nothing came back: a firewall **dropped** the packets, a route back is missing, or the host is off. Timeouts are the hardest symptom; the next lesson shows how to find where the packets stop. Here is one made by a missing return route.",
+     "run": [
+      {
+       "cmd": "sudo ip -n lab-c route del 10.200.1.0/24",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a curl -s -m 2 -o /dev/null -w 'http=%{http_code}\\n' http://10.200.2.2:8080/; echo \"curl exit code: $?\"",
+       "output": "http=000\ncurl exit code: 28"
+      },
+      {
+       "cmd": "sudo ip -n lab-c route add 10.200.1.0/24 via 10.200.2.1; sudo ip netns exec lab-a curl -s -m 2 -o /dev/null -w 'http=%{http_code}\\n' http://10.200.2.2:8080/",
+       "output": "http=200"
+      }
+     ],
+     "under": "The request reached the server, but the reply had no route back (the server knew no path to 10.200.1.0/24), so it was sent nowhere. From the client: silence. **Asymmetric routing** and missing return routes are classic causes of one-way failures. `ip route get SRC` on the server shows what it will do with replies."
+    },
+    {
+     "title": "Summary table",
+     "text": "- `Network is unreachable`: no route (local).\n- `Destination Host Unreachable` (from your own address): ARP failed for the next hop (local link).\n- `Destination Host Unreachable` (from a router address): that router has no route.\n- `Connection refused`: reached the host; no listener on that port.\n- `Connection timed out`: packets lost in transit (firewall drop, missing return route, host down).\n- `Name or service not known`: DNS, not the network.",
+     "run": [
+      {
+       "cmd": "sudo kill $(cat srv.pid) 2>/dev/null; sleep 0.3; for n in lab-a lab-b lab-c; do sudo ip netns del $n; done; ip netns list | wc -l | awk '{print $1, \"namespaces left\"}'",
+       "output": "0 namespaces left"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "`ping: connect: Network is unreachable` means...",
+     "options": [
+      "The remote host is off",
+      "The local routing table has no route to that destination",
+      "DNS failed",
+      "A firewall dropped it"
+     ],
+     "answer": 1,
+     "explain": "No route is known locally."
+    },
+    {
+     "q": "A telnet to a port says `Connection refused`. What does it prove?",
+     "options": [
+      "The firewall blocks it",
+      "The host is reachable and nothing listens on that port",
+      "The host is down",
+      "DNS is wrong"
+     ],
+     "answer": 1,
+     "explain": "A reset came back."
+    },
+    {
+     "q": "A connection attempt just hangs and times out. Which is a likely cause?",
+     "options": [
+      "Nothing listens",
+      "Packets are dropped (firewall) or replies have no route back",
+      "Wrong password",
+      "Disk full"
+     ],
+     "answer": 1,
+     "explain": "Silence means loss."
+    },
+    {
+     "q": "What does a `FAILED` ARP entry in `ip neigh` mean?",
+     "options": [
+      "The MAC changed",
+      "The next hop did not answer ARP",
+      "A duplicate IP",
+      "A firewall rule"
+     ],
+     "answer": 1,
+     "explain": "The neighbour is unreachable at layer 2."
+    }
+   ],
+   "check": {
+    "scenario": "A client gets `Connection timed out` to a server's port 443. The server's firewall allows 443 and `ss` shows the service listening. Name three further causes and checks.",
+    "answer": "1) The reply path: check `ip route get CLIENT_IP` on the server (return route, source-based routing, rp_filter). 2) A firewall elsewhere on the path (a security group or an intermediate router): use `traceroute -T -p 443` or `mtr -T -P 443` to see where it stops, and `tcpdump` on the server to see whether SYNs arrive. 3) The service is listening only on another address or interface (check the local address in `ss -ltn`), or its accept queue is full."
+   }
+  },
+  {
+   "id": "tcpdump-mtr-curl",
+   "title": "Finding where packets stop: tcpdump, traceroute, mtr, curl -v",
+   "level": "advanced",
+   "goal": "Use packet capture and path tools to find which hop loses packets, and prove whether a firewall drops or the server never answers.\n\nWhy it matters: when logs say nothing, the packets tell the truth. A five-line capture often settles an argument between the network team and the server team.",
+   "setup": {
+    "note": "These steps build three network namespaces joined by virtual cables (veth pairs): lab-a (10.200.1.1) <-> lab-b, the router (10.200.1.2 and 10.200.2.1) <-> lab-c (10.200.2.2). They use sudo, do not touch your real network, and are removed at the end. A small web server runs in lab-c on port 8080. Needs sudo, tcpdump, nc, mtr, traceroute and curl.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "for n in lab-a lab-b lab-c; do sudo ip netns del $n 2>/dev/null; done; true",
+     "for n in lab-a lab-b lab-c; do sudo ip netns add $n; sudo ip -n $n link set lo up; done",
+     "sudo ip link add va type veth peer name vb1; sudo ip link set va netns lab-a; sudo ip link set vb1 netns lab-b",
+     "sudo ip link add vb2 type veth peer name vc; sudo ip link set vb2 netns lab-b; sudo ip link set vc netns lab-c",
+     "sudo ip -n lab-a addr add 10.200.1.1/24 dev va; sudo ip -n lab-b addr add 10.200.1.2/24 dev vb1; sudo ip -n lab-b addr add 10.200.2.1/24 dev vb2; sudo ip -n lab-c addr add 10.200.2.2/24 dev vc",
+     "sudo ip -n lab-a link set va up; sudo ip -n lab-b link set vb1 up; sudo ip -n lab-b link set vb2 up; sudo ip -n lab-c link set vc up",
+     "sudo ip netns exec lab-b sysctl -qw net.ipv4.ip_forward=1",
+     "sudo ip -n lab-a route add 10.200.2.0/24 via 10.200.1.2; sudo ip -n lab-c route add 10.200.1.0/24 via 10.200.2.1"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Start the server",
+     "text": "Same lab as before: `lab-a` - router `lab-b` - `lab-c` with a web server on port 8080.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-c python3 -m http.server 8080 --bind 10.200.2.2 > /dev/null 2>&1 & echo $! > srv.pid; sleep 1; sudo ip netns exec lab-a curl -s -m 2 -o /dev/null -w 'baseline: http=%{http_code}\\n' http://10.200.2.2:8080/",
+       "output": "[1] 3480925\nbaseline: http=200"
+      }
+     ]
+    },
+    {
+     "title": "curl -v shows each phase",
+     "text": "`curl -v` prints name resolution, the TCP connect, the request and the response headers, so you see how far it got. We filter the interesting lines.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-a curl -sv -o /dev/null http://10.200.2.2:8080/ 2>&1 | grep -E '^\\* (Connected to|Trying)|^> GET|^< HTTP' | sed -E 's/ port [0-9]+//'",
+       "output": "* Connected to 10.200.2.2 (10.200.2.2) (#0)\n> GET / HTTP/1.1\r\n< HTTP/1.0 200 OK\r"
+      }
+     ]
+    },
+    {
+     "title": "traceroute and mtr show the path",
+     "text": "`traceroute -n` lists each router; `mtr -n -r` repeats it and reports loss per hop. Hop 1 is the router `lab-b`, hop 2 the target.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-a traceroute -n -q1 -w1 10.200.2.2 | awk 'NR>1 {print $1, $2}'",
+       "output": "1 10.200.1.2\n2 10.200.2.2"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a mtr -n -r -c 2 10.200.2.2 | sed -E 's/^HOST: *[^ ]+/HOST:/; s/^Start:.*/Start: <time>/' | awk '{print $1, $2, $3, $4}'",
+       "output": "Start: <time>  \nHOST: Loss% Snt Last\n1.|-- 10.200.1.2 0.0% 2\n2.|-- 10.200.2.2 0.0% 2"
+      }
+     ]
+    },
+    {
+     "title": "Break it on the router: a forward drop",
+     "text": "We add a rule on the router that drops forwarded packets. From `lab-a` the target is now silent. The tools show **where**.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-b nft add table ip filter; sudo ip netns exec lab-b nft 'add chain ip filter forward { type filter hook forward priority 0; policy drop; }'",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a curl -s -m 2 -o /dev/null -w 'http=%{http_code}\\n' http://10.200.2.2:8080/; echo \"curl exit code: $?\"",
+       "output": "http=000\ncurl exit code: 28"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a traceroute -n -q1 -w1 -m 3 10.200.2.2 | awk 'NR>1 {print $1, $2}'",
+       "output": "1 10.200.1.2\n2 *\n3 *"
+      }
+     ],
+     "after": "Hop 1 (the router) answers; hops 2 and 3 only show `*`. The packets die at the router."
+    },
+    {
+     "title": "tcpdump on both sides of the router",
+     "text": "We capture on the router's two interfaces while `lab-a` pings the target. If the request appears on the **incoming** side but not on the **outgoing** side, the router itself discards it (here: the forward rule).",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-b timeout 3 tcpdump -i vb1 -nn -l icmp -c 1 2>/dev/null | sed -E 's/^[0-9:.]+ IP //' > in.txt & A=$!; sudo ip netns exec lab-b timeout 3 tcpdump -i vb2 -nn -l icmp 2>/dev/null | wc -l > out.txt & B=$!; sleep 1; sudo ip netns exec lab-a ping -c 1 -W 1 10.200.2.2 > /dev/null; wait $A $B; echo \"incoming side: $(cat in.txt)\"; echo \"outgoing side: $(cat out.txt) packets\"",
+       "output": "[2] 3481083\n[3] 3481085\nincoming side: 10.200.1.1 > 10.200.2.2: ICMP echo request, id 59579, seq 1, length 64\noutgoing side: 1 packets"
+      }
+     ]
+    },
+    {
+     "title": "Fix and verify",
+     "text": "Remove the rule; the same capture now shows the request leaving and the reply returning.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-b nft flush ruleset",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-b timeout 3 tcpdump -i vb2 -nn -l icmp -c 2 2>/dev/null | sed -E 's/^[0-9:.]+ IP //; s/, id [0-9]+, seq [0-9]+//; s/, length [0-9]+//' > out.txt & A=$!; sleep 1; sudo ip netns exec lab-a ping -c 1 -W 1 10.200.2.2 > /dev/null; wait $A; cat out.txt",
+       "output": "[2] 3481347\n10.200.1.1 > 10.200.2.2: ICMP echo request\n10.200.2.2 > 10.200.1.1: ICMP echo reply"
+      }
+     ],
+     "under": "tcpdump uses a **packet socket** (`AF_PACKET`) with a BPF filter compiled into the kernel, so only matching packets are copied to user space. It sees packets as the interface sees them: before iptables on the way in, after on the way out. A firewall drop therefore **is** visible as an incoming packet with no reply."
+    },
+    {
+     "title": "Clean up",
+     "text": "Stop the server and remove the namespaces.",
+     "run": [
+      {
+       "cmd": "sudo kill $(cat srv.pid) 2>/dev/null; sleep 0.3; for n in lab-a lab-b lab-c; do sudo ip netns del $n; done; ip netns list | wc -l | awk '{print $1, \"namespaces left\"}'",
+       "output": "0 namespaces left"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "You see SYN packets arriving at the server with tcpdump but no SYN+ACK leaves. What is the likely cause?",
+     "options": [
+      "The network is down",
+      "The server's firewall drops them or no service listens and RST is blocked",
+      "DNS",
+      "The router"
+     ],
+     "answer": 1,
+     "explain": "The host receives but does not answer."
+    },
+    {
+     "q": "What does `curl -v` help to find?",
+     "options": [
+      "Disk errors",
+      "How far the connection got: connect, TLS, request, response",
+      "Routes",
+      "Kernel version"
+     ],
+     "answer": 1,
+     "explain": "It prints each phase."
+    },
+    {
+     "q": "`traceroute` shows `* * *` from hop 4 onward. What can that mean?",
+     "options": [
+      "Hop 4 and later are dead for sure",
+      "Probes or replies are filtered or dropped after hop 3",
+      "DNS failed",
+      "The MTU is too large"
+     ],
+     "answer": 1,
+     "explain": "Filtering or loss from that point (or ICMP rate limiting)."
+    },
+    {
+     "q": "Which tool sees packets before the firewall drops them on the way in?",
+     "options": [
+      "tcpdump",
+      "ss",
+      "ip route",
+      "nft list"
+     ],
+     "answer": 0,
+     "explain": "AF_PACKET capture sees incoming packets first."
+    }
+   ],
+   "check": {
+    "scenario": "The network team says \"the firewall is open\"; the application team says \"no connections arrive\". What do you run on the server to settle it in two minutes?",
+    "answer": "`sudo tcpdump -i any -nn 'tcp port 443 and host CLIENT_IP'` while the client tries. SYNs visible and no SYN+ACK: the server host or its local firewall drops them. No SYNs: they never arrive (network/firewall on the path). SYN, SYN+ACK, then RST: the application or a middlebox resets. Attach the capture to the ticket."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is the difference between `Connection refused` and `Connection timed out`?",
+   "a": "Refused: the host answered with a reset, so nothing listens (or a reject rule). Timed out: no answer, so packets were dropped or lost. See [the lesson](#/lesson/32/symptoms-and-errors).",
+   "level": "beginner"
+  },
+  {
+   "q": "`Network is unreachable` versus `No route to host`?",
+   "a": "Network is unreachable: no route in the local table. No route to host / Destination Host Unreachable: a route exists but ARP failed or a router replied that it has no route.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you find where packets get lost on a path?",
+   "a": "traceroute/mtr for the hop, tcpdump on both sides of a device to see whether the packet enters and leaves, and ping/curl -v for the protocol layer. See [the lesson](#/lesson/32/tcpdump-mtr-curl).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What does mtr do that traceroute does not?",
+   "a": "It runs continuously, repeating probes and showing loss and latency statistics per hop, which exposes intermittent loss.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why might a server receive requests but clients time out?",
+   "a": "The reply path is broken (no return route, asymmetric routing, rp_filter), or a stateful firewall drops the reply, or the accept queue overflows. Capture on the server.",
+   "level": "advanced"
+  },
+  {
+   "q": "What do you check first when a service is not reachable remotely but works locally?",
+   "a": "`ss -ltnp` for the listen address (127.0.0.1 only?), the host firewall (nft/firewalld), the cloud security group, then the route back.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "ICMP",
+   "def": "The control protocol used by ping and traceroute and for error messages.",
+   "lesson": "32/symptoms-and-errors"
+  },
+  {
+   "term": "TCP reset",
+   "def": "A RST packet that refuses or aborts a connection.",
+   "lesson": "32/symptoms-and-errors"
+  },
+  {
+   "term": "Asymmetric routing",
+   "def": "Request and reply take different paths, which stateful firewalls may drop.",
+   "lesson": "32/symptoms-and-errors"
+  },
+  {
+   "term": "traceroute",
+   "def": "A tool that lists the routers on the path by sending packets with increasing TTL.",
+   "lesson": "32/tcpdump-mtr-curl"
+  },
+  {
+   "term": "mtr",
+   "def": "A tool combining ping and traceroute with per-hop statistics.",
+   "lesson": "32/tcpdump-mtr-curl"
+  },
+  {
+   "term": "tcpdump",
+   "def": "A packet capture tool using packet sockets and BPF filters.",
+   "lesson": "32/tcpdump-mtr-curl"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ping -c 3 HOST",
+   "desc": "Test reachability with ICMP.",
+   "topic": "Network troubleshooting",
+   "lesson": "32/symptoms-and-errors"
+  },
+  {
+   "cmd": "nc -zv HOST PORT",
+   "desc": "Test whether a TCP port accepts connections.",
+   "topic": "Network troubleshooting",
+   "lesson": "32/symptoms-and-errors"
+  },
+  {
+   "cmd": "curl -sv -o /dev/null URL",
+   "desc": "Show the phases of an HTTP request.",
+   "topic": "Network troubleshooting",
+   "lesson": "32/tcpdump-mtr-curl"
+  },
+  {
+   "cmd": "traceroute -n HOST",
+   "desc": "List hops to HOST.",
+   "topic": "Network troubleshooting",
+   "lesson": "32/tcpdump-mtr-curl"
+  },
+  {
+   "cmd": "mtr -n -r -c 10 HOST",
+   "desc": "Per-hop loss and latency report.",
+   "topic": "Network troubleshooting",
+   "lesson": "32/tcpdump-mtr-curl"
+  },
+  {
+   "cmd": "sudo tcpdump -i any -nn 'tcp port 443'",
+   "desc": "Capture packets of one port.",
+   "topic": "Network troubleshooting",
+   "lesson": "32/tcpdump-mtr-curl"
+  },
+  {
+   "cmd": "ip route get DEST",
+   "desc": "Show the route the kernel will use.",
+   "topic": "Network troubleshooting",
+   "lesson": "32/symptoms-and-errors"
+  },
+  {
+   "cmd": "ip neigh",
+   "desc": "Show ARP/neighbour entries and their state.",
+   "topic": "Network troubleshooting",
+   "lesson": "32/symptoms-and-errors"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

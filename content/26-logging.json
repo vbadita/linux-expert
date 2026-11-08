@@ -1,0 +1,579 @@
+{
+ "title": "Logging",
+ "lessons": [
+  {
+   "id": "journald-journalctl",
+   "title": "journald and journalctl",
+   "level": "beginner",
+   "goal": "Learn where Linux logs go on a systemd machine, how to write your own entries, and how to filter them by time, unit and priority.\n\nWhy it matters: the first step of almost every troubleshooting session is \"what does the log say?\". `journalctl` is the fastest way to ask precisely.",
+   "setup": {
+    "note": "Steps with sudo add and remove a small rsyslog rule. Journal output is shown as plain messages (`-o cat`), because the default format includes the host name.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rm -f /etc/rsyslog.d/90-lab.conf /var/log/lab.log; sudo systemctl try-restart rsyslog 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "One place for logs",
+     "text": "`systemd-journald` collects messages from services (their stdout and stderr), the kernel, the syslog socket and audit. It stores them in a binary database with **fields** (unit, PID, priority, time), so you can query instead of grepping.",
+     "run": [
+      {
+       "cmd": "systemctl is-active systemd-journald",
+       "output": "active"
+      },
+      {
+       "cmd": "journalctl --disk-usage | sed -E 's/.*take up/Journals use/; s/ in the file system.*//'",
+       "output": "Journals use 112.8M"
+      }
+     ]
+    },
+    {
+     "title": "Write a log entry yourself",
+     "text": "`logger` sends a message to the journal. `-t` sets the tag (the program name) and `-p` the priority. Then `journalctl -t TAG` reads it back; `-o cat` prints only the message.",
+     "run": [
+      {
+       "cmd": "logger -t lab 'hello from the lesson'",
+       "output": ""
+      },
+      {
+       "cmd": "journalctl -t lab -n 1 -o cat --no-pager",
+       "output": "hello from the lesson"
+      }
+     ]
+    },
+    {
+     "title": "Priorities",
+     "text": "Messages have one of 8 levels: 0 emerg, 1 alert, 2 crit, 3 err, 4 warning, 5 notice, 6 info, 7 debug. `-p err` shows **err and everything more severe**.",
+     "run": [
+      {
+       "cmd": "logger -t lab -p user.err 'something failed'",
+       "output": ""
+      },
+      {
+       "cmd": "logger -t lab -p user.info 'all fine'",
+       "output": ""
+      },
+      {
+       "cmd": "journalctl -t lab -p err -o cat --no-pager | tail -n 2",
+       "output": "an error to the lab file\nsomething failed"
+      },
+      {
+       "cmd": "journalctl -t lab -p info -o cat --no-pager | tail -n 3",
+       "output": "hello from the lesson\nsomething failed\nall fine"
+      }
+     ],
+     "after": "The first listing shows only the error. The second, with `-p info`, includes info and everything above it."
+    },
+    {
+     "title": "The fields behind a message",
+     "text": "Every entry is a set of fields. `-o json` shows them all. We pick three with `jq`.",
+     "run": [
+      {
+       "cmd": "journalctl -t lab -n 1 -o json --no-pager | jq -r '[.SYSLOG_IDENTIFIER, .PRIORITY, .MESSAGE] | @tsv'",
+       "output": "lab\t6\tall fine"
+      },
+      {
+       "cmd": "journalctl -t lab -n 1 -o json --no-pager | jq -r 'keys | map(select(startswith(\"_\"))) | length | \"\\(.) trusted fields added by journald\"'",
+       "output": "26 trusted fields added by journald"
+      }
+     ],
+     "under": "Fields that start with an underscore (`_PID`, `_UID`, `_SYSTEMD_UNIT`, `_COMM`) are added by journald itself and cannot be forged by the sender, which makes them reliable for audit questions such as \"which unit logged this?\"."
+    },
+    {
+     "title": "Filter by time, unit and field",
+     "text": "`--since` and `--until` take times such as `-5min` or `yesterday`. `-u` selects a unit. Any field can be used as `FIELD=value`.",
+     "run": [
+      {
+       "cmd": "journalctl --since '-5min' -t lab -o cat --no-pager | wc -l",
+       "output": "3"
+      },
+      {
+       "cmd": "journalctl -t lab _UID=$(id -u) -o cat --no-pager | tail -n 1",
+       "output": "all fine"
+      },
+      {
+       "cmd": "journalctl -k -n 1 -o cat --no-pager | cut -c1-60",
+       "output": "lo: left promiscuous mode"
+      }
+     ]
+    },
+    {
+     "title": "Follow new messages",
+     "text": "`journalctl -f` prints new messages as they arrive, like `tail -f`. Here we send one message after one second and stop after three seconds.",
+     "run": [
+      {
+       "cmd": "(sleep 1; logger -t lab 'live message') & timeout 3 journalctl -f -n 0 -t lab -o cat --no-pager; true",
+       "output": "[1] 3475422\nlive message"
+      }
+     ]
+    },
+    {
+     "title": "Persistent or volatile?",
+     "text": "If `/var/log/journal` exists, logs survive a reboot. Otherwise they live in `/run/log/journal` (RAM) and are lost. Settings are in `/etc/systemd/journald.conf`: `Storage=persistent`, `SystemMaxUse=`, `MaxRetentionSec=`.",
+     "run": [
+      {
+       "cmd": "[ -d /var/log/journal ] && echo 'persistent: logs survive a reboot' || echo 'volatile: logs are lost at reboot'",
+       "output": "volatile: logs are lost at reboot"
+      },
+      {
+       "cmd": "journalctl --list-boots --no-pager | wc -l | awk '{print $1, \"boot(s) in the journal\"}'",
+       "output": "2 boot(s) in the journal"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which command shows messages of the unit `sshd` from the current boot?",
+     "options": [
+      "journalctl -u sshd -b",
+      "cat /var/log/sshd",
+      "systemctl log sshd",
+      "dmesg sshd"
+     ],
+     "answer": 0,
+     "explain": "`-u` selects the unit and `-b` the boot."
+    },
+    {
+     "q": "What does `journalctl -p err` show?",
+     "options": [
+      "Only errors",
+      "Errors and more severe messages",
+      "All messages",
+      "Only warnings"
+     ],
+     "answer": 1,
+     "explain": "The level and everything with a lower number."
+    },
+    {
+     "q": "Why are `_PID` and `_SYSTEMD_UNIT` trustworthy?",
+     "options": [
+      "They are encrypted",
+      "journald adds them, the sender cannot forge them",
+      "They are random",
+      "They are signed by root"
+     ],
+     "answer": 1,
+     "explain": "Fields starting with an underscore are trusted."
+    },
+    {
+     "q": "How do you keep logs across reboots?",
+     "options": [
+      "Storage=persistent (or create /var/log/journal)",
+      "Disable journald",
+      "Use dmesg",
+      "Increase swap"
+     ],
+     "answer": 0,
+     "explain": "Persistent storage in /var/log/journal."
+    }
+   ],
+   "check": {
+    "scenario": "A service crashed at 03:12 last night. Give the one command that shows what it logged in the ten minutes around it.",
+    "answer": "`journalctl -u SERVICE --since '03:05' --until '03:15' --no-pager` (add `-p warning` to cut noise, `-k` for kernel messages such as an OOM kill at the same time: `journalctl -k --since '03:05' --until '03:15'`)."
+   }
+  },
+  {
+   "id": "rsyslog-facilities",
+   "title": "rsyslog, facilities and priorities",
+   "level": "intermediate",
+   "goal": "Learn the classic syslog model, add a rule that routes one facility to its own file, and see how it relates to the journal.\n\nWhy it matters: many tools (and many log-shipping setups) still speak syslog, and `/var/log/messages` and `/var/log/secure` on Red Hat systems are written by rsyslog.",
+   "setup": {
+    "note": "Steps with sudo add and remove a small rsyslog rule. Journal output is shown as plain messages (`-o cat`), because the default format includes the host name.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rm -f /etc/rsyslog.d/90-lab.conf /var/log/lab.log; sudo systemctl try-restart rsyslog 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Facility and priority",
+     "text": "Classic syslog classifies each message by **facility** (the kind of source: `auth`, `cron`, `daemon`, `kern`, `mail`, `user`, `local0` to `local7`) and **priority** (the same 8 levels as the journal). A rule is `facility.priority  destination`.",
+     "run": [
+      {
+       "cmd": "systemctl is-active rsyslog",
+       "output": "active"
+      },
+      {
+       "cmd": "grep -vE '^(#|$)' /etc/rsyslog.conf | grep -E '^(\\*\\.|authpriv|mail|cron)' | head -n 4 | tr -s ' \\t' ' '",
+       "output": "*.info;mail.none;authpriv.none;cron.none action(type=\"omfile\" file=\"/var/log/messages\")\nauthpriv.* action(type=\"omfile\" file=\"/var/log/secure\")\nmail.* action(type=\"omfile\" file=\"/var/log/maillog\" sync=\"on\")\ncron.* action(type=\"omfile\" file=\"/var/log/cron\")"
+      }
+     ]
+    },
+    {
+     "title": "How logs reach rsyslog here",
+     "text": "On a systemd machine journald receives everything first, and rsyslog reads from it (`imjournal`), then writes the classic files.",
+     "run": [
+      {
+       "cmd": "grep -rhoE 'load=\"im[a-z]+\"' /etc/rsyslog.conf /etc/rsyslog.d | sort -u | tr '\\n' ' '; echo",
+       "output": "load=\"imjournal\" load=\"imklog\" load=\"immark\" load=\"imtcp\" load=\"imudp\" load=\"imuxsock\" "
+      },
+      {
+       "cmd": "ls /var/log/messages /var/log/secure /var/log/cron 2>/dev/null | tr '\\n' ' '; echo",
+       "output": "/var/log/cron /var/log/messages /var/log/secure "
+      }
+     ]
+    },
+    {
+     "title": "Add a rule",
+     "text": "We route facility `local3` (free for your own applications) to `/var/log/lab.log`, and restart rsyslog to load it.",
+     "run": [
+      {
+       "cmd": "echo 'local3.*    /var/log/lab.log' | sudo tee /etc/rsyslog.d/90-lab.conf",
+       "output": "local3.*    /var/log/lab.log"
+      },
+      {
+       "cmd": "sudo rsyslogd -N1 2>&1 | tail -n 1",
+       "output": "rsyslogd: End of config validation run. Bye."
+      },
+      {
+       "cmd": "sudo systemctl restart rsyslog; echo restarted",
+       "output": "restarted"
+      }
+     ]
+    },
+    {
+     "title": "Send a message and find it",
+     "text": "`logger -p local3.info` sends to that facility. The file gets a classic line: time, host, tag and message. We cut the host name from the display.",
+     "run": [
+      {
+       "cmd": "logger -p local3.info -t lab 'to the lab file'; logger -p local3.err -t lab 'an error to the lab file'; sleep 1",
+       "output": ""
+      },
+      {
+       "cmd": "sudo sed -E 's/^[A-Za-z]+ +[0-9]+ [0-9:]+ [^ ]+ //' /var/log/lab.log",
+       "output": "lab[3475484]: to the lab file\nlab[3475485]: an error to the lab file"
+      }
+     ],
+     "under": "rsyslog is a pipeline of **inputs** (journal, socket, files, network), **rules** (selectors and filters, also property-based: `if $programname == 'lab' then ...`) and **outputs** (files, remote hosts over TCP with TLS, databases, Elasticsearch). Remote forwarding is written `*.* @@loghost:514`."
+    },
+    {
+     "title": "Clean up",
+     "text": "Remove the rule and the file.",
+     "run": [
+      {
+       "cmd": "sudo rm /etc/rsyslog.d/90-lab.conf /var/log/lab.log; sudo systemctl restart rsyslog; ls /var/log/lab.log 2>&1 | sed 's/.*: //'",
+       "output": "No such file or directory"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does the selector `local3.*` match?",
+     "options": [
+      "All messages",
+      "All priorities of facility local3",
+      "Only errors of local3",
+      "Facility 3 of the kernel"
+     ],
+     "answer": 1,
+     "explain": "Facility local3, any priority."
+    },
+    {
+     "q": "Where does rsyslog read from on a systemd system by default?",
+     "options": [
+      "The journal (imjournal)",
+      "/dev/log only",
+      "Nothing",
+      "dmesg only"
+     ],
+     "answer": 0,
+     "explain": "imjournal."
+    },
+    {
+     "q": "Which file typically holds general system messages on Oracle Linux?",
+     "options": [
+      "/var/log/syslog",
+      "/var/log/messages",
+      "/etc/messages",
+      "/var/messages"
+     ],
+     "answer": 1,
+     "explain": "Debian uses /var/log/syslog; Red Hat /var/log/messages."
+    },
+    {
+     "q": "What does `*.* @@loghost:514` do?",
+     "options": [
+      "Writes to a file",
+      "Forwards all messages to loghost over TCP",
+      "Drops messages",
+      "Rotates logs"
+     ],
+     "answer": 1,
+     "explain": "`@@` is TCP, `@` is UDP."
+    }
+   ],
+   "check": {
+    "scenario": "Security wants all authentication logs shipped to a central server. Outline the rsyslog configuration and a reliability concern.",
+    "answer": "A rule such as `authpriv.* action(type=\"omfwd\" target=\"loghost\" port=\"6514\" protocol=\"tcp\" StreamDriver=\"gtls\" StreamDriverMode=\"1\")` (TLS), with an action queue (`queue.type=\"LinkedList\" queue.filename=\"fwd\" queue.saveOnShutdown=\"on\" action.resumeRetryCount=\"-1\"`) so messages are buffered on disk when the server is unreachable. UDP loses messages silently."
+   }
+  },
+  {
+   "id": "logrotate",
+   "title": "logrotate: keeping logs from filling the disk",
+   "level": "intermediate",
+   "goal": "Learn how `logrotate` renames, compresses and removes old log files, write a configuration, test it safely, and understand `copytruncate`.\n\nWhy it matters: an unrotated log eventually fills the disk. A badly configured rotation breaks the application that is writing the log.",
+   "setup": {
+    "note": "Steps with sudo add and remove a small rsyslog rule. Journal output is shown as plain messages (`-o cat`), because the default format includes the host name.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rm -f /etc/rsyslog.d/90-lab.conf /var/log/lab.log; sudo systemctl try-restart rsyslog 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A log file to rotate",
+     "text": "We create a log of 200 lines (about 1.3 KB).",
+     "run": [
+      {
+       "cmd": "for i in $(seq 1 200); do echo \"line $i of the log\"; done > app.log; wc -c < app.log",
+       "output": "3892"
+      }
+     ]
+    },
+    {
+     "title": "The configuration",
+     "text": "The file names the log and the rules: `rotate 3` keep three old copies, `size 1k` only rotate when bigger than 1 KB, `compress` gzip old copies, `missingok` no error if the file is absent, `notifempty` skip an empty file, `copytruncate` copy then truncate in place.",
+     "code": {
+      "file": "app.logrotate",
+      "lang": "sh",
+      "src": "/tmp/lab/app.log {\n    rotate 3\n    size 1k\n    compress\n    missingok\n    notifempty\n    copytruncate\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "cat app.logrotate",
+       "output": "/tmp/lab/app.log {\n    rotate 3\n    size 1k\n    compress\n    missingok\n    notifempty\n    copytruncate\n}"
+      }
+     ]
+    },
+    {
+     "title": "Test with debug mode",
+     "text": "`-d` (debug) prints what **would** happen and changes nothing. Always test a new configuration this way first. `-s` sets the state file that remembers when each log was last rotated.",
+     "run": [
+      {
+       "cmd": "logrotate -d -s /tmp/lab/state app.logrotate 2>&1 | grep -E 'considering log|log needs rotating|rotating log|compressing'",
+       "output": "considering log /tmp/lab/app.log\n  log needs rotating\nrotating log /tmp/lab/app.log, log->rotateCount is 3\ncompressing log with: /bin/gzip"
+      }
+     ]
+    },
+    {
+     "title": "Rotate for real",
+     "text": "`-f` forces a rotation. The log becomes `app.log.1.gz` (compressed) and `app.log` is empty again.",
+     "run": [
+      {
+       "cmd": "logrotate -f -s /tmp/lab/state app.logrotate; ls app.log* | tr '\\n' ' '; echo",
+       "output": "app.log app.log.1.gz app.logrotate "
+      },
+      {
+       "cmd": "wc -c < app.log",
+       "output": "0"
+      },
+      {
+       "cmd": "zcat app.log.1.gz | tail -n 1",
+       "output": "line 200 of the log"
+      }
+     ]
+    },
+    {
+     "title": "Rotate again: numbers shift",
+     "text": "Each rotation moves `.1` to `.2`, `.2` to `.3`. With `rotate 3` the oldest copy is deleted. We add a log and rotate twice more.",
+     "run": [
+      {
+       "cmd": "for r in 1 2 3; do for i in $(seq 1 100); do echo \"run $r line $i padding padding\"; done > app.log; logrotate -f -s /tmp/lab/state app.logrotate; done; ls app.log* | tr '\\n' ' '; echo",
+       "output": "app.log app.log.1.gz app.log.2.gz app.log.3.gz app.logrotate "
+      }
+     ],
+     "after": "Only `.1.gz`, `.2.gz` and `.3.gz` remain, newest first."
+    },
+    {
+     "title": "copytruncate versus signals",
+     "text": "An application that keeps its log file **open** continues writing to the renamed file after a normal rotation (it holds the old inode). There are two fixes: tell it to reopen (a `postrotate` script that sends a signal or reloads the service) or use `copytruncate`, which copies the content and empties the original in place. `copytruncate` can lose lines written between the copy and the truncate.",
+     "run": [
+      {
+       "cmd": "ls /etc/logrotate.d | head -n 5 | tr '\\n' ' '; echo",
+       "output": "btmp chrony dnf firewalld iscsiuiolog "
+      },
+      {
+       "cmd": "systemctl is-enabled logrotate.timer 2>&1; grep -E '^(weekly|rotate|compress|dateext)' /etc/logrotate.conf | tr '\\n' ' '; echo",
+       "output": "enabled\nweekly rotate 4 dateext "
+      }
+     ],
+     "under": "logrotate is not a daemon. It is started once a day by a systemd timer (or `/etc/cron.daily/logrotate`) and reads `/etc/logrotate.conf` plus `/etc/logrotate.d/*`. Each package ships its own file there."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `logrotate -d` do?",
+     "options": [
+      "Deletes logs",
+      "Shows what would be done without changing anything",
+      "Rotates daily",
+      "Disables rotation"
+     ],
+     "answer": 1,
+     "explain": "Debug (dry-run) mode."
+    },
+    {
+     "q": "Why can a rotated log keep growing under the old name?",
+     "options": [
+      "Bug",
+      "The application still has the old file open",
+      "Compression",
+      "Cron"
+     ],
+     "answer": 1,
+     "explain": "It holds the old inode open."
+    },
+    {
+     "q": "What is a drawback of `copytruncate`?",
+     "options": [
+      "Needs root",
+      "Lines written during the copy can be lost",
+      "Cannot compress",
+      "Cannot run daily"
+     ],
+     "answer": 1,
+     "explain": "Copy and truncate are not atomic."
+    },
+    {
+     "q": "With `rotate 3`, how many old copies are kept?",
+     "options": [
+      "1",
+      "3",
+      "4",
+      "All"
+     ],
+     "answer": 1,
+     "explain": "Three; the oldest is removed."
+    }
+   ],
+   "check": {
+    "scenario": "After you configured rotation for an application, the log stays empty and the new lines vanish. Why, and how do you fix it?",
+    "answer": "The application wrote to the renamed file via its open file descriptor (or it recreated nothing). Fix: add a `postrotate` that makes it reopen (`systemctl reload app` or the app's signal, often SIGHUP/USR1), or use `copytruncate`. Check with `lsof +L1` or `ls -l /proc/PID/fd`."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What does journald store that plain text logs do not?",
+   "a": "Structured fields per entry (unit, PID, UID, priority, timestamps), indexed so you can filter reliably. See [the lesson](#/lesson/26/journald-journalctl).",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you see only errors of one service from last night?",
+   "a": "`journalctl -u SERVICE -p err --since yesterday --until today`.",
+   "level": "beginner"
+  },
+  {
+   "q": "What is the relationship between journald and rsyslog?",
+   "a": "journald collects first; rsyslog can read from it (imjournal) and write the classic /var/log files or forward them. See [rsyslog](#/lesson/26/rsyslog-facilities).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What are facility and priority?",
+   "a": "Facility: the source category (auth, cron, kern, local0-7). Priority: severity 0-7 (emerg to debug). A rule selects with `facility.priority`.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you rotate a log that an application holds open?",
+   "a": "Use a postrotate that makes the app reopen it, or `copytruncate`. See [logrotate](#/lesson/26/logrotate).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you make the journal persistent?",
+   "a": "Create `/var/log/journal` (or `Storage=persistent` in journald.conf) and restart journald; limit with `SystemMaxUse=`.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "journald",
+   "def": "systemd's logging daemon that stores structured log entries.",
+   "lesson": "26/journald-journalctl"
+  },
+  {
+   "term": "Syslog facility",
+   "def": "The category of a log source, such as auth, cron or local3.",
+   "lesson": "26/rsyslog-facilities"
+  },
+  {
+   "term": "Priority",
+   "def": "Log severity level from 0 (emerg) to 7 (debug).",
+   "lesson": "26/journald-journalctl"
+  },
+  {
+   "term": "rsyslog",
+   "def": "A syslog daemon that filters and routes log messages to files or remote hosts.",
+   "lesson": "26/rsyslog-facilities"
+  },
+  {
+   "term": "logrotate",
+   "def": "A tool run daily that rotates, compresses and removes old log files.",
+   "lesson": "26/logrotate"
+  },
+  {
+   "term": "copytruncate",
+   "def": "A logrotate option: copy the log then truncate the original in place.",
+   "lesson": "26/logrotate"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "journalctl -u UNIT -b",
+   "desc": "Show a unit's messages since boot.",
+   "topic": "Logging",
+   "lesson": "26/journald-journalctl"
+  },
+  {
+   "cmd": "journalctl -p err --since today",
+   "desc": "Show errors of today.",
+   "topic": "Logging",
+   "lesson": "26/journald-journalctl"
+  },
+  {
+   "cmd": "journalctl -f",
+   "desc": "Follow new messages.",
+   "topic": "Logging",
+   "lesson": "26/journald-journalctl"
+  },
+  {
+   "cmd": "journalctl -k",
+   "desc": "Show kernel messages.",
+   "topic": "Logging",
+   "lesson": "26/journald-journalctl"
+  },
+  {
+   "cmd": "logger -t TAG -p user.err 'text'",
+   "desc": "Write a message to the log.",
+   "topic": "Logging",
+   "lesson": "26/journald-journalctl"
+  },
+  {
+   "cmd": "journalctl --disk-usage",
+   "desc": "Show space used by the journal.",
+   "topic": "Logging",
+   "lesson": "26/journald-journalctl"
+  },
+  {
+   "cmd": "sudo rsyslogd -N1",
+   "desc": "Check the rsyslog configuration.",
+   "topic": "Logging",
+   "lesson": "26/rsyslog-facilities"
+  },
+  {
+   "cmd": "logrotate -d CONF",
+   "desc": "Dry-run a logrotate configuration.",
+   "topic": "Logging",
+   "lesson": "26/logrotate"
+  },
+  {
+   "cmd": "logrotate -f CONF",
+   "desc": "Force a rotation now.",
+   "topic": "Logging",
+   "lesson": "26/logrotate"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

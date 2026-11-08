@@ -1,0 +1,400 @@
+{
+ "title": "Advanced bash",
+ "lessons": [
+  {
+   "id": "heredocs-process-substitution",
+   "title": "Here-documents, here-strings and process substitution",
+   "level": "intermediate",
+   "goal": "Feed text to commands without temporary files, and compare or merge the output of commands as if they were files.\n\nWhy it matters: these three features remove most temporary files from scripts, avoid the lost-variable trap of `cmd | while read`, and make one-liners such as `diff <(sort a) <(sort b)` possible.",
+   "setup": {
+    "note": "Scripts are saved in a scratch directory. No special tools are needed.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Here-document",
+     "text": "`<<EOF ... EOF` gives the lines in between as **standard input**. With an unquoted delimiter, variables and `$(...)` are expanded; with a **quoted** delimiter (`<<'EOF'`) nothing is. `<<-` strips leading tabs so you can indent.",
+     "run": [
+      {
+       "cmd": "name=Linux; cat <<EOF\nHello, $name!\nToday is a $(date +%A | sed 's/.*/day/').\nEOF",
+       "output": "Hello, Linux!\nToday is a day."
+      },
+      {
+       "cmd": "name=Linux; cat <<'EOF'\nNo expansion: $name $(date)\nEOF",
+       "output": "No expansion: $name $(date)"
+      },
+      {
+       "cmd": "cat > config.ini <<EOF\n[server]\nport=8080\nEOF\ngrep -c = config.ini",
+       "output": "1"
+      }
+     ],
+     "after": "Here-documents are the standard way to write a config file or send a multi-line message from a script."
+    },
+    {
+     "title": "Here-string",
+     "text": "`<<< \"text\"` feeds one string (plus a newline) as stdin. It is handy with `read` and `grep`.",
+     "run": [
+      {
+       "cmd": "read -r first rest <<< 'alpha beta gamma'; echo \"first=$first rest=$rest\"",
+       "output": "first=alpha rest=beta gamma"
+      },
+      {
+       "cmd": "grep -c a <<< $'one\\ntwo\\nthree\\nfour'",
+       "output": "0"
+      }
+     ]
+    },
+    {
+     "title": "The pipe-to-while trap",
+     "text": "Each part of a pipeline runs in a **subshell**. A variable set in a `while read` at the end of a pipe is lost when the loop ends.",
+     "run": [
+      {
+       "cmd": "count=0; printf 'a\\nb\\nc\\n' | while read -r l; do count=$((count + 1)); done; echo \"count after the pipe: $count\"",
+       "output": "count after the pipe: 0"
+      }
+     ]
+    },
+    {
+     "title": "Process substitution",
+     "text": "`<(cmd)` runs `cmd` and gives its output a **file name** (`/dev/fd/N`) that other programs can open. With `done < <(cmd)` the loop runs in the **current** shell, so variables survive. `>(cmd)` is the same for output.",
+     "run": [
+      {
+       "cmd": "count=0; while read -r l; do count=$((count + 1)); done < <(printf 'a\\nb\\nc\\n'); echo \"count with process substitution: $count\"",
+       "output": "count with process substitution: 3"
+      },
+      {
+       "cmd": "echo <(true) | sed -E 's#/dev/fd/[0-9]+#/dev/fd/N#'",
+       "output": "/dev/fd/N"
+      }
+     ],
+     "under": "Bash creates a pipe (or a named FIFO), starts `cmd` with its output connected to it, and substitutes `/dev/fd/N`, the path of the read end in the shell's own descriptor table. That is why the receiving program sees a normal file name. Programs that need a seekable file (not a stream) cannot read it."
+    },
+    {
+     "title": "Compare outputs without temporary files",
+     "text": "`diff <(sort a) <(sort b)` compares two sorted listings; `comm -12 <(sort a) <(sort b)` shows the lines common to both; `paste <(cmd1) <(cmd2)` puts outputs side by side.",
+     "run": [
+      {
+       "cmd": "printf 'b\\nc\\na\\n' > a.txt; printf 'c\\nd\\nb\\n' > b.txt",
+       "output": ""
+      },
+      {
+       "cmd": "diff <(sort a.txt) <(sort b.txt); echo \"diff exit status: $?\"",
+       "output": "1d0\n< a\n3a3\n> d\ndiff exit status: 1"
+      },
+      {
+       "cmd": "comm -12 <(sort a.txt) <(sort b.txt) | tr '\\n' ' '; echo",
+       "output": "b c "
+      },
+      {
+       "cmd": "printf 'x\\ny\\n' | tee >(wc -l | sed 's/^/lines: /') >(tr a-z A-Z | sed 's/^/upper: /') > /dev/null; sleep 0.3",
+       "output": "upper: X\nupper: Y\nlines: 2"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `<<'EOF'` (quoted delimiter) change?",
+     "options": [
+      "Nothing",
+      "No expansion of variables or commands in the body",
+      "The body is run",
+      "The body is encrypted"
+     ],
+     "answer": 1,
+     "explain": "The text is literal."
+    },
+    {
+     "q": "Why does `echo hi | read v; echo $v` print nothing?",
+     "options": [
+      "Bug",
+      "`read` runs in a subshell and the variable is lost",
+      "echo is slow",
+      "read needs -r"
+     ],
+     "answer": 1,
+     "explain": "Pipeline parts are subshells."
+    },
+    {
+     "q": "What is `<(cmd)` replaced by?",
+     "options": [
+      "The output text",
+      "A file name (/dev/fd/N) from which the output can be read",
+      "A PID",
+      "A variable"
+     ],
+     "answer": 1,
+     "explain": "A path to a pipe."
+    },
+    {
+     "q": "Which form keeps variables set in the loop?",
+     "options": [
+      "cmd | while read ...",
+      "while read ...; done < <(cmd)",
+      "cmd & while read ...",
+      "all of them"
+     ],
+     "answer": 1,
+     "explain": "The loop runs in the current shell."
+    }
+   ],
+   "check": {
+    "scenario": "Compare the installed packages of two servers with one command, given `ssh` access.",
+    "answer": "`diff <(ssh server1 'rpm -qa | sort') <(ssh server2 'rpm -qa | sort')`. Each `ssh` runs concurrently and its sorted output appears as a file to `diff`; no temporary files are needed."
+   }
+  },
+  {
+   "id": "getopts-and-debugging",
+   "title": "Option parsing with getopts, and debugging scripts",
+   "level": "advanced",
+   "goal": "Parse command-line options the standard way, and find bugs with `bash -x`, `bash -n`, `PS4` and traps.\n\nWhy it matters: scripts that accept options correctly feel like real tools, and tracing shows what bash actually runs, which ends most guessing.",
+   "setup": {
+    "note": "Scripts are saved in a scratch directory. No special tools are needed.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A script with options",
+     "text": "`getopts \":vn:c:h\" opt` loops over options: `v` and `h` are flags, `n:` and `c:` take an argument (stored in `$OPTARG`). The leading `:` selects quiet error handling, so you print your own messages. `shift $((OPTIND - 1))` leaves the remaining arguments.",
+     "code": {
+      "file": "opts.sh",
+      "lang": "sh",
+      "src": "#!/bin/bash\nusage() { echo \"usage: $0 [-v] [-n NAME] [-c COUNT] FILE...\" >&2; exit 2; }\n\nverbose=0; name=world; count=1\nwhile getopts \":vn:c:h\" opt; do\n    case $opt in\n        v) verbose=1 ;;\n        n) name=$OPTARG ;;\n        c) count=$OPTARG ;;\n        h) usage ;;\n        :) echo \"option -$OPTARG needs an argument\" >&2; exit 2 ;;\n        \\?) echo \"unknown option -$OPTARG\" >&2; exit 2 ;;\n    esac\ndone\nshift $((OPTIND - 1))               # what is left are the positional arguments\n\n[ \"$verbose\" = 1 ] && echo \"verbose mode on\"\nfor ((i = 1; i <= count; i++)); do echo \"hello $name ($i)\"; done\necho \"files: $*\"\n"
+     },
+     "run": [
+      {
+       "cmd": "chmod +x opts.sh; ./opts.sh a.txt b.txt",
+       "output": "hello world (1)\nfiles: a.txt b.txt"
+      },
+      {
+       "cmd": "./opts.sh -v -n Linux -c 2 a.txt b.txt",
+       "output": "verbose mode on\nhello Linux (1)\nhello Linux (2)\nfiles: a.txt b.txt"
+      }
+     ]
+    },
+    {
+     "title": "Errors in the options",
+     "text": "A missing argument and an unknown option reach the `:` and `?` branches.",
+     "run": [
+      {
+       "cmd": "./opts.sh -n; echo \"exit status: $?\"",
+       "output": "option -n needs an argument\nexit status: 2"
+      },
+      {
+       "cmd": "./opts.sh -x file; echo \"exit status: $?\"",
+       "output": "unknown option -x\nexit status: 2"
+      },
+      {
+       "cmd": "./opts.sh -vc3 f; echo 'options may be combined: -vc3'",
+       "output": "verbose mode on\nhello world (1)\nhello world (2)\nhello world (3)\nfiles: f\noptions may be combined: -vc3"
+      }
+     ]
+    },
+    {
+     "title": "Trace with bash -x",
+     "text": "`bash -x script` prints every command **after expansion**, prefixed with `+`. It shows the real arguments, the branch taken and the values of variables. Set `PS4` to add the line number and file.",
+     "run": [
+      {
+       "cmd": "PS4='+ ${LINENO}: ' bash -x ./opts.sh -n x 2>&1 | head -n 8",
+       "output": "+ 4: verbose=0\n+ 4: name=world\n+ 4: count=1\n+ 5: getopts :vn:c:h opt\n+ 6: case $opt in\n+ 8: name=x\n+ 5: getopts :vn:c:h opt\n+ 15: shift 2"
+      }
+     ]
+    },
+    {
+     "title": "Check syntax without running",
+     "text": "`bash -n` parses the script and reports syntax errors without executing anything. Always run it on scripts that change systems.",
+     "run": [
+      {
+       "cmd": "printf 'if true; then\\n  echo ok\\n' > broken.sh; bash -n broken.sh 2>&1 | sed 's/^broken.sh: //'; echo \"exit status: ${PIPESTATUS[0]}\"",
+       "output": "line 3: syntax error: unexpected end of file\nexit status: 2"
+      }
+     ]
+    },
+    {
+     "title": "Trace only a part, and trap errors",
+     "text": "`set -x` and `set +x` switch tracing on for a section. `trap ... ERR` runs when a command fails; `$LINENO` and `$BASH_COMMAND` tell where and what.",
+     "run": [
+      {
+       "cmd": "bash -c 'echo before; set -x; x=$((2 + 3)); echo \"x=$x\"; set +x; echo after' 2>&1",
+       "output": "before\n+ x=5\n+ echo x=5\nx=5\n+ set +x\nafter"
+      },
+      {
+       "cmd": "bash -c 'trap \"echo failed at line \\$LINENO: \\$BASH_COMMAND\" ERR; true; false; echo continues'",
+       "output": "failed at line 1: false\ncontinues"
+      }
+     ],
+     "under": "`getopts` handles only **short** options. For long options (`--name=x`) scripts use a manual `case` loop over `\"$@\"`, or the external `getopt` command (GNU). Also useful for debugging: `set -o functrace` (traps in functions), `declare -p VAR` (show a variable's attributes and value), `type FUNC` (show a function's code), and `bash --debugger`/`bashdb` for a real debugger."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does the leading colon in `getopts \":vn:\"` do?",
+     "options": [
+      "Disables options",
+      "Quiet error handling: you print the messages",
+      "Makes all options mandatory",
+      "Enables long options"
+     ],
+     "answer": 1,
+     "explain": "Silent mode with `:` and `?` cases."
+    },
+    {
+     "q": "What does `bash -x` print?",
+     "options": [
+      "Syntax errors",
+      "Each command after expansion, with a + prefix",
+      "Only errors",
+      "The exit status"
+     ],
+     "answer": 1,
+     "explain": "A trace of what really runs."
+    },
+    {
+     "q": "How do you check a script's syntax without running it?",
+     "options": [
+      "bash -x",
+      "bash -n",
+      "bash -v",
+      "set -e"
+     ],
+     "answer": 1,
+     "explain": "-n parses only."
+    },
+    {
+     "q": "What is `$OPTIND` for?",
+     "options": [
+      "The option's value",
+      "The index of the next argument; shift by OPTIND-1 to get the positional arguments",
+      "The number of options",
+      "A file"
+     ],
+     "answer": 1,
+     "explain": "Used after the getopts loop."
+    }
+   ],
+   "check": {
+    "scenario": "A script behaves differently under cron than in your terminal. How do you debug it?",
+    "answer": "Make cron's environment visible: `bash -x script.sh > /tmp/script.trace 2>&1` from the crontab (or add `set -x` and a log file via `exec > >(tee -a /tmp/log) 2>&1`), print `env | sort` and `PATH`, use absolute paths, and compare the trace with a run from `env -i /bin/bash --noprofile --norc script.sh` which imitates cron's empty environment."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is process substitution?",
+   "a": "`<(cmd)` presents the output of cmd as a file (/dev/fd/N); `>(cmd)` does the same for input. Lets tools that need files read command output, and keeps loops in the current shell. See [the lesson](#/lesson/46/heredocs-process-substitution).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why does a variable set in `cmd | while read` disappear?",
+   "a": "The loop runs in a subshell. Use `while read ...; done < <(cmd)` or `shopt -s lastpipe` in non-interactive scripts.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What does a here-document with a quoted delimiter do?",
+   "a": "It passes the text literally: no variable, command or arithmetic expansion.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you parse options in bash?",
+   "a": "`getopts` for short options in a while loop, then `shift $((OPTIND-1))`; a manual case loop or GNU getopt for long options. See [the lesson](#/lesson/46/getopts-and-debugging).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you debug a shell script?",
+   "a": "`bash -x` (trace), `PS4` with LINENO, `bash -n` (syntax check), `set -x/+x` around a section, `trap ... ERR`, shellcheck.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What does `diff <(sort a) <(sort b)` do?",
+   "a": "Runs both sorts, exposes their outputs as files and diffs them without temporary files.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Here-document",
+   "def": "Multi-line text given to a command as standard input with <<DELIM.",
+   "lesson": "46/heredocs-process-substitution"
+  },
+  {
+   "term": "Here-string",
+   "def": "A single string fed as standard input with <<<.",
+   "lesson": "46/heredocs-process-substitution"
+  },
+  {
+   "term": "Process substitution",
+   "def": "<(cmd) or >(cmd): a command's output or input presented as a file name.",
+   "lesson": "46/heredocs-process-substitution"
+  },
+  {
+   "term": "getopts",
+   "def": "A bash builtin that parses short command-line options.",
+   "lesson": "46/getopts-and-debugging"
+  },
+  {
+   "term": "OPTIND",
+   "def": "Index of the next argument to be processed by getopts.",
+   "lesson": "46/getopts-and-debugging"
+  },
+  {
+   "term": "PS4",
+   "def": "The prompt printed before each command in a set -x trace.",
+   "lesson": "46/getopts-and-debugging"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "cat <<'EOF' ... EOF",
+   "desc": "Literal here-document.",
+   "topic": "Scripting",
+   "lesson": "46/heredocs-process-substitution"
+  },
+  {
+   "cmd": "read -r a b <<< 'x y'",
+   "desc": "Split a string into variables.",
+   "topic": "Scripting",
+   "lesson": "46/heredocs-process-substitution"
+  },
+  {
+   "cmd": "diff <(sort a) <(sort b)",
+   "desc": "Compare sorted outputs.",
+   "topic": "Scripting",
+   "lesson": "46/heredocs-process-substitution"
+  },
+  {
+   "cmd": "while read -r l; do ...; done < <(cmd)",
+   "desc": "Loop over command output in the current shell.",
+   "topic": "Scripting",
+   "lesson": "46/heredocs-process-substitution"
+  },
+  {
+   "cmd": "while getopts ':vn:' opt; do ...; done",
+   "desc": "Parse short options.",
+   "topic": "Scripting",
+   "lesson": "46/getopts-and-debugging"
+  },
+  {
+   "cmd": "bash -x script.sh",
+   "desc": "Trace a script.",
+   "topic": "Scripting",
+   "lesson": "46/getopts-and-debugging"
+  },
+  {
+   "cmd": "PS4='+ ${LINENO}: ' bash -x script.sh",
+   "desc": "Trace with line numbers.",
+   "topic": "Scripting",
+   "lesson": "46/getopts-and-debugging"
+  },
+  {
+   "cmd": "bash -n script.sh",
+   "desc": "Check syntax only.",
+   "topic": "Scripting",
+   "lesson": "46/getopts-and-debugging"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

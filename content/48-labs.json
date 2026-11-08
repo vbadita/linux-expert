@@ -1,0 +1,1031 @@
+{
+ "title": "Troubleshooting labs",
+ "labs": [
+  {
+   "id": "disk-full",
+   "title": "Disk full, but du finds only half of it",
+   "level": "intermediate",
+   "symptom": "A service reports `No space left on device` when it writes to `/mnt/labdisk`. You have a shell on the server. Find what is using the space and free it **without losing data**.",
+   "build": [
+    "sudo mkdir -p /mnt/labdisk",
+    "sudo mount -t tmpfs -o size=16m tmpfs /mnt/labdisk",
+    "sudo chown $(id -un): /mnt/labdisk",
+    "mkdir /mnt/labdisk/app /mnt/labdisk/backup",
+    "dd if=/dev/zero of=/mnt/labdisk/backup/old-dump.sql bs=1M count=6 status=none",
+    "dd if=/dev/zero of=/mnt/labdisk/app/app.log bs=1M count=9 status=none",
+    "(sleep 600 < /mnt/labdisk/app/app.log > /dev/null 2>&1 &)",
+    "rm /mnt/labdisk/app/app.log",
+    "dd if=/dev/zero of=/mnt/labdisk/app/cache.bin bs=1M count=100 status=none 2>/dev/null || true"
+   ],
+   "teardown": [
+    "lsof -t +aL1 /mnt/labdisk 2>/dev/null | xargs -r kill ; sudo umount -l /mnt/labdisk ; sudo rmdir /mnt/labdisk ; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** Writes fail with `No space left on device`. What do you run first?",
+     "choices": [
+      {
+       "cmd": "df -h /mnt/labdisk",
+       "verdict": "good",
+       "note": "Good first move. It confirms the filesystem is 100% full and shows its size.",
+       "next": 1,
+       "output": "Filesystem      Size  Used Avail Use% Mounted on\ntmpfs            16M   16M     0 100% /mnt/labdisk"
+      },
+      {
+       "cmd": "ls -la /mnt/labdisk",
+       "verdict": "ok",
+       "note": "Shows the top-level directories, but not how much space is used or free. Check `df` first.",
+       "output": "total 0\ndrwxrwxrwt. 4 opc  opc  80 Nov  8 19:28 .\ndrwxr-xr-x. 3 root root 21 Nov  8 19:28 ..\ndrwxr-xr-x. 2 opc  opc  60 Nov  8 19:28 app\ndrwxr-xr-x. 2 opc  opc  60 Nov  8 19:28 backup"
+      },
+      {
+       "cmd": "sudo reboot",
+       "verdict": "poor",
+       "note": "A reboot interrupts every service and may not even help: files on disk stay. Never reboot before you know the cause.",
+       "explanationOnly": true,
+       "reason": "destructive on a real server, so it was not run"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** `df` says the filesystem is full. What is using the space?",
+     "choices": [
+      {
+       "cmd": "du -sh /mnt/labdisk/*",
+       "verdict": "good",
+       "note": "Right tool. But compare the sizes with the `Used` column of `df`. They do not match.",
+       "next": 2,
+       "output": "1.0M\t/mnt/labdisk/app\n6.0M\t/mnt/labdisk/backup"
+      },
+      {
+       "cmd": "df -i /mnt/labdisk",
+       "verdict": "ok",
+       "note": "Checks inodes. This is the right idea when a disk is \"full\" but `df -h` shows free space. Here the blocks themselves are full, so this is not the cause.",
+       "output": "Filesystem     Inodes IUsed  IFree IUse% Mounted on\ntmpfs          722241     7 722234    1% /mnt/labdisk"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** `du` adds up to less than `df` reports. Which command finds the missing space?",
+     "choices": [
+      {
+       "cmd": "find /mnt/labdisk -type f -size +1M",
+       "verdict": "ok",
+       "note": "Finds files that still have a name. The missing space has no name any more, so `find` cannot see it.",
+       "output": "/mnt/labdisk/backup/old-dump.sql"
+      },
+      {
+       "cmd": "lsof -nP +aL1 /mnt/labdisk 2>/dev/null",
+       "verdict": "good",
+       "note": "`+L1` lists open files with link count below 1: deleted files that a process still holds open. `+a` limits the list to this filesystem. The `NLINK 0` column and `(deleted)` mark the file. Its space is not freed until the process closes it.",
+       "next": 3,
+       "output": "COMMAND    PID USER   FD   TYPE DEVICE SIZE/OFF NLINK NODE NAME\nsleep   424485  opc    0r   REG  0,132  9437184     0    5 /mnt/labdisk/app/app.log (deleted)"
+      },
+      {
+       "cmd": "rm /mnt/labdisk/backup/old-dump.sql",
+       "verdict": "poor",
+       "note": "Deleting the backup destroys data and does not fix the cause. Free space only after you know what holds it.",
+       "explanationOnly": true,
+       "reason": "it would delete a backup, so it was not run"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** A deleted `app.log` (9 MB) is still open in a process. In real life you restart the service that holds it. Here the holder is a `sleep` process, and `lsof -t` prints just its PID. What do you do?",
+     "choices": [
+      {
+       "cmd": "lsof -t +aL1 /mnt/labdisk 2>/dev/null | xargs kill",
+       "verdict": "good",
+       "note": "Ending the holder closes the file. The kernel then frees the blocks. On a real server, restart or reload the service so it reopens its log.",
+       "next": 4,
+       "output": ""
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** Verify the space is back.",
+     "choices": [
+      {
+       "cmd": "df -h /mnt/labdisk",
+       "verdict": "good",
+       "note": "Space was freed with no data lost.",
+       "next": "done",
+       "output": "Filesystem      Size  Used Avail Use% Mounted on\ntmpfs            16M  7.0M  9.0M  44% /mnt/labdisk"
+      }
+     ]
+    }
+   ],
+   "conclusion": "The log file was deleted, but a running process still had it open. A file's data is freed only when its **last name is removed and the last open file descriptor is closed**. `du` walks names, so it missed the file. `df` asks the filesystem, so it counted the blocks. `lsof +L1` finds exactly this case. See [deleted but open](#/lesson/18/deleted-but-open)."
+  },
+  {
+   "id": "high-load-idle-cpu",
+   "title": "High load average, but the CPU is idle",
+   "level": "intermediate",
+   "symptom": "Monitoring shows the load average climbing and users say the application hangs, but the CPU graph is flat and low. The application reads files from an NFS mount, `/mnt/labnfs`. You have a shell.",
+   "build": [
+    "sudo mkdir -p /srv/lab-nfs && echo data | sudo tee /srv/lab-nfs/f > /dev/null && sudo chown $(id -un): /srv/lab-nfs",
+    "echo '/srv/lab-nfs 127.0.0.1(rw,sync,no_subtree_check)' | sudo tee /etc/exports.d/lab.exports > /dev/null; sudo systemctl start nfs-server",
+    "sudo mkdir -p /mnt/labnfs && sudo mount -t nfs4 -o hard,timeo=5 127.0.0.1:/srv/lab-nfs /mnt/labnfs",
+    "for i in 1 2 3 4; do (while true; do cat /mnt/labnfs/f > /dev/null; sleep 0.2; done) & done; sleep 1",
+    "sudo systemctl stop nfs-server; sleep 25"
+   ],
+   "teardown": [
+    "sudo systemctl start nfs-server; sleep 2; kill $(jobs -p) 2>/dev/null; sleep 1; sudo umount /mnt/labnfs || sudo umount -l /mnt/labnfs; sudo exportfs -ua; sudo rm -f /etc/exports.d/lab.exports; sudo systemctl stop nfs-server; sudo rm -rf /srv/lab-nfs; sudo rmdir /mnt/labnfs; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** What do you run first?",
+     "choices": [
+      {
+       "cmd": "uptime",
+       "verdict": "good",
+       "note": "Confirms the load is well above normal (it was about 0.3). Load counts runnable **and** uninterruptible tasks.",
+       "next": 1,
+       "output": " 19:28:46 up 47 days,  3:58,  0 users,  load average: 5.41, 5.56, 4.07"
+      },
+      {
+       "cmd": "sudo reboot",
+       "verdict": "poor",
+       "note": "Rebooting hides the cause and the hang returns when the NFS server is down again.",
+       "explanationOnly": true,
+       "reason": "destructive on a real server, so it was not run"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** Load is high. Is the CPU busy?",
+     "choices": [
+      {
+       "cmd": "top -b -n 1 | sed -n '3p'",
+       "verdict": "ok",
+       "note": "Shows the CPU time breakdown: almost everything is idle. So the load is not from running tasks.",
+       "next": 2,
+       "output": "%Cpu(s):  5.3 us, 26.3 sy,  0.0 ni,  0.0 id, 52.6 wa,  5.3 hi,  0.0 si, 10.5 st"
+      },
+      {
+       "cmd": "vmstat 1 2 | tail -n 1",
+       "verdict": "ok",
+       "note": "Idle CPU confirmed. Note that the `b` column may show 0 here: tasks stuck in a killable wait are in `D` state but are not always counted there. That is why `ps` is more reliable.",
+       "next": 2,
+       "output": " 2  1 1293752 399380   1044 1921408   16    0 47548    32 3283 7292 12 16  0 59 13"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** Idle CPU and high load: tasks must be in D state (uninterruptible sleep). List them with the kernel function they wait in.",
+     "choices": [
+      {
+       "cmd": "ps -eo pid,stat,wchan:30,comm | awk '$2 ~ /^D/ {print $2, $3, $4}' | sort | uniq -c",
+       "verdict": "good",
+       "note": "Four `cat` processes in `D` state, waiting in `rpc_wait_bit_killable`: an RPC call (NFS) that does not complete.",
+       "next": 3,
+       "output": "      4 D rpc_wait_bit_killable cat"
+      },
+      {
+       "cmd": "ps -eo pcpu --sort=-pcpu | head -n 4 | tr '\\n' ' '; echo",
+       "verdict": "poor",
+       "note": "The busiest tasks use only a few percent: nothing is consuming the CPU. The stuck tasks use no CPU at all. Look at process **state** instead.",
+       "output": "%CPU  2.7  2.6  1.2 "
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** The waiting function is an RPC wait. Which mounts could be involved? (Be careful: some commands hang on a dead mount.)",
+     "choices": [
+      {
+       "cmd": "grep nfs /proc/mounts | awk '{print $1, $2, $3}'",
+       "verdict": "good",
+       "note": "Reads the mount table without touching the mount, so it cannot hang. There is an NFS mount, mounted **hard**: the client retries forever.",
+       "next": 4,
+       "output": "rpc_pipefs /var/lib/nfs/rpc_pipefs rpc_pipefs\nnfsd /proc/fs/nfsd nfsd\n127.0.0.1:/srv/lab-nfs /mnt/labnfs nfs4"
+      },
+      {
+       "cmd": "df -h /mnt/labnfs",
+       "verdict": "poor",
+       "note": "`df` calls `statfs` on the dead mount and would itself hang in D state. Never run it on a suspect NFS mount.",
+       "explanationOnly": true,
+       "reason": "it would hang this shell in D state"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** The NFS server is down. Bring it back.",
+     "choices": [
+      {
+       "cmd": "sudo systemctl start nfs-server",
+       "verdict": "good",
+       "note": "Starting the server lets the pending RPCs complete. The blocked tasks resume. Doing this beats killing the clients, which would only restart the problem.",
+       "next": 5,
+       "output": ""
+      },
+      {
+       "cmd": "kill -9 $(pgrep -x cat)",
+       "verdict": "poor",
+       "note": "SIGKILL can end tasks in a killable wait, but the application starts new readers that hang again. It treats the symptom.",
+       "explanationOnly": true,
+       "reason": "it does not remove the cause, and the readers are restarted by the application"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 6.** Verify.",
+     "choices": [
+      {
+       "cmd": "sleep 3; ps -eo stat,comm | awk '$1 ~ /^D/' | wc -l",
+       "verdict": "good",
+       "note": "No task is in D state any more. The load average will decay over the next minutes.",
+       "next": "done",
+       "output": "0"
+      }
+     ]
+    }
+   ],
+   "conclusion": "A **hard NFS mount** makes tasks wait forever when the server is unreachable. They sit in uninterruptible sleep (`D`), which counts toward the load average without using CPU. The tells: high load, idle CPU, `D` tasks in `rpc_*` wait functions, and an NFS mount. Fix the server or network, not the clients. See [process states](#/lesson/10/process-states) and [NFS](#/lesson/23/nfs-loopback)."
+  },
+  {
+   "id": "oom-kills",
+   "title": "A service keeps restarting: OOM kills",
+   "level": "intermediate",
+   "symptom": "The service `lab-leak` restarts every few seconds. Nobody changed the deployment. The server has plenty of free memory.",
+   "build": [
+    "sudo tee /usr/local/bin/lab-leak.py > /dev/null <<'EOF'\nimport time\ndata = []\nwhile True:\n    data.append(b'x' * (5 << 20))\n    time.sleep(0.2)\nEOF",
+    "printf '[Unit]\\nDescription=Lab leaking service\\n\\n[Service]\\nExecStart=/usr/bin/python3 /usr/local/bin/lab-leak.py\\nMemoryMax=60M\\nMemorySwapMax=0\\nRestart=always\\nRestartSec=1\\n' | sudo tee /etc/systemd/system/lab-leak.service > /dev/null; sudo systemctl daemon-reload",
+    "sudo systemctl start lab-leak; sleep 12"
+   ],
+   "teardown": [
+    "sudo systemctl stop lab-leak; sudo rm -f /etc/systemd/system/lab-leak.service /usr/local/bin/lab-leak.py; sudo systemctl daemon-reload; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** What is the service doing?",
+     "choices": [
+      {
+       "cmd": "systemctl status lab-leak --no-pager | sed -n '2,6p' | cut -c1-110",
+       "verdict": "good",
+       "note": "It is flapping between `activating (auto-restart)` and `active`, and the previous run ended with `code=killed, status=9/KILL`: something sent SIGKILL.",
+       "next": 1,
+       "output": "     Loaded: loaded (/etc/systemd/system/lab-leak.service; static)\n    Drop-In: /run/systemd/system.control/lab-leak.service.d\n             └─50-MemoryMax.conf\n     Active: activating (auto-restart) (Result: oom-kill) since Sun 2026-11-08 19:29:13 GMT; 227ms ago\n    Process: 427097 ExecStart=/usr/bin/python3 /usr/local/bin/lab-leak.py (code=killed, signal=KILL)"
+      },
+      {
+       "cmd": "systemctl restart lab-leak",
+       "verdict": "poor",
+       "note": "Restarting hides the evidence and changes nothing: it will die again.",
+       "explanationOnly": true,
+       "reason": "it would only restart the failure loop"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** SIGKILL, but who sent it? What does the unit's log say?",
+     "choices": [
+      {
+       "cmd": "journalctl -u lab-leak -o cat --no-pager | grep -E 'killed|OOM|Failed with|exited' | tail -n 3",
+       "verdict": "good",
+       "note": "systemd says the process was killed by the **OOM killer**.",
+       "next": 2,
+       "output": "lab-leak.service: A process of this unit has been killed by the OOM killer.\nlab-leak.service: Main process exited, code=killed, status=9/KILL\nlab-leak.service: Failed with result 'oom-kill'."
+      },
+      {
+       "cmd": "journalctl -u lab-leak -o cat --no-pager | tail -n 3",
+       "verdict": "ok",
+       "note": "The service itself prints nothing: it is killed without a message.",
+       "output": "lab-leak.service: A process of this unit has been killed by the OOM killer.\nlab-leak.service: Main process exited, code=killed, status=9/KILL\nlab-leak.service: Failed with result 'oom-kill'."
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** The host has free memory, yet the OOM killer acted. Check the kernel log.",
+     "choices": [
+      {
+       "cmd": "sudo dmesg | grep -i 'memory cgroup out of memory' | tail -n 1 | sed -E 's/^\\[[^]]*\\] //' | cut -c1-120",
+       "verdict": "good",
+       "note": "`Memory cgroup out of memory`: not the machine, the service's **cgroup** hit its limit.",
+       "next": 3,
+       "output": "Memory cgroup out of memory: Killed process 427097 (python3) total-vm:534472kB, anon-rss:306452kB, file-rss:16636kB, shm"
+      },
+      {
+       "cmd": "free -m | sed -n '1,2p'",
+       "verdict": "ok",
+       "note": "The machine has plenty of memory. This is why the problem is confusing: the limit is per service.",
+       "output": "               total        used        free      shared  buff/cache   available\nMem:            5642        3614         354          25        1875        2028"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** Which limit applies and how often has it been reached?",
+     "choices": [
+      {
+       "cmd": "cat /sys/fs/cgroup/system.slice/lab-leak.service/memory.max; systemctl show lab-leak -p NRestarts",
+       "verdict": "good",
+       "note": "`memory.max` is 62914560 (60 MB) and `NRestarts` shows how often systemd has restarted the service. (The cgroup's own `memory.events` counters start from zero after each restart, so they would show 0 here.)",
+       "next": 4,
+       "output": "314572800\nNRestarts=1"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** Decide. The service is leaking memory (RSS grows steadily until the limit). What do you do right now?",
+     "choices": [
+      {
+       "cmd": "sudo systemctl stop lab-leak",
+       "verdict": "good",
+       "note": "Stop the flapping service so it does not disturb the rest, and give the developers the evidence. The leak itself must be fixed in the code.",
+       "next": "done",
+       "output": ""
+      },
+      {
+       "cmd": "sudo systemctl set-property --runtime lab-leak MemoryMax=300M",
+       "verdict": "ok",
+       "note": "A band-aid: it buys time, but the leak continues and will hit the new limit later. Acceptable only with a ticket to fix the leak.",
+       "next": "done",
+       "output": ""
+      }
+     ]
+    }
+   ],
+   "conclusion": "Exit status 137 / `status=9/KILL` plus `Memory cgroup out of memory` in the kernel log means the **service's own memory limit** was reached, not a shortage on the host. Read `memory.events` and `memory.max` of the unit's cgroup, watch RSS over time to see a leak, and fix the application. Raising the limit only postpones the problem. See [memory and OOM](#/lesson/15/mmap-and-oom) and [cgroups](#/lesson/38/cgroup-v2-hands-on)."
+  },
+  {
+   "id": "too-many-open-files",
+   "title": "\"Too many open files\"",
+   "level": "intermediate",
+   "symptom": "After a deployment the service `lab-fd` logs an error at startup and does not serve requests. It worked on the old server.",
+   "build": [
+    "sudo tee /usr/local/bin/lab-fd.py > /dev/null <<'EOF'\nimport time\nfiles = []\ntry:\n    for _ in range(100):\n        files.append(open('/dev/null'))\n    print('ready: holding %d files' % len(files), flush=True)\nexcept OSError as e:\n    print('ERROR: %s after %d files' % (e, len(files)), flush=True)\ntime.sleep(3600)\nEOF",
+    "printf '[Unit]\\nDescription=Lab fd service\\n\\n[Service]\\nExecStart=/usr/bin/python3 /usr/local/bin/lab-fd.py\\nLimitNOFILE=40\\nDynamicUser=yes\\n' | sudo tee /etc/systemd/system/lab-fd.service > /dev/null; sudo systemctl daemon-reload",
+    "sudo systemctl start lab-fd; sleep 2"
+   ],
+   "teardown": [
+    "sudo systemctl stop lab-fd; sudo rm -rf /etc/systemd/system/lab-fd.service /etc/systemd/system/lab-fd.service.d /usr/local/bin/lab-fd.py; sudo systemctl daemon-reload; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** What does the service say?",
+     "choices": [
+      {
+       "cmd": "journalctl -u lab-fd -o cat --no-pager | tail -n 3",
+       "verdict": "good",
+       "note": "`Too many open files` after 37 files: the process hit the descriptor limit (EMFILE).",
+       "next": 1,
+       "output": "/etc/systemd/system/lab-fd.service:7: Special user nobody configured, this is not safe!\nStarted Lab fd service.\nERROR: [Errno 24] Too many open files: '/dev/null' after 37 files"
+      },
+      {
+       "cmd": "systemctl is-active lab-fd",
+       "verdict": "ok",
+       "note": "It is `active`: the process still runs, but it is useless. A running process does not mean a working service.",
+       "output": "active"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** Which limit applies to **the service**? (Your shell's limit is not the service's.)",
+     "choices": [
+      {
+       "cmd": "ulimit -n",
+       "verdict": "poor",
+       "note": "That is the limit of **your shell**, probably very high. Services get their limits from the unit, not from your login.",
+       "output": "524288"
+      },
+      {
+       "cmd": "grep 'Max open files' /proc/$(systemctl show -p MainPID --value lab-fd)/limits",
+       "verdict": "good",
+       "note": "The running process has a soft and hard limit of **40**.",
+       "next": 2,
+       "output": "Max open files            40                   40                   files     "
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** Where does the 40 come from, and how many descriptors are in use?",
+     "choices": [
+      {
+       "cmd": "systemctl show lab-fd -p LimitNOFILE; sudo ls /proc/$(systemctl show -p MainPID --value lab-fd)/fd | wc -l",
+       "verdict": "good",
+       "note": "`LimitNOFILE=40` is set in the unit file, and the process holds about 40 descriptors (the limit; `sudo` is needed because the service runs as another user). This is a configuration problem, not a leak.",
+       "next": 3,
+       "output": "LimitNOFILE=40\n40"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** The application legitimately needs about 100 descriptors. Fix the limit with a drop-in, not by editing the vendor file.",
+     "choices": [
+      {
+       "cmd": "sudo mkdir -p /etc/systemd/system/lab-fd.service.d && printf '[Service]\\nLimitNOFILE=1024\\n' | sudo tee /etc/systemd/system/lab-fd.service.d/override.conf > /dev/null && sudo systemctl daemon-reload && sudo systemctl restart lab-fd; sleep 2; journalctl -u lab-fd -o cat --no-pager | tail -n 1",
+       "verdict": "good",
+       "note": "A drop-in survives package updates. After a restart the service is ready with its 100 files.",
+       "next": "done",
+       "output": "ready: holding 100 files"
+      },
+      {
+       "cmd": "ulimit -n 1024 && sudo systemctl restart lab-fd",
+       "verdict": "poor",
+       "note": "`ulimit` changes your shell only. The service is started by systemd and ignores it.",
+       "explanationOnly": true,
+       "reason": "it would not change the service's limit"
+      }
+     ]
+    }
+   ],
+   "conclusion": "`Too many open files` is `EMFILE`: the process reached its soft `RLIMIT_NOFILE`. For services the limit comes from `LimitNOFILE=` in the unit (not from your shell), and `/proc/PID/limits` shows what the **running** process has. Raise it with a drop-in, restart, and check. If the descriptor count keeps growing without load, look for a leak instead. See [file descriptors](#/lesson/17/too-many-open-files)."
+  },
+  {
+   "id": "service-wont-start",
+   "title": "The service won't start",
+   "level": "beginner",
+   "symptom": "`systemctl start lab-web` fails. The package was just installed and nothing else changed.",
+   "build": [
+    "sudo tee /usr/local/bin/lab-web-server.sh > /dev/null <<'EOF'\n#!/bin/bash\necho \"lab-web serving on port 8080\"\nexec sleep 3600\nEOF",
+    "sudo chmod 644 /usr/local/bin/lab-web-server.sh",
+    "printf '[Unit]\\nDescription=Lab web service\\n\\n[Service]\\nExecStart=/usr/local/bin/lab-webd\\n' | sudo tee /etc/systemd/system/lab-web.service > /dev/null; sudo systemctl daemon-reload"
+   ],
+   "teardown": [
+    "sudo systemctl stop lab-web 2>/dev/null; sudo rm -f /etc/systemd/system/lab-web.service /usr/local/bin/lab-web-server.sh; sudo systemctl daemon-reload; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** Start it and look at the result.",
+     "choices": [
+      {
+       "cmd": "sudo systemctl start lab-web 2>&1 | sed 's/ See .*//'; systemctl is-failed lab-web",
+       "verdict": "good",
+       "note": "The job failed. systemd tells you where to look next.",
+       "next": 1,
+       "output": "failed"
+      },
+      {
+       "cmd": "sudo systemctl restart lab-web && echo started",
+       "verdict": "poor",
+       "note": "Repeating the command gives no new information, and note the trap: it even printed `started`. For a `Type=simple` service systemctl reports success once the process is forked; the 203/EXEC failure appears a moment later. Always read the status and the journal.",
+       "output": "started"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** What is the failure?",
+     "choices": [
+      {
+       "cmd": "systemctl status lab-web --no-pager | grep -E 'Active|Process:' | cut -c1-120",
+       "verdict": "good",
+       "note": "`status=203/EXEC`: systemd could not **execute** the program. 203 is the exec failure of systemd itself, before the service even runs.",
+       "next": 2,
+       "output": "     Active: failed (Result: exit-code) since Sun 2026-11-08 19:29:32 GMT; 422ms ago\n    Process: 428630 ExecStart=/usr/local/bin/lab-webd (code=exited, status=203/EXEC)"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** Why could it not be executed?",
+     "choices": [
+      {
+       "cmd": "journalctl -u lab-web -o cat --no-pager | grep -E 'Failed to (locate|execute)' | tail -n 1 | cut -c1-120",
+       "verdict": "good",
+       "note": "`Failed to locate executable /usr/local/bin/lab-webd: No such file or directory`. The path in the unit is wrong.",
+       "next": 3,
+       "output": "lab-web.service: Failed to locate executable /usr/local/bin/lab-webd: No such file or directory"
+      },
+      {
+       "cmd": "sudo setenforce 0",
+       "verdict": "poor",
+       "note": "Disabling SELinux is a reaction, not a diagnosis. The log already says the file does not exist.",
+       "explanationOnly": true,
+       "reason": "it weakens the system and is unrelated here"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** What files exist, and what does the unit say?",
+     "choices": [
+      {
+       "cmd": "ls /usr/local/bin/ | grep lab-web; systemctl cat lab-web --no-pager | grep ExecStart",
+       "verdict": "good",
+       "note": "The script is called `lab-web-server.sh`, but `ExecStart` points to `lab-webd`. A typo in the path.",
+       "next": 4,
+       "output": "lab-web-server.sh\nExecStart=/usr/local/bin/lab-webd"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** Fix the path in the unit and try again.",
+     "choices": [
+      {
+       "cmd": "sudo sed -i 's#/usr/local/bin/lab-webd#/usr/local/bin/lab-web-server.sh#' /etc/systemd/system/lab-web.service; sudo systemctl daemon-reload; sudo systemctl start lab-web 2>&1 | sed 's/ See .*//'; sleep 1; journalctl -u lab-web -o cat --no-pager | grep -E 'Failed to (locate|execute)' | tail -n 1 | cut -c1-120",
+       "verdict": "good",
+       "note": "A different error now: **Permission denied**. systemd found the file but it is not executable. Two causes were hiding behind one symptom.",
+       "next": 5,
+       "output": "lab-web.service: Failed to locate executable /usr/local/bin/lab-webd: No such file or directory"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 6.** Check the file mode, fix it and start the service.",
+     "choices": [
+      {
+       "cmd": "ls -l /usr/local/bin/lab-web-server.sh | cut -c1-10; sudo chmod 755 /usr/local/bin/lab-web-server.sh; sudo systemctl start lab-web; sleep 1; systemctl is-active lab-web",
+       "verdict": "good",
+       "note": "Mode was 644 (no execute bit). With 755 the service is `active`.",
+       "next": "done",
+       "output": "-rw-r--r--\nactive"
+      }
+     ]
+    }
+   ],
+   "conclusion": "Read the **exit status** first: `203/EXEC` means systemd could not run the `ExecStart` program (missing file, bad path, no execute permission, wrong interpreter, SELinux). The journal line names the exact reason. Fix one cause at a time and test again: a second error is progress. Use `systemctl cat` to see the real unit and `systemd-analyze verify` before starting. See [writing a service](#/lesson/25/write-a-service)."
+  },
+  {
+   "id": "slow-dns",
+   "title": "Everything takes five seconds: slow DNS",
+   "level": "intermediate",
+   "symptom": "Every first connection from the client host takes ten seconds. Connecting by IP address is instant. The client host is the namespace `lab-dns`.",
+   "build": [
+    "for n in lab-dns lab-ns; do sudo ip netns del $n 2>/dev/null; done; sudo rm -rf /etc/netns/lab-dns; true",
+    "sudo ip netns add lab-dns; sudo ip netns add lab-ns; sudo ip link add vd type veth peer name vn; sudo ip link set vd netns lab-dns; sudo ip link set vn netns lab-ns",
+    "sudo ip -n lab-dns addr add 10.200.6.1/24 dev vd; sudo ip -n lab-ns addr add 10.200.6.2/24 dev vn; sudo ip -n lab-ns addr add 10.200.6.9/24 dev vn; for n in lab-dns lab-ns; do sudo ip -n $n link set lo up; done; sudo ip -n lab-dns link set vd up; sudo ip -n lab-ns link set vn up",
+    "sudo ip netns exec lab-ns nft add table ip f; sudo ip netns exec lab-ns nft 'add chain ip f in { type filter hook input priority 0; }'; sudo ip netns exec lab-ns nft add rule ip f in ip daddr 10.200.6.9 drop",
+    "sudo mkdir -p /etc/netns/lab-dns; printf 'nameserver 10.200.6.9\\nnameserver 10.200.6.2\\n' | sudo tee /etc/netns/lab-dns/resolv.conf > /dev/null",
+    "cat > /tmp/lab/dns53.py <<'EOF'\nimport socket, struct\nANSWERS = {'lab.example.': '10.200.8.8'}\n\n\ndef name(data, pos):\n    labels = []\n    while data[pos]:\n        n = data[pos]\n        labels.append(data[pos + 1:pos + 1 + n].decode())\n        pos += n + 1\n    return '.'.join(labels) + '.', pos + 1\n\n\ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\ns.bind(('10.200.6.2', 53))\nwhile True:\n    data, who = s.recvfrom(512)\n    q, end = name(data, 12)\n    qtype = struct.unpack('!H', data[end:end + 2])[0]\n    ip = ANSWERS.get(q.lower())\n    reply = data[:2] + struct.pack('!HHHHH', 0x8180 if ip else 0x8183, 1, 1 if ip and qtype == 1 else 0, 0, 0) + data[12:end + 4]\n    if ip and qtype == 1:\n        reply += b'\\xc0\\x0c' + struct.pack('!HHIH', 1, 1, 60, 4) + socket.inet_aton(ip)\n    s.sendto(reply, who)\nEOF",
+    "sudo ip netns exec lab-ns python3 /tmp/lab/dns53.py > /dev/null 2>&1 & echo $! > /tmp/lab/dns53.pid; sleep 1; true"
+   ],
+   "teardown": [
+    "sudo kill $(cat /tmp/lab/dns53.pid) 2>/dev/null; for n in lab-dns lab-ns; do sudo ip netns del $n 2>/dev/null; done; sudo rm -rf /etc/netns/lab-dns; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** Measure the delay the way programs experience it.",
+     "choices": [
+      {
+       "cmd": "{ TIMEFORMAT='%R s'; time sudo ip netns exec lab-dns getent hosts lab.example; } 2>&1",
+       "verdict": "good",
+       "note": "The lookup succeeds but takes about **10 seconds**: timeouts somewhere in the resolver path (the default timeout is 5 seconds, and here two of them were needed).",
+       "next": 1,
+       "output": "10.200.8.8      lab.example\n10.035 s"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-dns ping -c 1 -W 1 10.200.8.8",
+       "verdict": "poor",
+       "note": "There is no route to that address from the client in this lab. The question is about **name** resolution, not connectivity.",
+       "output": "ping: connect: Network is unreachable"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** Which DNS servers does the client use, and in which order?",
+     "choices": [
+      {
+       "cmd": "sudo ip netns exec lab-dns cat /etc/resolv.conf",
+       "verdict": "good",
+       "note": "Two nameservers. The resolver asks the **first** one and waits for its timeout (5 s by default) before trying the second.",
+       "next": 2,
+       "output": "nameserver 10.200.6.9\nnameserver 10.200.6.2"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** Ask each server directly, with a short timeout.",
+     "choices": [
+      {
+       "cmd": "dig @10.200.6.9 lab.example +time=1 +tries=1 +short 2>&1 | head -n 1; echo \"(first server) exit: ${PIPESTATUS[0]}\"",
+       "verdict": "ok",
+       "note": "dig run from the host cannot reach the lab network, so this proves nothing: query from **inside** the client namespace.",
+       "next": 2,
+       "output": "\n(first server) exit: 9"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-dns dig @10.200.6.9 lab.example +time=1 +tries=1 +short 2>&1 | head -n 1",
+       "verdict": "good",
+       "note": "The first server does not answer at all (a timeout, not an error): it is **dead or filtered**.",
+       "next": 3,
+       "output": ""
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** And the second server?",
+     "choices": [
+      {
+       "cmd": "sudo ip netns exec lab-dns dig @10.200.6.2 lab.example +short",
+       "verdict": "good",
+       "note": "The second server answers immediately. The delay is the dead first server.",
+       "next": 4,
+       "output": "10.200.8.8"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** Fix the resolver configuration.",
+     "choices": [
+      {
+       "cmd": "printf 'nameserver 10.200.6.2\\nnameserver 10.200.6.9\\noptions timeout:1 attempts:1\\n' | sudo tee /etc/netns/lab-dns/resolv.conf > /dev/null; { TIMEFORMAT='%R s'; time sudo ip netns exec lab-dns getent hosts lab.example; } 2>&1",
+       "verdict": "good",
+       "note": "Working server first, dead one last, and a short timeout: the lookup is instant. Better still: remove the dead server or repair it.",
+       "next": "done",
+       "output": "10.200.8.8      lab.example\n0.042 s"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-dns systemctl restart NetworkManager",
+       "verdict": "poor",
+       "note": "Restarting services does not change a dead nameserver entry.",
+       "explanationOnly": true,
+       "reason": "no such service exists in the namespace and it would not help"
+      }
+     ]
+    }
+   ],
+   "conclusion": "The resolver (`getaddrinfo`) tries the nameservers **in order**, waiting `timeout` (default 5 s) for each. A dead first nameserver adds at least one timeout (5 s by default, and the resolver may need several) to **every** lookup. Diagnose with `time getent hosts NAME` (what programs see), then `dig @each-server NAME` to find the silent one. Fix by removing or repairing it, reordering, and lowering `timeout`/`attempts`. See [name resolution](#/lesson/30/name-resolution)."
+  },
+  {
+   "id": "network-timeouts",
+   "title": "The service times out, but ping works",
+   "level": "intermediate",
+   "symptom": "From the client `lab-a`, `curl http://10.200.2.2:8080/` times out. The server runs on `lab-c`, behind a router `lab-b`. Colleagues say the network team changed something on the router.",
+   "build": [
+    "for n in lab-a lab-b lab-c; do sudo ip netns del $n 2>/dev/null; done; true",
+    "for n in lab-a lab-b lab-c; do sudo ip netns add $n; sudo ip -n $n link set lo up; done",
+    "sudo ip link add va type veth peer name vb1; sudo ip link set va netns lab-a; sudo ip link set vb1 netns lab-b; sudo ip link add vb2 type veth peer name vc; sudo ip link set vb2 netns lab-b; sudo ip link set vc netns lab-c",
+    "sudo ip -n lab-a addr add 10.200.1.1/24 dev va; sudo ip -n lab-b addr add 10.200.1.2/24 dev vb1; sudo ip -n lab-b addr add 10.200.2.1/24 dev vb2; sudo ip -n lab-c addr add 10.200.2.2/24 dev vc; for d in 'lab-a va' 'lab-b vb1' 'lab-b vb2' 'lab-c vc'; do set -- $d; sudo ip -n $1 link set $2 up; done",
+    "sudo ip netns exec lab-b sysctl -qw net.ipv4.ip_forward=1; sudo ip -n lab-a route add 10.200.2.0/24 via 10.200.1.2; sudo ip -n lab-c route add 10.200.1.0/24 via 10.200.2.1",
+    "sudo ip netns exec lab-c python3 -m http.server 8080 --bind 10.200.2.2 > /dev/null 2>&1 & echo $! > /tmp/lab/srv.pid; sleep 1; true",
+    "sudo ip netns exec lab-b nft add table ip filter; sudo ip netns exec lab-b nft 'add chain ip filter forward { type filter hook forward priority 0; policy accept; }'; sudo ip netns exec lab-b nft add rule ip filter forward tcp dport 8080 counter drop"
+   ],
+   "teardown": [
+    "sudo kill $(cat /tmp/lab/srv.pid) 2>/dev/null; for n in lab-a lab-b lab-c; do sudo ip netns del $n 2>/dev/null; done; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** Reproduce the problem and note the exact symptom.",
+     "choices": [
+      {
+       "cmd": "sudo ip netns exec lab-a curl -s -m 3 -o /dev/null -w 'http=%{http_code}\\n' http://10.200.2.2:8080/; echo \"curl exit code: $?\"",
+       "verdict": "good",
+       "note": "Exit code 28: a **timeout**. Not `refused` (7) and not `unreachable`: packets vanish silently.",
+       "next": 1,
+       "output": "http=000\ncurl exit code: 28"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** Is the network path itself working?",
+     "choices": [
+      {
+       "cmd": "sudo ip netns exec lab-a ping -c 2 -W 1 10.200.2.2 | grep transmitted | sed -E 's/, time [0-9]+ms//'",
+       "verdict": "good",
+       "note": "Ping works: routing, forwarding and the server host are fine. Only **this TCP port** is affected.",
+       "next": 2,
+       "output": "2 packets transmitted, 2 received, 0% packet loss"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a traceroute -n -q1 -w1 -m 3 10.200.2.2 | awk 'NR>1 {print $1, $2}'",
+       "verdict": "ok",
+       "note": "The path is two hops and both answer (ICMP). Consistent with a problem that is specific to the port.",
+       "next": 2,
+       "output": "1 10.200.1.2\n2 10.200.2.2"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** Try the port from the client with a short timeout, then from the server's own side.",
+     "choices": [
+      {
+       "cmd": "sudo ip netns exec lab-a nc -zv -w 2 10.200.2.2 8080 2>&1 | grep -v Version | sed -E 's/^Ncat: //'",
+       "verdict": "ok",
+       "note": "Times out too: same symptom as curl.",
+       "next": 3,
+       "output": "TIMEOUT."
+      },
+      {
+       "cmd": "sudo ip netns exec lab-c curl -s -m 3 -o /dev/null -w 'on the server itself: http=%{http_code}\\n' http://10.200.2.2:8080/",
+       "verdict": "good",
+       "note": "The service works **locally**. So the application is fine and packets are lost between client and server.",
+       "next": 3,
+       "output": "on the server itself: http=200"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** Where are they lost? Capture on both sides of the router while the client tries.",
+     "choices": [
+      {
+       "cmd": "sudo ip netns exec lab-b timeout 4 tcpdump -i vb1 -nn -l 'tcp port 8080' -c 1 2>/dev/null | sed -E 's/^[0-9:.]+ IP //; s/, seq.*//' > in.txt & A=$!; sudo ip netns exec lab-b timeout 4 tcpdump -i vb2 -nn -l 'tcp port 8080' 2>/dev/null | wc -l > out.txt & B=$!; sleep 1; sudo ip netns exec lab-a curl -s -m 2 -o /dev/null http://10.200.2.2:8080/; wait $A $B; echo \"in:  $(sed -E 's/[0-9]{5}/PORT/' in.txt)\"; echo \"out: $(cat out.txt) packets\"",
+       "verdict": "good",
+       "note": "The SYN **arrives** on the client side of the router but **nothing leaves** on the server side. The router itself discards it.",
+       "next": 4,
+       "output": "[2] 430658\n[3] 430660\nin:  10.200.1.1.PORT > 10.200.2.2.8080: Flags [S]\nout: 1 packets"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** What is on the router?",
+     "choices": [
+      {
+       "cmd": "sudo ip netns exec lab-b nft list ruleset | sed -E 's/packets [0-9]+ bytes [0-9]+/packets N bytes N/'",
+       "verdict": "good",
+       "note": "A `forward` rule drops `tcp dport 8080`, and its counter shows it matching. Ping is not TCP, so it passed.",
+       "next": 5,
+       "output": "table ip filter {\n\tchain forward {\n\t\ttype filter hook forward priority filter; policy accept;\n\t\ttcp dport 8080 counter packets N bytes N drop\n\t}\n}"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 6.** Remove the rule (after agreeing with the network team) and verify.",
+     "choices": [
+      {
+       "cmd": "sudo ip netns exec lab-b nft flush ruleset; sudo ip netns exec lab-a curl -s -m 3 -o /dev/null -w 'http=%{http_code}\\n' http://10.200.2.2:8080/",
+       "verdict": "good",
+       "note": "The service answers again.",
+       "next": "done",
+       "output": "http=200"
+      }
+     ]
+    }
+   ],
+   "conclusion": "`Connection timed out` with a working ping means the path is fine and **something drops that port**. Prove the service works locally, then capture **both sides of each device on the path**: a packet that enters but never leaves was dropped there. `nft list ruleset` counters confirm which rule matched. See [network troubleshooting](#/lesson/32/tcpdump-mtr-curl)."
+  },
+  {
+   "id": "zombie-buildup",
+   "title": "Zombie processes keep piling up",
+   "level": "intermediate",
+   "symptom": "A monitoring alert says the number of `<defunct>` processes on the server is growing. Nothing has crashed yet, but the PID table is slowly filling.",
+   "build": [
+    "cat > /tmp/lab/zmaker.c <<'EOF'\n#include <stdlib.h>\n#include <unistd.h>\n\nint main(void) {\n    for (;;) {\n        if (fork() == 0) _exit(0);\n        usleep(200000);\n    }\n}\nEOF",
+    "gcc -o /tmp/lab/zmaker /tmp/lab/zmaker.c",
+    "nohup /tmp/lab/zmaker > /dev/null 2>&1 & echo $! > /tmp/lab/zm.pid; sleep 5; true"
+   ],
+   "teardown": [
+    "kill $(cat /tmp/lab/zm.pid) 2>/dev/null; sleep 0.5; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** How many zombies are there?",
+     "choices": [
+      {
+       "cmd": "ps -eo stat | grep -c '^Z'",
+       "verdict": "good",
+       "note": "A growing number of processes in state `Z`.",
+       "next": 1,
+       "output": "27"
+      },
+      {
+       "cmd": "ps aux | grep defunct | wc -l",
+       "verdict": "ok",
+       "note": "Works, but counting by state is cleaner and does not match the grep itself.",
+       "next": 1,
+       "output": "30"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** Zombies are already dead. Who is responsible for them?",
+     "choices": [
+      {
+       "cmd": "ps -eo ppid,stat | awk '$2 ~ /^Z/ {c[$1]++} END {for (p in c) print \"parent\", p, \"has\", c[p], \"zombies\"}' | sed -E 's/parent [0-9]+/parent PID/'",
+       "verdict": "good",
+       "note": "All zombies belong to **one parent**. Its children exit and it never calls `wait`.",
+       "next": 2,
+       "output": "parent PID has 32 zombies"
+      },
+      {
+       "cmd": "kill -9 $(ps -eo pid,stat | awk '$2 ~ /^Z/ {print $1}' | head -n 1)",
+       "verdict": "poor",
+       "note": "You cannot kill a zombie: it is already dead. The signal has nobody to run in. The entry stays until the parent calls `wait`.",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** Identify the parent process.",
+     "choices": [
+      {
+       "cmd": "ps -o pid=,stat=,etime=,comm= -p $(cat /tmp/lab/zm.pid) | awk '{print \"PID\", \"state\", $2, \"command\", $4}'",
+       "verdict": "good",
+       "note": "The parent is `zmaker` and it is running normally (state `S`): a program that forks and never reaps its children.",
+       "next": 3,
+       "output": "PID state S command zmaker"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** What fixes the zombies?",
+     "choices": [
+      {
+       "cmd": "kill $(cat /tmp/lab/zm.pid); sleep 1; ps -eo stat | grep -c '^Z'",
+       "verdict": "good",
+       "note": "With the parent gone, the zombies are re-parented to PID 1, which reaps them at once: count 0. The real fix is in the application (handle `SIGCHLD` and call `wait`), then restart it.",
+       "next": 4,
+       "output": "0"
+      },
+      {
+       "cmd": "sudo reboot",
+       "verdict": "poor",
+       "note": "A reboot also clears them, but needlessly interrupts everything and the bug returns.",
+       "explanationOnly": true,
+       "reason": "destructive on a real server, so it was not run"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** Verify nothing remains.",
+     "choices": [
+      {
+       "cmd": "ps -eo stat | grep -c '^Z'",
+       "verdict": "good",
+       "note": "No zombies.",
+       "next": "done",
+       "output": "0"
+      }
+     ]
+    }
+   ],
+   "conclusion": "A zombie is a finished child whose parent has not collected its exit status. It uses no CPU or memory except a PID slot, and **cannot be killed**. Count them by parent (`ps -eo ppid,stat`), then fix or restart the **parent**; PID 1 reaps the orphaned zombies. Long-term: the application must `wait()`, and containers need an init that reaps. See [zombies](#/lesson/10/zombies-orphans)."
+  },
+  {
+   "id": "read-only-fs",
+   "title": "A filesystem turned read-only",
+   "level": "intermediate",
+   "symptom": "An application on `/mnt/labro` suddenly fails with `Read-only file system`, though nobody remounted anything. The disk is a device-mapper volume.",
+   "build": [
+    "truncate -s 64M /tmp/lab/ro.img; L=$(sudo losetup -f --show /tmp/lab/ro.img); echo $L > /tmp/lab/ro.loop; S=$(sudo blockdev --getsz $L); echo \"0 $S linear $L 0\" | sudo dmsetup create labro",
+    "sudo mkfs.ext4 -q /dev/mapper/labro; sudo tune2fs -e remount-ro /dev/mapper/labro > /dev/null; sudo mkdir -p /mnt/labro && sudo mount /dev/mapper/labro /mnt/labro && sudo chown $(id -un): /mnt/labro; echo ok > /mnt/labro/a.txt; sync",
+    "L=$(cat /tmp/lab/ro.loop); S=$(sudo blockdev --getsz $L); sudo dmsetup suspend --noflush labro && echo \"0 $S error\" | sudo dmsetup load labro && sudo dmsetup resume labro; echo more > /mnt/labro/b.txt; sync; sleep 1; true"
+   ],
+   "teardown": [
+    "sudo umount -l /mnt/labro 2>/dev/null; sudo dmsetup remove --force labro 2>/dev/null; sudo losetup -d $(cat /tmp/lab/ro.loop) 2>/dev/null; sudo rmdir /mnt/labro 2>/dev/null; true"
+   ],
+   "steps": [
+    {
+     "prompt": "**Step 1.** Confirm the symptom.",
+     "choices": [
+      {
+       "cmd": "touch /mnt/labro/new.txt",
+       "verdict": "good",
+       "note": "`Read-only file system`: writes are refused.",
+       "next": 1,
+       "output": "touch: cannot touch '/mnt/labro/new.txt': Read-only file system"
+      },
+      {
+       "cmd": "sudo chmod 777 /mnt/labro",
+       "verdict": "poor",
+       "note": "Permissions are not the problem (the error is `Read-only file system`, not `Permission denied`) and chmod would fail the same way.",
+       "explanationOnly": true,
+       "reason": "it would fail with the same error and does not address the cause"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** Why did it become read-only? Ask the kernel.",
+     "choices": [
+      {
+       "cmd": "sudo dmesg | grep -E 'EXT4-fs.*(error|Remounting|I/O error)' | tail -n 3 | sed -E 's/^\\[[^]]*\\] //; s/dm-[0-9]+/dm-N/' | cut -c1-110",
+       "verdict": "good",
+       "note": "`Detected aborted journal`, `I/O error while writing superblock`, `Remounting filesystem read-only`. ext4 was configured with `errors=remount-ro`: after an I/O error it protects the data by going read-only.",
+       "next": 2,
+       "output": "EXT4-fs error (device dm-N): ext4_journal_check_start:86: comm ext4lazyinit: Detected aborted journal\nEXT4-fs (dm-N): I/O error while writing superblock\nEXT4-fs (dm-N): Remounting filesystem read-only"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** An I/O error comes from below the file system. Look at the device.",
+     "choices": [
+      {
+       "cmd": "sudo dmsetup status labro | sed -E 's/[0-9]+ ([0-9]+) /0 \\1 /' | awk '{print $3}'",
+       "verdict": "good",
+       "note": "The device-mapper target is `error`: every I/O to the device fails. In real life this could be a dead path (multipath), a failing disk, a detached cloud volume or a SAN fault.",
+       "next": 3,
+       "output": "error"
+      },
+      {
+       "cmd": "sudo fsck -y /dev/mapper/labro",
+       "verdict": "poor",
+       "note": "Never run fsck on a **mounted** file system. And the file system is not the root cause: the device below is failing.",
+       "explanationOnly": true,
+       "reason": "running fsck on a mounted file system can corrupt it"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** Repair in the right order: stop using the file system, restore the device, check, remount.",
+     "choices": [
+      {
+       "cmd": "sudo umount /mnt/labro && echo unmounted",
+       "verdict": "good",
+       "note": "Unmounted. Now it is safe to touch the device.",
+       "next": 4,
+       "output": "unmounted"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** Restore the device (here: switch the table back to the real mapping) and check the file system.",
+     "choices": [
+      {
+       "cmd": "L=$(cat /tmp/lab/ro.loop); S=$(sudo blockdev --getsz $L); echo \"0 $S linear $L 0\" | sudo dmsetup load labro && sudo dmsetup resume labro; sudo dmsetup status labro | awk '{print $3}'; sudo e2fsck -fy /dev/mapper/labro 2>&1 | tail -n 1 | sed -E 's#/dev/[a-z0-9/-]+#DEV#'",
+       "verdict": "good",
+       "note": "The device works again, and `e2fsck` finishes (the journal is replayed or the file system is clean).",
+       "next": 5,
+       "output": "linear\nDEV: 12/16384 files (0.0% non-contiguous), 9514/65536 blocks"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 6.** Mount it again and test.",
+     "choices": [
+      {
+       "cmd": "sudo mount /dev/mapper/labro /mnt/labro && sudo chown $(id -un): /mnt/labro && touch /mnt/labro/new.txt && echo 'write works again'",
+       "verdict": "good",
+       "note": "Writable again.",
+       "next": "done",
+       "output": "write works again"
+      }
+     ]
+    }
+   ],
+   "conclusion": "A file system that went read-only did so **on purpose**, after an I/O or metadata error (`errors=remount-ro`). Read `dmesg` for the first error, find the failing layer **below** it (disk, RAID, multipath, cloud volume), repair that, then `umount`, `fsck`, `mount`. Remounting read-write without understanding the error risks corrupting data. See [filesystems](#/lesson/20/journal-fsck-cow)."
+  },
+  {
+   "id": "server-wont-boot",
+   "title": "A server that won't boot (explanation only)",
+   "level": "advanced",
+   "symptom": "After a reboot following a kernel update, the server stops at `Dropping to initramfs shell`. The console shows `dracut-initqueue: timeout, still waiting for /dev/mapper/vg-root`. This lab is **explanation only**: it needs a machine that does not boot, which cannot be created safely here, so no output is recorded.",
+   "steps": [
+    {
+     "prompt": "**Step 1.** Which stage failed, and what is the first thing to check in the recovery shell?",
+     "choices": [
+      {
+       "cmd": "cat /proc/cmdline",
+       "verdict": "good",
+       "note": "The kernel started and the initramfs is running, so firmware, boot loader and kernel worked. Check the command line: is `root=` and `rd.lvm.lv=` what you expect?",
+       "next": 1,
+       "explanationOnly": true,
+       "reason": "needs a machine that does not boot; shown as the command you would run in the recovery shell"
+      },
+      {
+       "cmd": "reboot",
+       "verdict": "poor",
+       "note": "Rebooting repeats the failure and may lose the console messages.",
+       "explanationOnly": true,
+       "reason": "needs a machine that does not boot; shown as the command you would run in the recovery shell"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 2.** The root logical volume is not found. Are the disks and the volume group visible?",
+     "choices": [
+      {
+       "cmd": "lsblk; lvm vgscan; lvm lvs",
+       "verdict": "good",
+       "note": "If the disk is missing, the initramfs lacks a driver (new kernel without the storage module) or the device is gone. If the disk is there but the VG is inactive, activate it.",
+       "next": 2,
+       "explanationOnly": true,
+       "reason": "needs a machine that does not boot; shown as the command you would run in the recovery shell"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 3.** The disk is visible and the VG is inactive. Activate it and continue.",
+     "choices": [
+      {
+       "cmd": "lvm vgchange -ay && exit",
+       "verdict": "good",
+       "note": "With the root LV active the boot continues. But it will fail again next time: you must fix the cause (usually the initramfs).",
+       "next": 3,
+       "explanationOnly": true,
+       "reason": "needs a machine that does not boot; shown as the command you would run in the recovery shell"
+      },
+      {
+       "cmd": "mkfs.xfs /dev/mapper/vg-root",
+       "verdict": "poor",
+       "note": "Creating a file system destroys the data. Never format to \"fix\" a boot problem.",
+       "explanationOnly": true,
+       "reason": "needs a machine that does not boot; shown as the command you would run in the recovery shell"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 4.** After booting, make it permanent. The initramfs of the new kernel was built without the needed driver.",
+     "choices": [
+      {
+       "cmd": "sudo dracut --force /boot/initramfs-$(uname -r).img $(uname -r) && sudo lsinitrd /boot/initramfs-$(uname -r).img | grep -E 'lvm|dm_mod'",
+       "verdict": "good",
+       "note": "Rebuild the initramfs for the running kernel and verify the storage modules are inside.",
+       "next": 4,
+       "explanationOnly": true,
+       "reason": "needs a machine that does not boot; shown as the command you would run in the recovery shell"
+      }
+     ]
+    },
+    {
+     "prompt": "**Step 5.** Make the next boot safe.",
+     "choices": [
+      {
+       "cmd": "sudo grubby --default-kernel; sudo grubby --info=ALL | grep -E '^(index|title)'",
+       "verdict": "good",
+       "note": "Know which kernels are installed, keep the previous one as a fallback, and test the new one once with `grub2-reboot`.",
+       "next": "done",
+       "explanationOnly": true,
+       "reason": "needs a machine that does not boot; shown as the command you would run in the recovery shell"
+      }
+     ]
+    }
+   ],
+   "conclusion": "Where the boot stops tells you the stage: before GRUB (firmware, ESP), at GRUB (menu, config), kernel panic (kernel, root device), **`Dropping to initramfs`** (the initramfs could not find or mount the root: missing driver, wrong `root=`/`rd.*`, inactive LVM/RAID, bad fstab). Fix from the dracut shell or a rescue boot, then rebuild the initramfs and keep a known-good kernel. See [the boot process](#/lesson/24/boot-sequence) and [boot debugging](#/lesson/24/boot-debugging)."
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}
