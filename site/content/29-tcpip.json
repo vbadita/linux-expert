@@ -1,0 +1,377 @@
+{
+ "title": "TCP/IP inside the kernel",
+ "lessons": [
+  {
+   "id": "sockets-and-ss",
+   "title": "Sockets: socket, bind, listen, accept, connect",
+   "level": "intermediate",
+   "goal": "Write a tiny TCP server and client, watch the system calls they make, and inspect the sockets with `ss`.\n\nWhy it matters: every network service is a process holding sockets. `ss` shows who listens, who is connected and how long the queues are, which is the first step in nearly every network incident.",
+   "setup": {
+    "note": "Programs are small C files. tcpdump and nc are used (`dnf install tcpdump nmap-ncat`). Everything runs on the loopback interface (127.0.0.1), so no traffic leaves this machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A socket is a file descriptor for communication",
+     "text": "`socket()` creates an endpoint and returns a **file descriptor**. A server then calls `bind` (claim an address and port), `listen` (start accepting; the **backlog** is the length of the queue of waiting connections) and `accept` (take one connection, which gives a **new** descriptor). A client calls `connect`.",
+     "code": {
+      "file": "tcp_server.c",
+      "lang": "c",
+      "src": "#include <arpa/inet.h>\n#include <netinet/in.h>\n#include <stdio.h>\n#include <sys/socket.h>\n#include <unistd.h>\n\nint main(void) {\n    int srv = socket(AF_INET, SOCK_STREAM, 0);\n    int one = 1;\n    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);\n\n    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(9000)};\n    inet_pton(AF_INET, \"127.0.0.1\", &addr.sin_addr);\n    bind(srv, (struct sockaddr *)&addr, sizeof addr);   /* claim address and port */\n    listen(srv, 5);                                      /* start accepting; backlog 5 */\n\n    int c = accept(srv, NULL, NULL);                     /* wait for one client */\n    char buf[64];\n    ssize_t n = read(c, buf, sizeof buf - 1);\n    buf[n > 0 ? n : 0] = 0;\n    printf(\"server got: %s\", buf);\n    write(c, \"pong\\n\", 5);\n    close(c);\n    close(srv);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o tcp_server tcp_server.c",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "The client program",
+     "text": "The client connects, sends `ping`, prints the answer.",
+     "code": {
+      "file": "tcp_client.c",
+      "lang": "c",
+      "src": "#include <arpa/inet.h>\n#include <netinet/in.h>\n#include <stdio.h>\n#include <sys/socket.h>\n#include <unistd.h>\n\nint main(void) {\n    int s = socket(AF_INET, SOCK_STREAM, 0);\n    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(9000)};\n    inet_pton(AF_INET, \"127.0.0.1\", &addr.sin_addr);\n    connect(s, (struct sockaddr *)&addr, sizeof addr);   /* the three-way handshake happens here */\n    write(s, \"ping\\n\", 5);\n    char buf[16];\n    ssize_t n = read(s, buf, sizeof buf - 1);\n    buf[n > 0 ? n : 0] = 0;\n    printf(\"client got: %s\", buf);\n    close(s);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o tcp_client tcp_client.c",
+       "output": ""
+      },
+      {
+       "cmd": "grep -E 'connect|write|read' tcp_client.c | sed 's/^ *//' | cut -c1-70",
+       "output": "connect(s, (struct sockaddr *)&addr, sizeof addr);   /* the three-way \nwrite(s, \"ping\\n\", 5);\nssize_t n = read(s, buf, sizeof buf - 1);"
+      }
+     ]
+    },
+    {
+     "title": "Run both under strace",
+     "text": "We start the server under `strace` (only the network calls) in the background, then run the client.",
+     "run": [
+      {
+       "cmd": "strace -f -o srv.trace -e trace=socket,bind,listen,accept,accept4,connect ./tcp_server > srv.out & sleep 2; ./tcp_client; wait; cat srv.out",
+       "output": "[1] 3479919\nclient got: pong\nserver got: ping"
+      },
+      {
+       "cmd": "grep -E 'socket|bind|listen|accept' srv.trace | sed -E 's/^[0-9]+ +//; s/sa_data=\"[^\"]*\"/.../; s/inet_addr\\(\"127.0.0.1\"\\)/127.0.0.1/' | cut -c1-100",
+       "output": "socket(AF_INET, SOCK_STREAM, IPPROTO_IP) = 3\nbind(3, {sa_family=AF_INET, sin_port=htons(9000), sin_addr=127.0.0.1}, 16) = 0\nlisten(3, 5)                    = 0\naccept(3, NULL, NULL)           = 4"
+      }
+     ]
+    },
+    {
+     "title": "ss: who is listening?",
+     "text": "`ss` lists sockets. `-l` listening, `-t` TCP, `-n` numbers instead of names, `-p` the owning process. For a **listening** socket `Recv-Q` is the number of connections waiting to be accepted and `Send-Q` is the backlog limit.",
+     "run": [
+      {
+       "cmd": "./tcp_server > /dev/null & sleep 1; ss -ltnp 'sport = :9000' | sed -E 's/pid=[0-9]+/pid=N/; s/fd=[0-9]+/fd=N/' | awk '{print $1, $2, $3, $4, $6}'",
+       "output": "[1] 3479932\nState Recv-Q Send-Q Local Peer\nLISTEN 0 5 127.0.0.1:9000 users:((\"tcp_server\",pid=N,fd=N))"
+      }
+     ]
+    },
+    {
+     "title": "ss: connected sockets and states",
+     "text": "After a client connects, the server has an established socket. `ss -tan` shows the state of every TCP socket: `LISTEN`, `ESTAB`, `TIME-WAIT`, ... Here the client connects and the server answers.",
+     "run": [
+      {
+       "cmd": "./tcp_client; sleep 0.5; ss -tan 'sport = :9000 or dport = :9000' | awk '{print $1, $4, $5}' | sed -E 's/127.0.0.1:[0-9]{5}/127.0.0.1:EPHEMERAL/g'",
+       "output": "client got: pong\nState Local Address:Port\nTIME-WAIT 127.0.0.1:9000 127.0.0.1:EPHEMERAL\nTIME-WAIT 127.0.0.1:EPHEMERAL 127.0.0.1:9000"
+      }
+     ],
+     "under": "Each socket is a kernel `struct sock` reachable through a file descriptor (`ls -l /proc/PID/fd` shows `socket:[inode]`). For TCP the kernel keeps a state machine, send and receive buffers, retransmission timers and a congestion window per connection. Your program only sees `read` and `write` on the descriptor."
+    },
+    {
+     "title": "The descriptor view",
+     "text": "A socket is listed like any open file.",
+     "run": [
+      {
+       "cmd": "./tcp_server > /dev/null & p=$!; sleep 0.5; ls -l /proc/$p/fd | awk '/socket/ {print $9, $10, $11}' | sed -E 's#/proc/[0-9]+/fd/##; s/\\[[0-9]+\\]/[inode]/'; kill $p 2>/dev/null; wait $p 2>/dev/null; true",
+       "output": "[1] 3479947\n3 -> socket:[inode]"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which call turns a listening socket into a connected one for a client?",
+     "options": [
+      "bind",
+      "listen",
+      "accept",
+      "socket"
+     ],
+     "answer": 2,
+     "explain": "`accept` returns a new descriptor for the connection."
+    },
+    {
+     "q": "For a listening socket in `ss -ltn`, what is Send-Q?",
+     "options": [
+      "Bytes waiting to send",
+      "The backlog limit",
+      "The number of clients",
+      "The window size"
+     ],
+     "answer": 1,
+     "explain": "Recv-Q is the current queue; Send-Q is its limit."
+    },
+    {
+     "q": "What does `ss -ltnp` show beyond `ss -ltn`?",
+     "options": [
+      "Packets",
+      "The process that owns each socket",
+      "The MTU",
+      "Routes"
+     ],
+     "answer": 1,
+     "explain": "`-p` adds users:((name,pid,fd))."
+    },
+    {
+     "q": "What is the file descriptor of a socket in /proc/PID/fd shown as?",
+     "options": [
+      "pipe:[N]",
+      "socket:[N]",
+      "anon_inode",
+      "/dev/net"
+     ],
+     "answer": 1,
+     "explain": "socket:[inode]."
+    }
+   ],
+   "check": {
+    "scenario": "A service's port 8080 is not reachable, and you are logged in on the server. Which two commands tell you whether it is listening and on which address?",
+    "answer": "`ss -ltnp | grep :8080` shows if a process listens and on **which address**: `127.0.0.1:8080` means local only, `0.0.0.0:8080` or `*:8080` means all interfaces. Then test locally with `curl -sv http://127.0.0.1:8080/` before suspecting the firewall."
+   }
+  },
+  {
+   "id": "tcp-handshake-states",
+   "title": "The TCP handshake, states and queues",
+   "level": "advanced",
+   "goal": "Watch the three-way handshake and the connection teardown in real packets, and connect the TCP states you see in `ss` with what happened on the wire.\n\nWhy it matters: `TIME_WAIT` piles, `CLOSE_WAIT` leaks and full accept queues are classic production problems. Each one is a state or a queue you can read.",
+   "setup": {
+    "note": "Programs are small C files. tcpdump and nc are used (`dnf install tcpdump nmap-ncat`). Everything runs on the loopback interface (127.0.0.1), so no traffic leaves this machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Capture a connection on loopback",
+     "text": "`tcpdump -i lo` captures packets on the loopback interface. `nc -l` listens, a second `nc` connects, sends a line and closes. We print each packet as: source > destination [flags] length.",
+     "run": [
+      {
+       "cmd": "sudo timeout 4 tcpdump -i lo -nn -l 'tcp port 9001' 2>/dev/null | sed -E 's/^[0-9:.]+ IP ([^ ]+) > ([^:]+): Flags \\[([^]]+)\\].*length ([0-9]+)/\\1 > \\2 [\\3] len=\\4/' | sed -E 's/127.0.0.1\\.[0-9]{5}/CLIENT/g' > cap.txt & T=$!; sleep 1; (nc -l 127.0.0.1 9001 > /dev/null &); sleep 0.5; echo hello | nc 127.0.0.1 9001; wait $T; cat cap.txt",
+       "output": "[1] 3479960\nCLIENT > 127.0.0.1.9001 [S] len=0\n127.0.0.1.9001 > CLIENT [S.] len=0\nCLIENT > 127.0.0.1.9001 [.] len=0\nCLIENT > 127.0.0.1.9001 [P.] len=6\n127.0.0.1.9001 > CLIENT [.] len=0\nCLIENT > 127.0.0.1.9001 [F.] len=0\n127.0.0.1.9001 > CLIENT [F.] len=0\nCLIENT > 127.0.0.1.9001 [.] len=0"
+      }
+     ],
+     "after": "Read the flags: `S` SYN, `S.` SYN+ACK, `.` ACK, `P.` PUSH+ACK (data), `F.` FIN+ACK. The first three packets are the **three-way handshake**. The `P.` packet carries the 6 bytes of `hello\\n`. The `F.` packets close each direction."
+    },
+    {
+     "title": "What the handshake does",
+     "text": "1. Client sends **SYN** with its initial sequence number and options (window size, MSS, timestamps).\n2. Server answers **SYN+ACK**: it acknowledges the client's number and sends its own.\n3. Client sends **ACK**. Both ends are now `ESTABLISHED`.\n\nAfter the first SYN the server keeps the half-open connection in the **SYN queue**; after the ACK it moves to the **accept queue** until the program calls `accept`. If either queue is full the kernel drops packets and the client retries (seconds of delay).",
+     "run": [
+      {
+       "cmd": "sysctl net.core.somaxconn net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_syncookies | tr -s ' ' ' '",
+       "output": "net.core.somaxconn = 4096\nnet.ipv4.tcp_max_syn_backlog = 512\nnet.ipv4.tcp_syncookies = 1"
+      }
+     ]
+    },
+    {
+     "title": "TIME-WAIT: the side that closes first waits",
+     "text": "The end that closes first ends in `TIME-WAIT` for about 60 seconds, to make sure the last ACK arrives and old packets die out. Many short connections therefore create many `TIME-WAIT` sockets on the **closing** side (that is normal).",
+     "run": [
+      {
+       "cmd": "ss -tan 'sport = :9001 or dport = :9001' | awk 'NR>1 {print $1}' | sort | uniq -c | awk '{print $2, $1}'",
+       "output": "TIME-WAIT 1"
+      },
+      {
+       "cmd": "sysctl net.ipv4.tcp_fin_timeout | tr -s ' ' ' '",
+       "output": "net.ipv4.tcp_fin_timeout = 60"
+      }
+     ],
+     "under": "TIME-WAIT lasts 2 x MSL (60 s on Linux, fixed in the kernel). `tcp_fin_timeout` is the time a socket stays in FIN-WAIT-2 for orphaned connections, not TIME-WAIT. Running out of ephemeral ports is solved by connection reuse (keep-alive, connection pools), not by shortening TIME-WAIT."
+    },
+    {
+     "title": "CLOSE-WAIT: the other side forgot to close",
+     "text": "When the peer closes, our side gets a FIN and enters `CLOSE-WAIT`, waiting for **our application** to call `close()`. A growing number of `CLOSE-WAIT` sockets is an **application bug** (a connection leak), not a network problem. We create one: the server accepts and never closes; the client connects and closes.",
+     "run": [
+      {
+       "cmd": "python3 -c \"import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',9002)); s.listen(); c,_=s.accept(); time.sleep(6)\" & sleep 0.7; python3 -c \"import socket; socket.create_connection(('127.0.0.1',9002)).close()\"; sleep 0.5; ss -tan 'sport = :9002 or dport = :9002' | awk 'NR>1 {print $1}' | sort | tr '\\n' ' '; echo; wait",
+       "output": "[1] 3479986\nCLOSE-WAIT FIN-WAIT-2 LISTEN "
+      }
+     ]
+    },
+    {
+     "title": "Summary of states",
+     "text": "`LISTEN` waiting for connections. `SYN-SENT` / `SYN-RECV` handshake in progress. `ESTAB` connected. `FIN-WAIT-1/2` we closed, waiting for the peer. `CLOSE-WAIT` peer closed, we have not. `LAST-ACK` we closed after the peer. `TIME-WAIT` waiting before the port can be reused.",
+     "run": [
+      {
+       "cmd": "ss -s | grep -E '^TCP:' | sed -E 's/[0-9]+ \\(estab [0-9]+, closed [0-9]+, orphaned [0-9]+, timewait [0-9]+\\)/(counts vary)/'",
+       "output": "TCP:   (counts vary)"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which flags make up the three-way handshake?",
+     "options": [
+      "SYN, SYN+ACK, ACK",
+      "FIN, ACK, FIN",
+      "SYN, ACK, PSH",
+      "RST, SYN, ACK"
+     ],
+     "answer": 0,
+     "explain": "SYN, then SYN+ACK, then ACK."
+    },
+    {
+     "q": "Which state means the peer has closed but the local program has not?",
+     "options": [
+      "TIME-WAIT",
+      "CLOSE-WAIT",
+      "FIN-WAIT-2",
+      "LISTEN"
+     ],
+     "answer": 1,
+     "explain": "CLOSE-WAIT: a leak in the local application."
+    },
+    {
+     "q": "Which side normally ends up in TIME-WAIT?",
+     "options": [
+      "The side that closes first",
+      "The server always",
+      "The side that receives the FIN",
+      "Both always"
+     ],
+     "answer": 0,
+     "explain": "The active closer."
+    },
+    {
+     "q": "What happens when the accept queue is full?",
+     "options": [
+      "Nothing",
+      "New connections are delayed or dropped; clients retry",
+      "The kernel grows it",
+      "The server crashes"
+     ],
+     "answer": 1,
+     "explain": "Packets are dropped and the client retransmits the SYN/ACK."
+    }
+   ],
+   "check": {
+    "scenario": "A web server shows 30 000 sockets in TIME-WAIT and users see errors `cannot assign requested address` when the app calls an upstream. What is happening and what do you do?",
+    "answer": "The app opens many short connections to one upstream address, so the pool of ephemeral ports (`net.ipv4.ip_local_port_range`) is used up by TIME-WAIT sockets of the closing side. Fix by reusing connections (HTTP keep-alive, connection pooling), spreading across several upstream IPs or source IPs, or widening the port range. `tcp_tw_reuse=1` can help for outgoing connections."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What system calls does a TCP server make?",
+   "a": "`socket`, `bind`, `listen`, then `accept` for each connection (which returns a new descriptor), `read`/`write`, `close`. A client uses `socket`, `connect`. See [the lesson](#/lesson/29/sockets-and-ss).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you list listening ports and their processes?",
+   "a": "`ss -ltnp` (add `-u` for UDP). The local address tells if it listens on all interfaces or only on loopback.",
+   "level": "beginner"
+  },
+  {
+   "q": "Describe the TCP three-way handshake.",
+   "a": "SYN from the client, SYN+ACK from the server, ACK from the client. Then the connection is ESTABLISHED. See [the lesson](#/lesson/29/tcp-handshake-states).",
+   "level": "beginner"
+  },
+  {
+   "q": "What does a growing number of CLOSE_WAIT sockets mean?",
+   "a": "The peer closed the connections and the local application is not calling close(): a connection leak in the application.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why does TIME_WAIT exist?",
+   "a": "So the closing side can resend the final ACK and so late packets of the old connection cannot be mistaken for a new one on the same ports. It lasts 60 s on Linux.",
+   "level": "advanced"
+  },
+  {
+   "q": "What do Recv-Q and Send-Q mean for a listening socket?",
+   "a": "Recv-Q: connections currently waiting in the accept queue. Send-Q: the maximum backlog (min of listen() backlog and net.core.somaxconn).",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Socket",
+   "def": "A kernel endpoint for communication, used through a file descriptor.",
+   "lesson": "29/sockets-and-ss"
+  },
+  {
+   "term": "Backlog",
+   "def": "The queue length of connections waiting to be accepted on a listening socket.",
+   "lesson": "29/sockets-and-ss"
+  },
+  {
+   "term": "Three-way handshake",
+   "def": "SYN, SYN+ACK, ACK: how a TCP connection is set up.",
+   "lesson": "29/tcp-handshake-states"
+  },
+  {
+   "term": "TIME_WAIT",
+   "def": "TCP state of the side that closed first, kept ~60 s before the ports can be reused.",
+   "lesson": "29/tcp-handshake-states"
+  },
+  {
+   "term": "CLOSE_WAIT",
+   "def": "TCP state: the peer closed, the local application has not yet.",
+   "lesson": "29/tcp-handshake-states"
+  },
+  {
+   "term": "Ephemeral port",
+   "def": "A temporary source port the kernel picks for an outgoing connection.",
+   "lesson": "29/tcp-handshake-states"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ss -ltnp",
+   "desc": "List listening TCP sockets with their processes.",
+   "topic": "Networking",
+   "lesson": "29/sockets-and-ss"
+  },
+  {
+   "cmd": "ss -tan",
+   "desc": "List all TCP sockets with states.",
+   "topic": "Networking",
+   "lesson": "29/sockets-and-ss"
+  },
+  {
+   "cmd": "ss -s",
+   "desc": "Summary of socket counts.",
+   "topic": "Networking",
+   "lesson": "29/tcp-handshake-states"
+  },
+  {
+   "cmd": "ss -tan state time-wait",
+   "desc": "List sockets in one state.",
+   "topic": "Networking",
+   "lesson": "29/tcp-handshake-states"
+  },
+  {
+   "cmd": "sudo tcpdump -i lo -nn 'tcp port 9001'",
+   "desc": "Capture packets of one TCP port on loopback.",
+   "topic": "Networking",
+   "lesson": "29/tcp-handshake-states"
+  },
+  {
+   "cmd": "nc -l 127.0.0.1 9001",
+   "desc": "Listen on a TCP port.",
+   "topic": "Networking",
+   "lesson": "29/tcp-handshake-states"
+  },
+  {
+   "cmd": "sysctl net.core.somaxconn",
+   "desc": "Show the maximum listen backlog.",
+   "topic": "Networking",
+   "lesson": "29/tcp-handshake-states"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

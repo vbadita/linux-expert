@@ -244,6 +244,453 @@
     "scenario": "A script runs `rm $file` and `$file` holds `my notes.txt`. It deletes nothing you wanted, and prints two errors about `my` and `notes.txt` not existing. Using what you learned, explain what happened and how to fix it.",
     "answer": "The unquoted `$file` expanded and was **split into two words** at the blank, so `rm` received two arguments: `my` and `notes.txt`. Step 5 showed the same with `hello $name`.\n\nFix: quote the expansion, `rm \"$file\"`. Then `rm` receives one argument: `my notes.txt`."
    }
+  },
+  {
+   "id": "environment-and-path",
+   "title": "Environment variables and what a child inherits",
+   "level": "intermediate",
+   "goal": "Learn the difference between a shell variable and an environment variable, and how a child process gets its environment.\n\nWhy it matters: a variable you set but did not export is invisible to every program you start. Most \"it works in my shell but not in the script\" problems come from this.",
+   "setup": {
+    "note": "Work in a scratch directory. Outputs will differ in PIDs and paths; the structure is the same.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A shell variable stays in the shell",
+     "text": "`x=1` creates a **shell variable**. It lives inside the bash process only. A program started from bash does not see it.",
+     "run": [
+      {
+       "cmd": "x=1",
+       "output": ""
+      },
+      {
+       "cmd": "echo \"in shell: [$x]\"",
+       "output": "in shell: [1]"
+      },
+      {
+       "cmd": "bash -c 'echo \"in child: [$x]\"'",
+       "output": "in child: []"
+      }
+     ]
+    },
+    {
+     "title": "export puts it into the environment",
+     "text": "`export x` marks the variable for export. Every child started afterwards gets a copy.",
+     "run": [
+      {
+       "cmd": "export x",
+       "output": ""
+      },
+      {
+       "cmd": "bash -c 'echo \"in child: [$x]\"'",
+       "output": "in child: [1]"
+      },
+      {
+       "cmd": "printenv x",
+       "output": "1"
+      }
+     ]
+    },
+    {
+     "title": "A child cannot change its parent",
+     "text": "The child gets a **copy**. If the child changes it, the parent never sees the change.",
+     "run": [
+      {
+       "cmd": "bash -c 'x=2; echo \"child sets x=$x\"'",
+       "output": "child sets x=2"
+      },
+      {
+       "cmd": "echo \"parent still has x=$x\"",
+       "output": "parent still has x=1"
+      }
+     ],
+     "under": "The kernel copies the environment into the new process at `execve`. After that, the two processes have separate memory. There is no way for a child to write into its parent's variables."
+    },
+    {
+     "title": "Set a variable for one command only",
+     "text": "`NAME=value command` puts `NAME` in the environment of that one command. The shell itself is not changed.",
+     "run": [
+      {
+       "cmd": "FOO=once bash -c 'echo \"child sees: $FOO\"'",
+       "output": "child sees: once"
+      },
+      {
+       "cmd": "echo \"shell sees: [$FOO]\"",
+       "output": "shell sees: []"
+      }
+     ]
+    },
+    {
+     "title": "Underneath: the environment is an array of strings",
+     "text": "A program receives its environment as a second array, `envp`, next to `argv`. Each entry is `NAME=value`. Linux shows the raw bytes in `/proc/PID/environ`, separated by NUL characters.\n\n`env -i` starts a command with an **empty** environment, so we can see exactly what the shell adds.",
+     "run": [
+      {
+       "cmd": "env -i A=1 B=two bash -c 'tr \"\\0\" \"\\n\" < /proc/$$/environ'",
+       "output": "A=1\nB=two"
+      }
+     ],
+     "under": "`execve(path, argv, envp)` takes the environment as an explicit argument. `env` is only a program that builds an `envp` and calls `execve`."
+    },
+    {
+     "title": "PATH order decides which program runs",
+     "text": "Bash takes the **first** match in `$PATH`. Put your own directory first and you replace a command, for better or worse. This is why a writable directory early in `PATH` is a security risk.",
+     "run": [
+      {
+       "cmd": "mkdir -p /tmp/lab/bin",
+       "output": ""
+      },
+      {
+       "cmd": "printf '#!/bin/sh\\necho my own ls\\n' > /tmp/lab/bin/ls && chmod +x /tmp/lab/bin/ls",
+       "output": ""
+      },
+      {
+       "cmd": "PATH=/tmp/lab/bin:$PATH",
+       "output": ""
+      },
+      {
+       "cmd": "ls",
+       "output": "my own ls"
+      },
+      {
+       "cmd": "type -a ls",
+       "output": "ls is /tmp/lab/bin/ls\nls is /usr/bin/ls"
+      },
+      {
+       "cmd": "PATH=${PATH#/tmp/lab/bin:}; hash -r; type -a ls",
+       "output": "ls is /usr/bin/ls"
+      }
+     ],
+     "after": "`hash -r` clears bash's cache of command locations. Without it bash may keep using the old path."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "You run `name=bob` and then `bash -c 'echo $name'`. What is printed?",
+     "options": [
+      "bob",
+      "An empty line",
+      "An error",
+      "name"
+     ],
+     "answer": 1,
+     "explain": "`name` is a shell variable and was not exported, so the child bash does not have it."
+    },
+    {
+     "q": "Which command makes `PORT` visible to every program started later from this shell?",
+     "options": [
+      "PORT=80",
+      "export PORT=80",
+      "set PORT=80",
+      "env PORT"
+     ],
+     "answer": 1,
+     "explain": "`export` adds the variable to the environment that children inherit."
+    },
+    {
+     "q": "A script changes `HOME` with `export HOME=/tmp`. Does your interactive shell's HOME change?",
+     "options": [
+      "Yes, immediately",
+      "Yes, after logout",
+      "No, a child cannot change its parent's environment",
+      "Only if the script is run with sudo"
+     ],
+     "answer": 2,
+     "explain": "The script runs in a child process with its own copy of the environment."
+    },
+    {
+     "q": "What does `FOO=1 cmd` do?",
+     "options": [
+      "Sets FOO in the shell for good",
+      "Sets FOO only in the environment of cmd",
+      "Exports FOO",
+      "Fails"
+     ],
+     "answer": 1,
+     "explain": "Step 4: the variable exists for that one command only."
+    }
+   ],
+   "check": {
+    "scenario": "A script is started by cron and fails with `command not found`, but the same command works in your terminal. Give two likely causes related to this lesson.",
+    "answer": "1. Cron starts jobs with a **small environment**, and its `PATH` is short (often `/usr/bin:/bin`). The command lives elsewhere. Use the full path or set `PATH` in the crontab.\n2. A variable you use in the terminal was set in your login shell and **not exported** (or only in `~/.bashrc`), so the cron job never gets it. Define it inside the script."
+   }
+  },
+  {
+   "id": "expansion-order",
+   "title": "The order of expansions",
+   "level": "intermediate",
+   "goal": "Learn the order in which bash expands a command line and how to watch it happen.\n\nWhy it matters: the order explains puzzling results, for example why `{1..$n}` does not work and why a quoted variable is safe.",
+   "setup": {
+    "note": "Work in a scratch directory. Outputs will differ in PIDs and paths; the structure is the same.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Brace expansion comes first",
+     "text": "`{a,b}` and `{1..3}` generate words. This happens before anything else, and it is pure text: no files are checked.",
+     "run": [
+      {
+       "cmd": "echo {a,b}{1,2}",
+       "output": "a1 a2 b1 b2"
+      },
+      {
+       "cmd": "echo file{1..3}.txt",
+       "output": "file1.txt file2.txt file3.txt"
+      },
+      {
+       "cmd": "n=3; echo {1..$n}",
+       "output": "{1..3}"
+      }
+     ],
+     "after": "The last line prints `{1..3}` unchanged. Brace expansion runs **before** variable expansion, so at that moment `$n` is not yet a number."
+    },
+    {
+     "title": "Tilde and parameter expansion",
+     "text": "`~` becomes your home directory. `$var` and `${var}` become the value. `${var:-default}` uses a default when the variable is empty. `${#var}` is the length. `${var%.txt}` removes a suffix.",
+     "run": [
+      {
+       "cmd": "echo ~",
+       "output": "/home/opc"
+      },
+      {
+       "cmd": "f=report.txt; echo \"${f%.txt}.pdf\" ${#f}",
+       "output": "report.pdf 10"
+      },
+      {
+       "cmd": "echo \"[${unset_var:-default}]\"",
+       "output": "[default]"
+      }
+     ]
+    },
+    {
+     "title": "Command substitution and arithmetic",
+     "text": "`$(cmd)` is replaced by the output of `cmd`, with trailing newlines removed. `$((expr))` is replaced by the result of an integer calculation.",
+     "run": [
+      {
+       "cmd": "echo \"kernel: $(uname -s)\"",
+       "output": "kernel: Linux"
+      },
+      {
+       "cmd": "echo $((7 * 6)) $((2 ** 10)) $((17 % 5))",
+       "output": "42 1024 2"
+      },
+      {
+       "cmd": "files=$(ls /tmp/lab | wc -l); echo \"$files entries\"",
+       "output": "0 entries"
+      }
+     ],
+     "under": "`$(...)` runs the command in a **subshell**: bash forks, the child runs `cmd` with its stdout connected to a pipe, and the parent reads the pipe."
+    },
+    {
+     "title": "Word splitting uses IFS",
+     "text": "After expansion, **unquoted** results are split into words at the characters in `IFS` (space, tab, newline by default). Quotes prevent this.",
+     "run": [
+      {
+       "cmd": "v='a  b   c'",
+       "output": ""
+      },
+      {
+       "cmd": "printf '[%s]\\n' $v",
+       "output": "[a]\n[b]\n[c]"
+      },
+      {
+       "cmd": "printf '[%s]\\n' \"$v\"",
+       "output": "[a  b   c]"
+      },
+      {
+       "cmd": "IFS=: ; p='/usr/bin:/bin'; printf '[%s]\\n' $p; unset IFS",
+       "output": "[/usr/bin]\n[/bin]"
+      }
+     ]
+    },
+    {
+     "title": "Pathname expansion (globbing) comes last",
+     "text": "Patterns `*`, `?` and `[...]` are matched against file names **after** splitting. A pattern that matches nothing stays as typed (in the default mode).",
+     "run": [
+      {
+       "cmd": "touch a.log b.log c.txt",
+       "output": ""
+      },
+      {
+       "cmd": "echo *.log",
+       "output": "a.log b.log"
+      },
+      {
+       "cmd": "echo ?.txt",
+       "output": "c.txt"
+      },
+      {
+       "cmd": "echo *.nomatch",
+       "output": "*.nomatch"
+      }
+     ]
+    },
+    {
+     "title": "Watch it with set -x",
+     "text": "`set -x` (or `bash -x`) prints each command **after expansion**, with a `+` prefix. This is the fastest way to see what bash really runs.",
+     "run": [
+      {
+       "cmd": "bash -xc 'd=/tmp/lab; ls $d/*.log | wc -l' 2>&1",
+       "output": "+ d=/tmp/lab\n+ ls /tmp/lab/a.log /tmp/lab/b.log\n+ wc -l\n2"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "In `echo {1..$n}` with n=3, why do you NOT get `1 2 3`?",
+     "options": [
+      "Bash has a bug",
+      "Brace expansion runs before variable expansion",
+      "n must be exported",
+      "Braces need quotes"
+     ],
+     "answer": 1,
+     "explain": "Order: brace, tilde, parameter/command/arithmetic, word splitting, globbing. `$n` is not yet expanded when braces are processed."
+    },
+    {
+     "q": "`v='a  b'`. How many arguments does `printf '[%s]\\n' $v` receive?",
+     "options": [
+      "1",
+      "2",
+      "3",
+      "0"
+     ],
+     "answer": 1,
+     "explain": "Unquoted, the value is split at blanks into `a` and `b`."
+    },
+    {
+     "q": "Which command shows the command line after expansion?",
+     "options": [
+      "set +x",
+      "bash -x",
+      "bash -n",
+      "type"
+     ],
+     "answer": 1,
+     "explain": "`-x` traces each command after expansion."
+    },
+    {
+     "q": "What does `${f%.txt}` do when f=report.txt?",
+     "options": [
+      "Prints report",
+      "Prints .txt",
+      "Deletes the file",
+      "Prints report.txt"
+     ],
+     "answer": 0,
+     "explain": "`%` removes the shortest matching suffix."
+    }
+   ],
+   "check": {
+    "scenario": "`for i in {1..$n}; do echo $i; done` prints `{1..3}` once. Rewrite it so it counts to n.",
+    "answer": "Brace expansion happens before `$n` is expanded. Use a C-style loop: `for ((i=1; i<=n; i++)); do echo $i; done`, or `seq 1 \"$n\"`."
+   }
+  },
+  {
+   "id": "pipes-underneath",
+   "title": "How pipes and redirection work underneath",
+   "level": "advanced",
+   "goal": "See the system calls behind `|` and `>`: `pipe2`, `clone`, `dup2` and `execve`.\n\nWhy it matters: once you know that redirection is just `dup2` on a file descriptor, the order rules and many odd behaviours become obvious.",
+   "setup": {
+    "note": "Work in a scratch directory. Outputs will differ in PIDs and paths; the structure is the same.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Trace a pipeline",
+     "text": "We trace `echo hi | wc -c` with the calls that build a pipeline. `-f` follows child processes. Each line starts with the process ID.",
+     "run": [
+      {
+       "cmd": "strace -f -o /tmp/pipe.out -e trace=pipe2,clone,dup2,dup3,execve bash -c 'echo hi | wc -c; true' > /dev/null",
+       "output": ""
+      },
+      {
+       "cmd": "grep -v -E 'wait4|exited|SIGCHLD' /tmp/pipe.out | cut -c1-120",
+       "output": "3450574 execve(\"/usr/bin/bash\", [\"bash\", \"-c\", \"echo hi | wc -c; true\"], 0xffffd60022e8 /* 55 vars */) = 0\n3450574 pipe2([3, 4], 0)                = 0\n3450575 dup3(4, 1, 0)                   = 1\n3450574 <... clone resumed>, child_tidptr=0xffffab1d40f0) = 3450576\n3450576 dup3(3, 0, 0)                   = 0\n3450576 execve(\"/usr/bin/wc\", [\"wc\", \"-c\"], 0xaaab01e97f40 /* 53 vars */) = 0"
+      }
+     ],
+     "under": "Bash calls `pipe2` once: it returns two file descriptors, a read end and a write end. It forks one child per command. Each child uses `dup2` (the call is `dup3` on ARM64, same job) to put one end of the pipe on fd 1 (writer) or fd 0 (reader), closes the originals, then calls `execve`. The programs never know they are in a pipeline.",
+     "after": "Read the trace: one `pipe2` returns fds 3 and 4. The writer child does `dup3(4, 1)` (pipe write end becomes stdout). The reader child does `dup3(3, 0)` (read end becomes stdin) and then `execve`s `wc`. There is no `execve` for `echo`: it is a builtin, so that child runs it inside bash itself."
+    },
+    {
+     "title": "A redirection is an open plus dup2",
+     "text": "For `> file`, the child opens the file and uses `dup2` to make fd 1 point to it. Then it runs the command. Look for `openat` and `dup2` (or `dup3` on ARM64) before the final `execve`.",
+     "run": [
+      {
+       "cmd": "strace -f -o /tmp/redir.out -e trace=openat,dup2,dup3,close,execve bash -c '/bin/echo hi > /tmp/lab/o.txt; true'",
+       "output": ""
+      },
+      {
+       "cmd": "grep -E 'o.txt|dup|execve' /tmp/redir.out | cut -c1-120",
+       "output": "3450585 execve(\"/usr/bin/bash\", [\"bash\", \"-c\", \"/bin/echo hi > /tmp/lab/o.txt; t\"...], 0xffffe9955548 /* 55 vars */) = 0\n3450586 openat(AT_FDCWD, \"/tmp/lab/o.txt\", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3\n3450586 dup3(3, 1, 0)                   = 1\n3450586 execve(\"/bin/echo\", [\"/bin/echo\", \"hi\"], 0xaaaac2dd0f50 /* 53 vars */) = 0"
+      },
+      {
+       "cmd": "cat /tmp/lab/o.txt",
+       "output": "hi"
+      }
+     ]
+    },
+    {
+     "title": "The file descriptors are visible in /proc",
+     "text": "Every process has a directory `/proc/PID/fd`. The links show where each descriptor points. `ls` lists its own, so we see what bash set up for it.",
+     "run": [
+      {
+       "cmd": "ls -l /proc/self/fd > /tmp/lab/fd.txt; awk '{print $9, $10, $11}' /tmp/lab/fd.txt | tail -n +2",
+       "output": "0 -> pipe:[52382185]\n1 -> /tmp/lab/fd.txt\n2 -> pipe:[52382186]\n3 -> /proc/3450593/fd"
+      },
+      {
+       "cmd": "ls -l /proc/self/fd | awk '{print $9, $10, $11}' | tail -n +2",
+       "output": "0 -> pipe:[52382185]\n1 -> pipe:[52382351]\n2 -> pipe:[52382186]\n3 -> /proc/3450597/fd"
+      }
+     ],
+     "after": "In the first command `ls` writes to a file, so fd 1 points to `/tmp/lab/fd.txt`. In the second it writes into a pipe, so fd 1 shows `pipe:[number]`. The number is the pipe's inode. (Fd 0 and 2 depend on where you run this: a terminal shows `/dev/pts/N`.)"
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which system call creates the two ends of a pipe?",
+     "options": [
+      "pipe2",
+      "mkfifo",
+      "socket",
+      "dup2"
+     ],
+     "answer": 0,
+     "explain": "`pipe2` (or `pipe`) returns a read fd and a write fd."
+    },
+    {
+     "q": "What does `dup2(fd, 1)` do?",
+     "options": [
+      "Closes fd 1",
+      "Makes fd 1 refer to the same open file as fd",
+      "Copies the file",
+      "Creates a pipe"
+     ],
+     "answer": 1,
+     "explain": "After dup2, descriptor 1 points to the same open file description as `fd`."
+    },
+    {
+     "q": "When does the redirection happen, relative to `execve` of the command?",
+     "options": [
+      "After it",
+      "Before it, in the child",
+      "In the kernel only",
+      "In the parent, permanently"
+     ],
+     "answer": 1,
+     "explain": "The child sets up descriptors, then calls `execve`. The new program inherits them."
+    }
+   ],
+   "check": {
+    "scenario": "Why can `echo hi | read v; echo $v` print nothing in bash?",
+    "answer": "Each command of a pipeline runs in its own child process. `read v` sets `v` in a child, which exits when the pipeline ends. The parent shell never gets the variable. Use `read v < <(echo hi)` or a here-string `read v <<< hi`."
+   }
   }
  ],
  "interview": [
@@ -271,6 +718,31 @@
    "q": "A script breaks on file names with spaces. What is the usual cause and fix?",
    "level": "beginner",
    "a": "An unquoted expansion was split into several words. Quote it: `\"$var\"`. See [step 5](#/lesson/1/how-bash-runs-a-command/5)."
+  },
+  {
+   "q": "What is the difference between a shell variable and an environment variable?",
+   "a": "A shell variable exists only in the shell process. An environment variable has been exported, so it is copied into the environment of every child started afterwards. See [the lesson](#/lesson/1/environment-and-path).",
+   "level": "beginner"
+  },
+  {
+   "q": "In which order does bash expand a command line?",
+   "a": "Brace expansion, tilde expansion, parameter/variable, command substitution and arithmetic (left to right), word splitting, pathname expansion (globbing), then quote removal. See [the lesson](#/lesson/1/expansion-order).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How is `cmd1 | cmd2` implemented?",
+   "a": "Bash calls `pipe2`, forks two children, and each child uses `dup2` to put one end of the pipe on its stdout or stdin before `execve`. Both run at the same time. See [the trace](#/lesson/1/pipes-underneath).",
+   "level": "advanced"
+  },
+  {
+   "q": "Why do variables set in a `while read` loop at the end of a pipe disappear?",
+   "a": "The loop runs in a child process (a subshell). When it ends, its variables are gone. Feed the loop with `< <(cmd)` or a file redirect so it runs in the current shell.",
+   "level": "advanced"
+  },
+  {
+   "q": "Why does `rm $f` break on a name with spaces?",
+   "a": "The unquoted expansion is split into words. Quote it: `rm \"$f\"`.",
+   "level": "beginner"
   }
  ],
  "glossary": [
@@ -313,6 +785,41 @@
    "term": "Word splitting",
    "def": "Cutting the result of an unquoted expansion into separate words at blanks.",
    "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "term": "Environment variable",
+   "def": "A NAME=value string passed to a process in its envp array. Children inherit a copy.",
+   "lesson": "1/environment-and-path"
+  },
+  {
+   "term": "Brace expansion",
+   "def": "Generation of words from {a,b} or {1..3}. It is the first expansion and ignores files.",
+   "lesson": "1/expansion-order"
+  },
+  {
+   "term": "IFS",
+   "def": "Internal Field Separator: the characters at which bash splits unquoted expansion results. Default: space, tab, newline.",
+   "lesson": "1/expansion-order"
+  },
+  {
+   "term": "Command substitution",
+   "def": "$(cmd): replaced by the output of cmd, which runs in a subshell.",
+   "lesson": "1/expansion-order"
+  },
+  {
+   "term": "Subshell",
+   "def": "A child copy of the shell process that runs part of a command line, such as a pipeline stage or $(...).",
+   "lesson": "1/expansion-order"
+  },
+  {
+   "term": "dup2",
+   "def": "System call that makes one file descriptor refer to the same open file as another. The basis of redirection.",
+   "lesson": "1/pipes-underneath"
+  },
+  {
+   "term": "Pipe",
+   "def": "A kernel buffer with a read end and a write end, created by pipe2. Connects stdout of one process to stdin of another.",
+   "lesson": "1/pipes-underneath"
   }
  ],
  "commands": [
@@ -357,6 +864,54 @@
    "desc": "Show how bash forks and execs a command.",
    "topic": "Tracing",
    "lesson": "1/how-bash-runs-a-command"
+  },
+  {
+   "cmd": "export NAME=value",
+   "desc": "Set a variable and put it in the environment of children.",
+   "topic": "Shell",
+   "lesson": "1/environment-and-path"
+  },
+  {
+   "cmd": "env -i NAME=v cmd",
+   "desc": "Run cmd with an empty environment plus NAME.",
+   "topic": "Shell",
+   "lesson": "1/environment-and-path"
+  },
+  {
+   "cmd": "printenv NAME",
+   "desc": "Print one environment variable.",
+   "topic": "Shell",
+   "lesson": "1/environment-and-path"
+  },
+  {
+   "cmd": "echo {1..5}",
+   "desc": "Brace expansion: print 1 2 3 4 5.",
+   "topic": "Shell",
+   "lesson": "1/expansion-order"
+  },
+  {
+   "cmd": "echo ${var:-default}",
+   "desc": "Use a default when var is empty.",
+   "topic": "Shell",
+   "lesson": "1/expansion-order"
+  },
+  {
+   "cmd": "bash -x script.sh",
+   "desc": "Run a script printing each command after expansion.",
+   "topic": "Shell",
+   "lesson": "1/expansion-order"
+  },
+  {
+   "cmd": "ls -l /proc/self/fd",
+   "desc": "Show the open file descriptors of the current process.",
+   "topic": "Processes",
+   "lesson": "1/pipes-underneath"
+  },
+  {
+   "cmd": "hash -r",
+   "desc": "Clear bash's cache of command locations.",
+   "topic": "Shell",
+   "lesson": "1/environment-and-path"
   }
  ],
  "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"

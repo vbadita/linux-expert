@@ -1,0 +1,418 @@
+{
+ "title": "cgroups",
+ "lessons": [
+  {
+   "id": "cgroup-v2-hands-on",
+   "title": "cgroups v2: CPU, memory and process limits by hand",
+   "level": "advanced",
+   "goal": "Create a control group, put processes in it and watch the kernel enforce a CPU quota, a memory limit and a process limit.\n\nWhy it matters: the limits of every container, systemd service and Kubernetes pod are cgroup files. If you can read and write them, you can verify what a runtime really did.",
+   "setup": {
+    "note": "These steps use sudo to create the control group `/sys/fs/cgroup/lab` and remove it at the end. They assume cgroup v2 (the default on current distributions).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rmdir /sys/fs/cgroup/lab 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The cgroup file system",
+     "text": "cgroups v2 is a single tree mounted at `/sys/fs/cgroup`. Each directory is a group; the files in it are the controls. `cgroup.controllers` lists the controllers (cpu, memory, io, pids...) available there.",
+     "run": [
+      {
+       "cmd": "stat -fc %T /sys/fs/cgroup",
+       "output": "cgroup2fs"
+      },
+      {
+       "cmd": "cat /sys/fs/cgroup/cgroup.controllers",
+       "output": "cpuset cpu io memory hugetlb pids rdma misc"
+      },
+      {
+       "cmd": "cat /proc/self/cgroup | sed -E 's/session-[0-9]+/session-N/; s#/user-[0-9]+#/user-UID#g'",
+       "output": "0::/user.slice/user-UID.slice/user@1000.service/app.slice/claude-rc.service"
+      }
+     ]
+    },
+    {
+     "title": "Create a group",
+     "text": "`mkdir` creates a group. The kernel fills it with control files. To use a controller in a child, the parent must have it in `cgroup.subtree_control` (systemd already enables the common ones at the root).",
+     "run": [
+      {
+       "cmd": "cat /sys/fs/cgroup/cgroup.subtree_control",
+       "output": "cpuset cpu io memory hugetlb pids rdma misc"
+      },
+      {
+       "cmd": "sudo mkdir /sys/fs/cgroup/lab; cat /sys/fs/cgroup/lab/cgroup.controllers",
+       "output": "cpuset cpu io memory hugetlb pids rdma misc"
+      },
+      {
+       "cmd": "ls /sys/fs/cgroup/lab | grep -E '^(cgroup.procs|cpu.max|cpu.stat|memory.max|memory.events|pids.max)$' | tr '\\n' ' '; echo",
+       "output": "cgroup.procs cpu.max cpu.stat memory.events memory.max pids.max "
+      }
+     ]
+    },
+    {
+     "title": "CPU limit: cpu.max",
+     "text": "`cpu.max` is `QUOTA PERIOD` in microseconds: the group may use QUOTA of CPU time in every PERIOD. `20000 100000` means 20% of one CPU. We run a busy loop inside for three seconds and read the consumed CPU time from `cpu.stat`.",
+     "run": [
+      {
+       "cmd": "echo '20000 100000' | sudo tee /sys/fs/cgroup/lab/cpu.max",
+       "output": "20000 100000"
+      },
+      {
+       "cmd": "sudo sh -c 'echo $$ > /sys/fs/cgroup/lab/cgroup.procs; exec timeout 3 sh -c \"while :; do :; done\"'; grep -E '^(usage_usec|nr_throttled)' /sys/fs/cgroup/lab/cpu.stat | awk '{printf \"%s %s\\n\", $1, $2}'",
+       "output": "usage_usec 611673\nnr_throttled 30"
+      }
+     ],
+     "after": "In three seconds of wall time the loop got about 600 000 microseconds (20%) of CPU. `nr_throttled` counts how often the kernel stopped it until the next period."
+    },
+    {
+     "title": "Memory limit: memory.max",
+     "text": "`memory.max` is a hard limit. When the group wants more and nothing can be reclaimed, the kernel's OOM killer acts **inside the group**. `memory.events` counts what happened. We run the memory-eating program from module 15.",
+     "code": {
+      "file": "eat.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n\nint main(void) {\n    for (int i = 1;; i++) {\n        char *p = malloc(10 << 20);\n        if (!p) return 1;\n        memset(p, 1, 10 << 20);\n        printf(\"holding %d MB\\n\", i * 10);\n        fflush(stdout);\n        usleep(50000);\n    }\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o eat eat.c",
+       "output": ""
+      },
+      {
+       "cmd": "echo 50M | sudo tee /sys/fs/cgroup/lab/memory.max; echo max | sudo tee /sys/fs/cgroup/lab/memory.swap.max",
+       "output": "50M\nmax"
+      },
+      {
+       "cmd": "sudo sh -c 'echo $$ > /sys/fs/cgroup/lab/cgroup.procs; exec ./eat' | tail -n 1; grep -E '^(max|oom|oom_kill) ' /sys/fs/cgroup/lab/memory.events",
+       "output": "holding 2900 MB\nmax 10074\noom 2\noom_kill 1"
+      }
+     ],
+     "under": "The `memory.high` file is a softer limit: above it the group is **throttled** and forced to reclaim, but not killed. `memory.low`/`memory.min` protect memory from reclaim. Page cache of the group's files counts too, which is why containers can hit their limit with file I/O."
+    },
+    {
+     "title": "Process limit: pids.max",
+     "text": "`pids.max` limits the number of tasks in the group, which stops fork bombs. With a limit of 6, the loop below can create only a few `sleep` processes.",
+     "run": [
+      {
+       "cmd": "echo 6 | sudo tee /sys/fs/cgroup/lab/pids.max",
+       "output": "6"
+      },
+      {
+       "cmd": "sudo sh -c 'echo $$ > /sys/fs/cgroup/lab/cgroup.procs; for i in 1 2 3 4 5 6 7 8; do sleep 3 & done 2>&1; sleep 0.5; echo \"tasks in the group: $(wc -l < /sys/fs/cgroup/lab/cgroup.procs)\"; kill $(jobs -p) 2>/dev/null' 2>&1 | grep -E 'retry|tasks|Resource' | sed -E 's/^[^ ]+ line [0-9]+: //' | sort | uniq -c | head -n 3",
+       "output": "      4 sh: fork: retry: Resource temporarily unavailable\n      1 tasks in the group: 6"
+      },
+      {
+       "cmd": "grep -E '^max ' /sys/fs/cgroup/lab/pids.events",
+       "output": "max 4"
+      }
+     ]
+    },
+    {
+     "title": "Clean up",
+     "text": "A group can be removed with `rmdir` once it has no processes.",
+     "run": [
+      {
+       "cmd": "sleep 1; sudo rmdir /sys/fs/cgroup/lab && echo removed; ls /sys/fs/cgroup/lab 2>&1 | sed 's/.*: //'",
+       "output": "removed\nNo such file or directory"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `20000 100000` in cpu.max mean?",
+     "options": [
+      "20 ms of CPU every second",
+      "20% of one CPU (20 ms per 100 ms period)",
+      "20000 processes",
+      "100 CPUs"
+     ],
+     "answer": 1,
+     "explain": "Quota over period."
+    },
+    {
+     "q": "What happens when a group hits memory.max and nothing can be reclaimed?",
+     "options": [
+      "Nothing",
+      "The OOM killer kills a process in that group",
+      "The whole system reboots",
+      "Swap grows"
+     ],
+     "answer": 1,
+     "explain": "Group-local OOM."
+    },
+    {
+     "q": "How do you put a process into a cgroup?",
+     "options": [
+      "chmod",
+      "Write its PID into cgroup.procs",
+      "nice",
+      "chroot"
+     ],
+     "answer": 1,
+     "explain": "echo PID > cgroup.procs."
+    },
+    {
+     "q": "What is pids.max useful for?",
+     "options": [
+      "Memory",
+      "Stopping fork bombs by limiting the number of tasks",
+      "Disk quotas",
+      "Priority"
+     ],
+     "answer": 1,
+     "explain": "A process count limit."
+    }
+   ],
+   "check": {
+    "scenario": "A container's CPU graph is flat at 50% although the host is idle. Which cgroup files do you read to confirm it is throttled?",
+    "answer": "`cpu.max` (the quota, for example `50000 100000`) and `cpu.stat` (`nr_throttled`, `throttled_usec`). A rising `nr_throttled` proves the group hits its quota. Raise the quota or use `cpu.weight` (shares) instead of a hard limit if bursts are fine."
+   }
+  },
+  {
+   "id": "cgroups-systemd-v1-v2",
+   "title": "cgroups and systemd; v1 versus v2",
+   "level": "advanced",
+   "goal": "See how systemd uses cgroups for every service, set limits through systemd instead of by hand, and know what changed between cgroups v1 and v2.\n\nWhy it matters: on a modern server you almost never `mkdir` in `/sys/fs/cgroup` yourself; you write `CPUQuota=` in a unit. You must still be able to find the cgroup behind a service.",
+   "setup": {
+    "note": "Steps with sudo create transient `lab-*` units that are stopped at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo systemctl stop lab-limited 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Every service has a cgroup",
+     "text": "systemd puts each service in its own cgroup under a slice (`system.slice`, `user.slice`). That is how it tracks all processes of a service and stops them together.",
+     "run": [
+      {
+       "cmd": "systemctl show crond -p ControlGroup",
+       "output": "ControlGroup=/system.slice/crond.service"
+      },
+      {
+       "cmd": "cat /sys/fs/cgroup/system.slice/crond.service/cgroup.procs | wc -l | awk '{print $1, \"process(es) in the crond cgroup\"}'",
+       "output": "1 process(es) in the crond cgroup"
+      }
+     ]
+    },
+    {
+     "title": "Limits through systemd",
+     "text": "`systemd-run -p CPUQuota=20% -p MemoryMax=50M ...` creates a transient unit with those limits. systemd writes `cpu.max` and `memory.max` for you. We verify by reading the files of the running unit.",
+     "run": [
+      {
+       "cmd": "sudo systemd-run --unit=lab-limited -q -p CPUQuota=20% -p MemoryMax=50M sleep 30",
+       "output": ""
+      },
+      {
+       "cmd": "cat /sys/fs/cgroup/system.slice/lab-limited.service/cpu.max /sys/fs/cgroup/system.slice/lab-limited.service/memory.max",
+       "output": "20000 100000\n52428800"
+      },
+      {
+       "cmd": "systemctl show lab-limited -p CPUQuotaPerSecUSec,MemoryMax | tr '\\n' ' '; echo",
+       "output": "CPUQuotaPerSecUSec=200ms MemoryMax=52428800 "
+      }
+     ]
+    },
+    {
+     "title": "Change a limit on a running unit",
+     "text": "`systemctl set-property` changes the limit live (`--runtime` = until reboot).",
+     "run": [
+      {
+       "cmd": "sudo systemctl set-property --runtime lab-limited MemoryMax=80M; cat /sys/fs/cgroup/system.slice/lab-limited.service/memory.max",
+       "output": "83886080"
+      },
+      {
+       "cmd": "sudo systemctl stop lab-limited; ls /sys/fs/cgroup/system.slice/lab-limited.service 2>&1 | sed 's/.*: //'",
+       "output": "No such file or directory"
+      }
+     ]
+    },
+    {
+     "title": "Where the numbers are",
+     "text": "`systemd-cgtop` shows live CPU, memory and I/O per group. `systemd-cgls` draws the tree.",
+     "run": [
+      {
+       "cmd": "systemd-cgls --no-pager -u crond.service | head -n 3 | sed -E 's/[0-9]+/N/g'",
+       "output": "Unit crond.service (/system.slice/crond.service):\n└─N /usr/sbin/crond -n"
+      }
+     ]
+    },
+    {
+     "title": "v1 versus v2",
+     "text": "- **v1**: one hierarchy **per controller** (`/sys/fs/cgroup/cpu`, `/memory`, `/blkio` ...). A process could be in different groups for each controller; messy and inconsistent.\n- **v2**: one **unified** hierarchy; a process is in one group; a controller is enabled per subtree. Safer delegation to unprivileged users, better memory accounting (page cache, kernel memory), pressure information (PSI), and `memory.high`.\n\nTo tell which one you have:",
+     "run": [
+      {
+       "cmd": "stat -fc %T /sys/fs/cgroup | sed 's/cgroup2fs/cgroup2fs (v2 unified)/; s/tmpfs/tmpfs (v1 layout)/'",
+       "output": "cgroup2fs (v2 unified)"
+      },
+      {
+       "cmd": "[ -e /proc/pressure/memory ] && head -n 1 /proc/pressure/memory | sed -E 's/[0-9.]+/N/g' || echo 'PSI is not enabled in this kernel (/proc/pressure is missing)'",
+       "output": "PSI is not enabled in this kernel (/proc/pressure is missing)"
+      }
+     ],
+     "under": "Pressure Stall Information (`/proc/pressure/{cpu,memory,io}` and `memory.pressure` per cgroup) reports the share of time tasks were **stalled** waiting for the resource. It is the best single signal for \"this system or this container is resource starved\" and is what `systemd-oomd` and Kubernetes use."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which unit setting limits a service to 20% of one CPU?",
+     "options": [
+      "CPUWeight=20",
+      "CPUQuota=20%",
+      "Nice=20",
+      "CPUAffinity=20"
+     ],
+     "answer": 1,
+     "explain": "CPUQuota."
+    },
+    {
+     "q": "How many cgroups can a process belong to in v2?",
+     "options": [
+      "One per controller",
+      "One in the unified tree",
+      "None",
+      "Any number"
+     ],
+     "answer": 1,
+     "explain": "Unified hierarchy."
+    },
+    {
+     "q": "How can you tell cgroups v2 is used?",
+     "options": [
+      "/sys/fs/cgroup is of type cgroup2fs",
+      "There is /etc/cgroup",
+      "lsmod shows cgroup",
+      "uname"
+     ],
+     "answer": 0,
+     "explain": "`stat -fc %T /sys/fs/cgroup`."
+    },
+    {
+     "q": "What does PSI (pressure) measure?",
+     "options": [
+      "Disk size",
+      "Time tasks spent stalled waiting for CPU, memory or I/O",
+      "Network latency",
+      "Temperature"
+     ],
+     "answer": 1,
+     "explain": "Stall time."
+    }
+   ],
+   "check": {
+    "scenario": "A systemd service reaches 100% CPU and starves other services on the same host. How do you contain it without code changes?",
+    "answer": "Add `CPUQuota=50%` (hard cap) or `CPUWeight=` (relative share) to its unit, and `MemoryMax`/`MemoryHigh`; apply with `systemctl set-property SERVICE CPUQuota=50%` for a quick fix and a drop-in for permanence. Verify in the unit's `cpu.max` and `cpu.stat`."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is a cgroup?",
+   "a": "A kernel mechanism that groups processes and applies resource limits and accounting (CPU, memory, I/O, pids) to the group. See [the lesson](#/lesson/38/cgroup-v2-hands-on).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you limit memory of a service?",
+   "a": "`MemoryMax=` (hard) and `MemoryHigh=` (throttle) in the unit, which systemd writes to memory.max/memory.high in the service's cgroup.",
+   "level": "intermediate"
+  },
+  {
+   "q": "cgroups v1 versus v2?",
+   "a": "v1: separate hierarchy per controller; v2: one unified hierarchy with better accounting and delegation, PSI and memory.high. See [the lesson](#/lesson/38/cgroups-systemd-v1-v2).",
+   "level": "advanced"
+  },
+  {
+   "q": "What does a container's OOM kill look like?",
+   "a": "The kernel logs `Memory cgroup out of memory`, the process gets SIGKILL (exit 137), and `memory.events` shows `oom_kill` incremented.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How are CPU limits expressed in cgroup v2?",
+   "a": "`cpu.max` = `QUOTA PERIOD` for a hard cap and `cpu.weight` for relative shares.",
+   "level": "advanced"
+  },
+  {
+   "q": "What is PSI?",
+   "a": "Pressure Stall Information: how long tasks were stalled waiting for CPU, memory or I/O, system-wide and per cgroup.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "cgroup",
+   "def": "A group of processes with shared resource limits and accounting.",
+   "lesson": "38/cgroup-v2-hands-on"
+  },
+  {
+   "term": "Controller",
+   "def": "A cgroup component that manages one resource: cpu, memory, io, pids.",
+   "lesson": "38/cgroup-v2-hands-on"
+  },
+  {
+   "term": "cpu.max",
+   "def": "cgroup v2 file with the CPU quota and period.",
+   "lesson": "38/cgroup-v2-hands-on"
+  },
+  {
+   "term": "memory.max",
+   "def": "cgroup v2 hard memory limit.",
+   "lesson": "38/cgroup-v2-hands-on"
+  },
+  {
+   "term": "Slice",
+   "def": "A systemd unit type that groups cgroups in a hierarchy (system.slice, user.slice).",
+   "lesson": "38/cgroups-systemd-v1-v2"
+  },
+  {
+   "term": "PSI",
+   "def": "Pressure Stall Information: stall time per resource.",
+   "lesson": "38/cgroups-systemd-v1-v2"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "cat /proc/PID/cgroup",
+   "desc": "Show a process's cgroup.",
+   "topic": "cgroups",
+   "lesson": "38/cgroup-v2-hands-on"
+  },
+  {
+   "cmd": "stat -fc %T /sys/fs/cgroup",
+   "desc": "Tell cgroup v1 from v2.",
+   "topic": "cgroups",
+   "lesson": "38/cgroups-systemd-v1-v2"
+  },
+  {
+   "cmd": "echo PID | sudo tee /sys/fs/cgroup/NAME/cgroup.procs",
+   "desc": "Move a process into a cgroup.",
+   "topic": "cgroups",
+   "lesson": "38/cgroup-v2-hands-on"
+  },
+  {
+   "cmd": "systemd-run -p CPUQuota=20% -p MemoryMax=100M CMD",
+   "desc": "Run CMD with limits.",
+   "topic": "cgroups",
+   "lesson": "38/cgroups-systemd-v1-v2"
+  },
+  {
+   "cmd": "systemctl set-property UNIT MemoryMax=1G",
+   "desc": "Change a unit's limit.",
+   "topic": "cgroups",
+   "lesson": "38/cgroups-systemd-v1-v2"
+  },
+  {
+   "cmd": "systemd-cgtop",
+   "desc": "Live resource use per cgroup.",
+   "topic": "cgroups",
+   "lesson": "38/cgroups-systemd-v1-v2"
+  },
+  {
+   "cmd": "cat /sys/fs/cgroup/NAME/memory.events",
+   "desc": "Show OOM and limit events of a cgroup.",
+   "topic": "cgroups",
+   "lesson": "38/cgroup-v2-hands-on"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

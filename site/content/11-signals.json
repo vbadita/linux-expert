@@ -1,0 +1,486 @@
+{
+ "title": "Signals",
+ "lessons": [
+  {
+   "id": "sigterm-sigkill",
+   "title": "Signals: SIGTERM vs SIGKILL",
+   "level": "beginner",
+   "goal": "Learn what a signal is, the difference between asking a process to stop (SIGTERM) and forcing it (SIGKILL), and how to read the exit codes.\n\nWhy it matters: `kill -9` as a first reaction skips the program's cleanup (flushing files, removing locks). The right order is TERM first, KILL only if needed.",
+   "setup": {
+    "note": "Use a scratch directory. Scripts and C programs are saved there.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A signal is a small message to a process",
+     "text": "A **signal** is a number the kernel delivers to a process. The process can run a handler, ignore it, or the kernel applies a default action (terminate, stop, ignore). `kill -l` lists them.",
+     "run": [
+      {
+       "cmd": "kill -l | head -n 4",
+       "output": " 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4) SIGILL\t 5) SIGTRAP\n 6) SIGABRT\t 7) SIGBUS\t 8) SIGFPE\t 9) SIGKILL\t10) SIGUSR1\n11) SIGSEGV\t12) SIGUSR2\t13) SIGPIPE\t14) SIGALRM\t15) SIGTERM\n16) SIGSTKFLT\t17) SIGCHLD\t18) SIGCONT\t19) SIGSTOP\t20) SIGTSTP"
+      },
+      {
+       "cmd": "echo $(kill -l TERM) $(kill -l KILL) $(kill -l INT) $(kill -l HUP)",
+       "output": "15 9 2 1"
+      }
+     ]
+    },
+    {
+     "title": "kill sends a signal",
+     "text": "Despite the name, `kill` just sends a signal. The default is SIGTERM (15). A process killed by signal N ends with exit status 128+N. We start a sleeper, send TERM, and read the status.",
+     "run": [
+      {
+       "cmd": "sleep 100 & p=$!; kill -TERM $p; wait $p; echo \"exit status: $?\"",
+       "output": "[1] 3463401\nexit status: 143"
+      },
+      {
+       "cmd": "sleep 100 & p=$!; kill -KILL $p; wait $p; echo \"exit status: $?\"",
+       "output": "[1] 3463403\nexit status: 137"
+      },
+      {
+       "cmd": "sleep 100 & p=$!; kill -INT $p; wait $p; echo \"exit status: $?\"",
+       "output": "[1] 3463405\nexit status: 0"
+      }
+     ],
+     "after": "15+128 = 143 (TERM), 9+128 = 137 (KILL), 2+128 = 130 (INT, what Ctrl-C sends)."
+    },
+    {
+     "title": "SIGTERM can be handled",
+     "text": "A program can catch SIGTERM and clean up. This script traps TERM and INT. `exit 0` after cleanup ends it normally.",
+     "code": {
+      "file": "worker.sh",
+      "lang": "sh",
+      "src": "#!/bin/bash\ntrap 'echo \"got SIGTERM, cleaning up\"; exit 0' TERM\ntrap 'echo \"got SIGINT, ignoring it\"' INT\necho \"worker started\"\nwhile true; do sleep 0.2; done\n"
+     },
+     "run": [
+      {
+       "cmd": "chmod +x worker.sh; ./worker.sh > worker.out & p=$!; sleep 1; kill -INT $p; kill -TERM $p; wait $p; echo \"exit status: $?\"; cat worker.out",
+       "output": "[1] 3463546\nexit status: 0\nworker started\ngot SIGTERM, cleaning up"
+      }
+     ]
+    },
+    {
+     "title": "SIGKILL cannot be handled",
+     "text": "SIGKILL and SIGSTOP go straight to the kernel. The process gets no chance to run code. No `trap` can catch them. The program leaves no clean exit: temporary files and locks stay behind.",
+     "run": [
+      {
+       "cmd": "./worker.sh > worker.out & p=$!; sleep 1; kill -KILL $p; wait $p; echo \"exit status: $?\"; cat worker.out",
+       "output": "[1] 3463555\nexit status: 137\nworker started"
+      }
+     ],
+     "under": "When a signal is sent, the kernel sets a bit in the target's pending-signal set. At the next return to user mode the kernel checks it: for a caught signal it builds a frame on the user stack and runs the handler; for SIGKILL it just tears the process down. This is why a process in `D` state does not die until it returns from kernel mode."
+    },
+    {
+     "title": "Which one first?",
+     "text": "Standard practice: send SIGTERM, wait a few seconds, and only then SIGKILL. `systemd` does exactly this when it stops a service (`TimeoutStopSec`, then SIGKILL).",
+     "run": [
+      {
+       "cmd": "sleep 100 & p=$!; kill $p; sleep 0.2; kill -0 $p 2>/dev/null && echo alive || echo \"gone after TERM\"",
+       "output": "[1] 3463564\ngone after TERM"
+      }
+     ],
+     "after": "`kill -0 PID` sends no signal; it only tests whether the process exists and you may signal it."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which signal cannot be caught or ignored?",
+     "options": [
+      "SIGTERM",
+      "SIGINT",
+      "SIGKILL",
+      "SIGHUP"
+     ],
+     "answer": 2,
+     "explain": "SIGKILL (and SIGSTOP)."
+    },
+    {
+     "q": "A process dies from SIGTERM. What exit status does the shell report?",
+     "options": [
+      "15",
+      "143",
+      "1",
+      "0"
+     ],
+     "answer": 1,
+     "explain": "128 + 15."
+    },
+    {
+     "q": "Why try SIGTERM before SIGKILL?",
+     "options": [
+      "SIGKILL is slower",
+      "The program can clean up (close files, remove locks) on SIGTERM",
+      "SIGKILL needs root",
+      "SIGTERM is louder"
+     ],
+     "answer": 1,
+     "explain": "SIGKILL gives the program no chance to clean up."
+    },
+    {
+     "q": "What does `kill -0 PID` do?",
+     "options": [
+      "Kills softly",
+      "Checks whether PID exists and can be signalled",
+      "Restarts",
+      "Nothing"
+     ],
+     "answer": 1,
+     "explain": "No signal is sent; only the check is done."
+    }
+   ],
+   "check": {
+    "scenario": "A service ignores `kill PID` and keeps running. Describe your next steps in order.",
+    "answer": "1. Check the state with `ps -o stat,wchan -p PID`. If it is `D`, signals wait; find the I/O cause.\n2. If it is `S`/`R`, the program may ignore or block SIGTERM (`grep Sig /proc/PID/status`).\n3. Wait a short time, then `kill -KILL PID`. Afterwards remove stale locks/PID files and check for orphaned children."
+   }
+  },
+  {
+   "id": "sighup-sigchld-trap",
+   "title": "SIGHUP, SIGCHLD, trap and nohup",
+   "level": "intermediate",
+   "goal": "Learn the signals daemons use every day: SIGHUP (reload), SIGCHLD (a child ended), SIGUSR1/2, and how shell `trap` and `nohup` use them.\n\nWhy it matters: `systemctl reload` sends SIGHUP to many services. Scripts need `trap` to clean up their temporary files.",
+   "setup": {
+    "note": "Use a scratch directory. Scripts and C programs are saved there.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "SIGHUP means \"reload your configuration\"",
+     "text": "Historically SIGHUP meant the terminal hung up. Daemons have no terminal, so many reuse it as \"re-read your config\". This script loads a message from a file and reloads it on SIGHUP, without restarting.",
+     "code": {
+      "file": "reloader.sh",
+      "lang": "sh",
+      "src": "#!/bin/bash\nconf=/tmp/lab/msg.conf\nload() { msg=$(cat \"$conf\"); echo \"config is: $msg\"; }\ntrap 'echo \"SIGHUP: reloading\"; load' HUP\nload\nwhile true; do sleep 0.2; done\n"
+     },
+     "run": [
+      {
+       "cmd": "echo first > /tmp/lab/msg.conf; chmod +x reloader.sh; ./reloader.sh > reload.out & p=$!; sleep 1; echo second > /tmp/lab/msg.conf; kill -HUP $p; sleep 1; kill $p; wait $p 2>/dev/null; cat reload.out",
+       "output": "[1] 3463573\nconfig is: first\nSIGHUP: reloading\nconfig is: second"
+      }
+     ]
+    },
+    {
+     "title": "SIGCHLD tells a parent that a child ended",
+     "text": "The kernel sends **SIGCHLD** to the parent when a child exits or stops. Programs use it to call `wait`. In bash, `trap ... CHLD` shows it.",
+     "run": [
+      {
+       "cmd": "bash -c 'trap \"echo SIGCHLD received\" CHLD; sleep 1 & wait; echo parent done'",
+       "output": "SIGCHLD received\nparent done"
+      }
+     ]
+    },
+    {
+     "title": "trap runs code on a signal, and on exit",
+     "text": "`trap 'CMD' SIGNAL` runs CMD when the shell receives the signal. The pseudo-signal `EXIT` runs when the script ends for any reason, which makes it the right place to delete temporary files.",
+     "run": [
+      {
+       "cmd": "bash -c 't=$(mktemp); trap \"rm -f $t; echo cleaned $(basename $t | cut -c1-3)\" EXIT; echo work > $t; echo working; exit 3'; echo \"script status: $?\"",
+       "output": "working\ncleaned tmp\nscript status: 3"
+      }
+     ]
+    },
+    {
+     "title": "nohup ignores SIGHUP",
+     "text": "`nohup CMD` starts CMD with SIGHUP ignored and output sent to `nohup.out`. The ignored-signal mask is inherited, so children also ignore it. We compare a plain and a nohup process; bit 1 of `SigIgn` is SIGHUP.",
+     "run": [
+      {
+       "cmd": "sleep 100 & a=$!; nohup sleep 100 > /dev/null 2>&1 & b=$!; sleep 0.3; kill -HUP $a $b; sleep 0.3; ps -o pid= -p $a > /dev/null && echo \"plain: alive\" || echo \"plain: killed by SIGHUP\"; ps -o pid= -p $b > /dev/null && echo \"nohup: alive\" || echo \"nohup: killed\"; kill $b",
+       "output": "[1] 3463602\n[2] 3463603\nplain: killed by SIGHUP\nnohup: alive"
+      }
+     ]
+    },
+    {
+     "title": "Signals for you to define",
+     "text": "SIGUSR1 and SIGUSR2 have no fixed meaning. Programs use them for custom actions: dump statistics, rotate logs, toggle debug output.",
+     "run": [
+      {
+       "cmd": "bash -c 'trap \"echo got USR1: dumping stats\" USR1; kill -USR1 $$; echo after'",
+       "output": "got USR1: dumping stats\nafter"
+      }
+     ],
+     "under": "`dd` prints its progress on SIGUSR1, `nginx` reopens its log files on SIGUSR1 (used by logrotate), and `unicorn`/`gunicorn` use TTIN/TTOU to change the worker count."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What do most daemons do on SIGHUP?",
+     "options": [
+      "Exit",
+      "Reload their configuration",
+      "Crash",
+      "Fork"
+     ],
+     "answer": 1,
+     "explain": "It is a convention for \"re-read your config\"."
+    },
+    {
+     "q": "Which trap runs when a bash script ends for any reason?",
+     "options": [
+      "trap ... ERR",
+      "trap ... EXIT",
+      "trap ... TERM",
+      "trap ... 0 only on success"
+     ],
+     "answer": 1,
+     "explain": "EXIT runs at every exit; ideal for cleanup."
+    },
+    {
+     "q": "When does a parent receive SIGCHLD?",
+     "options": [
+      "When it forks",
+      "When a child exits or stops",
+      "When it reads a file",
+      "Never"
+     ],
+     "answer": 1,
+     "explain": "That is how it learns it should call wait."
+    },
+    {
+     "q": "Which tool makes a command ignore SIGHUP?",
+     "options": [
+      "setsid",
+      "nohup",
+      "kill",
+      "ps"
+     ],
+     "answer": 1,
+     "explain": "nohup sets SIGHUP to ignored before exec."
+    }
+   ],
+   "check": {
+    "scenario": "Logrotate renamed `app.log` but the application keeps writing to the renamed file. What do you configure so the app opens a new file?",
+    "answer": "Send the signal the app uses for \"reopen logs\" in a `postrotate` script (often `kill -HUP $(cat /run/app.pid)` or `systemctl reload app`), or use `copytruncate` as a last resort. The reason: the app holds the old file open by descriptor; only a reopen makes it write to the new name."
+   }
+  },
+  {
+   "id": "signals-underneath",
+   "title": "Signal delivery underneath: masks, pending, coalescing",
+   "level": "advanced",
+   "goal": "See how the kernel stores signals: a blocked mask, a pending set and a handler table, and why several identical signals can merge into one.\n\nWhy it matters: it explains lost signals (\"I sent 3 SIGUSR1 and the handler ran once\"), and why you must write handlers that only set a flag.",
+   "setup": {
+    "note": "Use a scratch directory. Scripts and C programs are saved there.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A test program",
+     "text": "The program installs a handler for SIGUSR1, **blocks** SIGUSR1, sends itself three, prints the kernel's mask fields, then unblocks. It also tries to install a handler for SIGKILL.",
+     "code": {
+      "file": "sigdemo.c",
+      "lang": "c",
+      "src": "#include <signal.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n\nstatic volatile sig_atomic_t hits;\nstatic void handler(int sig) { (void)sig; hits++; }\n\nint main(void) {\n    struct sigaction sa;\n    memset(&sa, 0, sizeof sa);\n    sa.sa_handler = handler;\n    if (sigaction(SIGKILL, &sa, NULL) == -1)\n        perror(\"sigaction(SIGKILL)\");              /* SIGKILL cannot be caught */\n    sigaction(SIGUSR1, &sa, NULL);\n\n    sigset_t block, old;\n    sigemptyset(&block);\n    sigaddset(&block, SIGUSR1);\n    sigprocmask(SIG_BLOCK, &block, &old);          /* hold SIGUSR1 back */\n\n    for (int i = 0; i < 3; i++)\n        raise(SIGUSR1);                            /* send ourselves three signals */\n    system(\"grep -E '^Sig(Blk|Pnd|Cgt)' /proc/$PPID/status\");\n\n    sigprocmask(SIG_SETMASK, &old, NULL);          /* unblock: delivery happens now */\n    printf(\"handler ran %d time(s) after 3 signals\\n\", (int)hits);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o sigdemo sigdemo.c",
+       "output": ""
+      },
+      {
+       "cmd": "./sigdemo",
+       "output": "sigaction(SIGKILL): Invalid argument\nSigPnd:\t0000000000000200\nSigBlk:\t0000000000010200\nSigCgt:\t0000000000000200\nhandler ran 1 time(s) after 3 signals"
+      }
+     ]
+    },
+    {
+     "title": "Read the three fields",
+     "text": "`SigBlk` is the blocked mask, `SigPnd` the pending mask, `SigCgt` the caught mask. Each is a bit set: bit N-1 is signal N. SIGUSR1 is signal 10, so its bit is `0x200`.\n\nThe handler ran **once** for three signals. (`SigBlk` also shows bit `0x10000`: signal 17, SIGCHLD, which `system()` blocks while it runs the `grep`.) Standard signals are not queued: while one is pending, further identical signals are merged."
+    },
+    {
+     "title": "The state of a live process",
+     "text": "The same fields exist for any process. A shell waiting for input has no signals pending and a few caught.",
+     "run": [
+      {
+       "cmd": "grep -E '^Sig(Blk|Pnd|Ign|Cgt)' /proc/$$/status",
+       "output": "SigPnd:\t0000000000000000\nSigBlk:\t0000000000010000\nSigIgn:\t0000000000384004\nSigCgt:\t000000004b813efb"
+      }
+     ],
+     "under": "Each task has a `blocked` mask, a `pending` set and a table of `sigaction` structs. `kill()` sets the bit in `pending` (if not ignored) and wakes the task. On return to user mode the kernel looks at `pending & ~blocked` and delivers. Real-time signals (SIGRTMIN..SIGRTMAX) **are** queued with data (`sigqueue`), standard signals are not."
+    },
+    {
+     "title": "Why handlers must be tiny",
+     "text": "A handler can interrupt the program at any instruction, even in the middle of `malloc` or `printf`. Only **async-signal-safe** functions are allowed. The usual pattern: the handler sets a flag (`volatile sig_atomic_t`), and the main loop checks it. This is what `hits++` does in the demo."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "You send SIGUSR1 five times quickly to a process that has it blocked. How many handler runs after unblocking?",
+     "options": [
+      "5",
+      "1",
+      "0",
+      "It crashes"
+     ],
+     "answer": 1,
+     "explain": "Standard signals are coalesced while pending."
+    },
+    {
+     "q": "Which field of /proc/PID/status shows signals waiting for delivery?",
+     "options": [
+      "SigBlk",
+      "SigPnd",
+      "SigCgt",
+      "SigIgn"
+     ],
+     "answer": 1,
+     "explain": "SigPnd = pending."
+    },
+    {
+     "q": "Why does `sigaction(SIGKILL, ...)` fail?",
+     "options": [
+      "Missing root",
+      "SIGKILL cannot be caught, blocked or ignored",
+      "Typo",
+      "Kernel too old"
+     ],
+     "answer": 1,
+     "explain": "The kernel refuses with EINVAL."
+    },
+    {
+     "q": "What should a signal handler do?",
+     "options": [
+      "Everything",
+      "Almost nothing: set a flag and return",
+      "Call printf",
+      "Call malloc"
+     ],
+     "answer": 1,
+     "explain": "Only async-signal-safe operations are allowed."
+    }
+   ],
+   "check": {
+    "scenario": "A daemon sometimes misses a SIGUSR1 sent by a monitoring script in a burst of three. How do you make this robust?",
+    "answer": "Do not use counts of signals as protocol. Use one signal as \"wake up and look\" and let the program read a file or queue to learn what to do. If you need every event, use real-time signals (`sigqueue`), a pipe or a socket, which queue data."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is the difference between SIGTERM and SIGKILL?",
+   "a": "SIGTERM asks the process to terminate and can be caught for cleanup. SIGKILL is enforced by the kernel and cannot be caught or ignored. See [the lesson](#/lesson/11/sigterm-sigkill).",
+   "level": "beginner"
+  },
+  {
+   "q": "What exit status does a process killed by SIGKILL have?",
+   "a": "137 = 128 + 9 as seen by the shell.",
+   "level": "beginner"
+  },
+  {
+   "q": "What is SIGHUP used for today?",
+   "a": "Originally terminal hang-up. Now most daemons reload their configuration on it. nohup makes a command ignore it. See [the lesson](#/lesson/11/sighup-sigchld-trap).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you clean up temporary files in a shell script reliably?",
+   "a": "`trap 'rm -f \"$tmp\"' EXIT`. EXIT runs on normal exit, on `exit`, and (with TERM/INT trapped to exit) on signals. It does not run on SIGKILL.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Can signals be lost?",
+   "a": "Yes. Standard signals are not queued: identical pending signals merge. See [the lesson](#/lesson/11/signals-underneath). Use real-time signals or another channel when counts matter.",
+   "level": "advanced"
+  },
+  {
+   "q": "Why does kill -9 on a D-state process not work?",
+   "a": "The signal stays pending until the process returns from the uninterruptible kernel wait, so it is delivered only afterwards.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Signal",
+   "def": "A numbered notification the kernel delivers to a process.",
+   "lesson": "11/sigterm-sigkill"
+  },
+  {
+   "term": "SIGTERM",
+   "def": "Signal 15: polite request to terminate; can be caught.",
+   "lesson": "11/sigterm-sigkill"
+  },
+  {
+   "term": "SIGKILL",
+   "def": "Signal 9: forced termination, cannot be caught or ignored.",
+   "lesson": "11/sigterm-sigkill"
+  },
+  {
+   "term": "SIGHUP",
+   "def": "Signal 1: hangup; many daemons reload configuration on it.",
+   "lesson": "11/sighup-sigchld-trap"
+  },
+  {
+   "term": "SIGCHLD",
+   "def": "Signal sent to a parent when a child exits or stops.",
+   "lesson": "11/sighup-sigchld-trap"
+  },
+  {
+   "term": "trap",
+   "def": "A bash builtin that runs a command when a signal or EXIT occurs.",
+   "lesson": "11/sighup-sigchld-trap"
+  },
+  {
+   "term": "Signal mask",
+   "def": "The set of signals a process currently blocks.",
+   "lesson": "11/signals-underneath"
+  },
+  {
+   "term": "Pending signal",
+   "def": "A signal that was sent but not yet delivered, for example because it is blocked.",
+   "lesson": "11/signals-underneath"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "kill -TERM PID",
+   "desc": "Ask a process to terminate.",
+   "topic": "Signals",
+   "lesson": "11/sigterm-sigkill"
+  },
+  {
+   "cmd": "kill -KILL PID",
+   "desc": "Force a process to end.",
+   "topic": "Signals",
+   "lesson": "11/sigterm-sigkill"
+  },
+  {
+   "cmd": "kill -0 PID",
+   "desc": "Test if a process exists.",
+   "topic": "Signals",
+   "lesson": "11/sigterm-sigkill"
+  },
+  {
+   "cmd": "kill -l",
+   "desc": "List signal names and numbers.",
+   "topic": "Signals",
+   "lesson": "11/sigterm-sigkill"
+  },
+  {
+   "cmd": "kill -HUP PID",
+   "desc": "Ask a daemon to reload.",
+   "topic": "Signals",
+   "lesson": "11/sighup-sigchld-trap"
+  },
+  {
+   "cmd": "trap 'cleanup' EXIT",
+   "desc": "Run cleanup when the script ends.",
+   "topic": "Signals",
+   "lesson": "11/sighup-sigchld-trap"
+  },
+  {
+   "cmd": "nohup CMD &",
+   "desc": "Run CMD immune to hangup.",
+   "topic": "Signals",
+   "lesson": "11/sighup-sigchld-trap"
+  },
+  {
+   "cmd": "grep Sig /proc/PID/status",
+   "desc": "Show blocked, pending, ignored, caught masks.",
+   "topic": "Signals",
+   "lesson": "11/signals-underneath"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

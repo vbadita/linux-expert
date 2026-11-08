@@ -1,0 +1,457 @@
+{
+ "title": "Final exam",
+ "lessons": [],
+ "exam": [
+  {
+   "q": "A script runs `rm -rf $DIR/*` and `$DIR` is empty. What does the shell run, and what prevents the disaster?",
+   "options": [
+    "rm -rf /home/*",
+    "rm -rf /*; use set -u or ${DIR:?}",
+    "Nothing, rm refuses",
+    "rm -rf ./*"
+   ],
+   "answer": 1,
+   "explain": "An empty unquoted variable disappears, leaving `/*`. `set -u` or `${DIR:?message}` aborts."
+  },
+  {
+   "q": "`ls *.txt` prints `ls: cannot access '*.txt'` when no file matches. Why does `ls` see the literal `*.txt`?",
+   "options": [
+    "ls is broken",
+    "Bash leaves an unmatched glob unchanged and passes it as the argument",
+    "Quotes were used",
+    "The filesystem is empty"
+   ],
+   "answer": 1,
+   "explain": "Unmatched globs stay as typed by default."
+  },
+  {
+   "q": "Which command shows the system calls a program makes?",
+   "options": [
+    "ltrace",
+    "strace",
+    "perf stat",
+    "lsof"
+   ],
+   "answer": 1,
+   "explain": "strace traces system calls; ltrace library calls."
+  },
+  {
+   "q": "A process shows state `Z`. What can you do about it?",
+   "options": [
+    "kill -9 it",
+    "Fix or restart its parent so the exit status is collected",
+    "Nothing, it is a kernel thread",
+    "Renice it"
+   ],
+   "answer": 1,
+   "explain": "A zombie is dead; only the parent's wait() removes it."
+  },
+  {
+   "q": "A file has mode 070 and you own it and belong to its group. Can you read it?",
+   "options": [
+    "Yes, the group can",
+    "No, the owner class matches first and has no bits",
+    "Yes, others can",
+    "Only with sudo -u root"
+   ],
+   "answer": 1,
+   "explain": "The kernel stops at the owner class."
+  },
+  {
+   "q": "Which tool lists open files including deleted ones still held by processes?",
+   "options": [
+    "ls -l",
+    "lsof +L1",
+    "find -deleted",
+    "stat"
+   ],
+   "answer": 1,
+   "explain": "`lsof +L1` shows link count below 1."
+  },
+  {
+   "q": "`df -h` shows 40% free but creating files fails with ENOSPC. What do you check?",
+   "options": [
+    "Memory",
+    "Inodes (df -i)",
+    "CPU",
+    "Swap"
+   ],
+   "answer": 1,
+   "explain": "Inode exhaustion is the classic cause."
+  },
+  {
+   "q": "What does `kill -0 PID` do?",
+   "options": [
+    "Kills softly",
+    "Tests whether the process exists and can be signalled",
+    "Reloads it",
+    "Stops it"
+   ],
+   "answer": 1,
+   "explain": "No signal is sent."
+  },
+  {
+   "q": "Which signal cannot be caught or ignored?",
+   "options": [
+    "SIGTERM",
+    "SIGHUP",
+    "SIGKILL",
+    "SIGINT"
+   ],
+   "answer": 2,
+   "explain": "SIGKILL and SIGSTOP."
+  },
+  {
+   "q": "What exit status does a process killed by SIGKILL have in the shell?",
+   "options": [
+    "9",
+    "137",
+    "1",
+    "255"
+   ],
+   "answer": 1,
+   "explain": "128 + 9."
+  },
+  {
+   "q": "Which memory number should you watch to know whether a server is short of RAM?",
+   "options": [
+    "free",
+    "available plus swap activity",
+    "buff/cache",
+    "VSZ"
+   ],
+   "answer": 1,
+   "explain": "Free memory is normally low because of the page cache."
+  },
+  {
+   "q": "A process has VSZ 12 GB and RSS 300 MB. What is true?",
+   "options": [
+    "It uses 12 GB of RAM",
+    "It has reserved address space; about 300 MB is resident",
+    "It leaks memory",
+    "It is swapped out"
+   ],
+   "answer": 1,
+   "explain": "VSZ is virtual size."
+  },
+  {
+   "q": "What happens to a page of a forked child when the child writes to a shared page?",
+   "options": [
+    "The parent's page changes",
+    "The kernel copies the page for the writer (copy-on-write)",
+    "The child crashes",
+    "Nothing"
+   ],
+   "answer": 1,
+   "explain": "Copy-on-write."
+  },
+  {
+   "q": "You need to give a program the right to bind port 80 without running it as root. Best option?",
+   "options": [
+    "setuid root",
+    "setcap cap_net_bind_service=ep",
+    "chmod 777",
+    "Run as root in a container"
+   ],
+   "answer": 1,
+   "explain": "One capability instead of all of root."
+  },
+  {
+   "q": "Which layer can still deny root access to a file with correct permissions?",
+   "options": [
+    "umask",
+    "SELinux (mandatory access control)",
+    "PATH",
+    "sudoers"
+   ],
+   "answer": 1,
+   "explain": "MAC policy is independent of permissions."
+  },
+  {
+   "q": "A service gets `Permission denied` on files that were moved to /data/www and mode is right. First thing to check on Oracle Linux?",
+   "options": [
+    "DNS",
+    "The SELinux label (ls -Z) and AVC denials",
+    "Swap",
+    "IPv6"
+   ],
+   "answer": 1,
+   "explain": "A wrong file context is the usual cause."
+  },
+  {
+   "q": "What does `Connection refused` tell you?",
+   "options": [
+    "A firewall dropped the packet",
+    "The host answered with a reset: nothing listens on that port",
+    "DNS failed",
+    "The route is missing"
+   ],
+   "answer": 1,
+   "explain": "A reset came back."
+  },
+  {
+   "q": "What does `Connection timed out` typically mean?",
+   "options": [
+    "No listener",
+    "Packets are dropped or lost (firewall, missing return route, host down)",
+    "Bad password",
+    "Wrong DNS name"
+   ],
+   "answer": 1,
+   "explain": "Silence."
+  },
+  {
+   "q": "A dead first nameserver in /etc/resolv.conf causes...",
+   "options": [
+    "Instant failures",
+    "A delay of several seconds on each lookup before the next server is tried",
+    "Wrong answers",
+    "No effect"
+   ],
+   "answer": 1,
+   "explain": "Timeout applies per attempt."
+  },
+  {
+   "q": "Which command shows what programs see when resolving a name, including /etc/hosts?",
+   "options": [
+    "dig NAME",
+    "getent hosts NAME",
+    "nslookup NAME",
+    "host NAME"
+   ],
+   "answer": 1,
+   "explain": "getent follows nsswitch like libc."
+  },
+  {
+   "q": "In `ss -ltn`, what does Send-Q mean for a listening socket?",
+   "options": [
+    "Bytes waiting",
+    "The backlog limit",
+    "Clients connected",
+    "The window"
+   ],
+   "answer": 1,
+   "explain": "Recv-Q is current queue; Send-Q is the maximum."
+  },
+  {
+   "q": "Many sockets in CLOSE-WAIT on a server indicate...",
+   "options": [
+    "Network problems",
+    "The application is not closing connections after the peer closed",
+    "Too many clients",
+    "Firewall drops"
+   ],
+   "answer": 1,
+   "explain": "A connection leak in the local app."
+  },
+  {
+   "q": "Which nftables hook is used for destination NAT?",
+   "options": [
+    "postrouting",
+    "prerouting",
+    "output",
+    "forward only"
+   ],
+   "answer": 1,
+   "explain": "Before the routing decision."
+  },
+  {
+   "q": "How do you test an sshd configuration before reloading?",
+   "options": [
+    "sshd -t -f FILE",
+    "ssh -t",
+    "systemctl status sshd",
+    "ssh-keygen -t"
+   ],
+   "answer": 0,
+   "explain": "Syntax and option check."
+  },
+  {
+   "q": "You change a systemd unit file and the old behaviour persists. What did you forget?",
+   "options": [
+    "Reboot",
+    "systemctl daemon-reload",
+    "chmod",
+    "journalctl --rotate"
+   ],
+   "answer": 1,
+   "explain": "systemd caches unit files."
+  },
+  {
+   "q": "Which journalctl command shows messages of unit sshd from the current boot?",
+   "options": [
+    "journalctl -u sshd -b",
+    "cat /var/log/sshd",
+    "dmesg | grep sshd",
+    "systemctl log sshd"
+   ],
+   "answer": 0,
+   "explain": "-u and -b."
+  },
+  {
+   "q": "What does Restart=on-failure do?",
+   "options": [
+    "Reboots the host",
+    "Restarts the service after an abnormal exit",
+    "Restarts on every file change",
+    "Restarts daily"
+   ],
+   "answer": 1,
+   "explain": "Crash recovery."
+  },
+  {
+   "q": "Which cron field order is correct?",
+   "options": [
+    "hour minute day month weekday",
+    "minute hour day-of-month month day-of-week",
+    "day month year hour",
+    "second minute hour day"
+   ],
+   "answer": 1,
+   "explain": "m h dom mon dow."
+  },
+  {
+   "q": "Load average is 20 on a 4-CPU machine and the CPU is idle. Most likely cause?",
+   "options": [
+    "A busy loop",
+    "Tasks stuck in D state, for example on a hung NFS mount",
+    "Too many users",
+    "Low memory"
+   ],
+   "answer": 1,
+   "explain": "D-state tasks count in the load."
+  },
+  {
+   "q": "Which command lists tasks in uninterruptible sleep with the kernel function they wait in?",
+   "options": [
+    "ps -eo pid,stat,wchan:30,comm",
+    "top -H",
+    "free",
+    "iostat"
+   ],
+   "answer": 0,
+   "explain": "wchan shows the wait point."
+  },
+  {
+   "q": "A cgroup v2 memory limit is hit and nothing can be reclaimed. What happens?",
+   "options": [
+    "The system freezes",
+    "The OOM killer kills a process in that cgroup",
+    "Swap grows without limit",
+    "The limit is raised"
+   ],
+   "answer": 1,
+   "explain": "Group-local OOM."
+  },
+  {
+   "q": "Which statement about containers is correct?",
+   "options": [
+    "They run their own kernel",
+    "They share the host kernel and are isolated by namespaces and limited by cgroups",
+    "They need a hypervisor",
+    "They cannot see processes"
+   ],
+   "answer": 1,
+   "explain": "Process isolation, not virtualisation."
+  },
+  {
+   "q": "What is the difference between a bind mount and a symbolic link?",
+   "options": [
+    "None",
+    "A bind mount makes a directory visible at another path in the mount table; a symlink is a file containing a path",
+    "Bind mounts are slower",
+    "Symlinks cross mounts only"
+   ],
+   "answer": 1,
+   "explain": "Different mechanisms."
+  },
+  {
+   "q": "Which tool is best to find which function burns CPU in a running process?",
+   "options": [
+    "strace",
+    "perf record / perf report",
+    "ss",
+    "lsof"
+   ],
+   "answer": 1,
+   "explain": "A sampling profiler."
+  },
+  {
+   "q": "Which hook does an eBPF program attached to `tracepoint:syscalls:sys_enter_openat` use?",
+   "options": [
+    "A kernel tracepoint",
+    "A user-space library call",
+    "A signal",
+    "A cron job"
+   ],
+   "answer": 0,
+   "explain": "Tracepoints are stable kernel events."
+  },
+  {
+   "q": "How do you make a kernel parameter change survive a reboot?",
+   "options": [
+    "sysctl -w only",
+    "Put it in /etc/sysctl.d/*.conf",
+    "echo into /proc only",
+    "Edit /boot"
+   ],
+   "answer": 1,
+   "explain": "sysctl -w is lost at reboot."
+  },
+  {
+   "q": "Which device-mapper-based feature takes copy-on-write snapshots of a logical volume?",
+   "options": [
+    "LVM snapshot",
+    "mdadm",
+    "parted",
+    "fsck"
+   ],
+   "answer": 0,
+   "explain": "lvcreate -s."
+  },
+  {
+   "q": "A RAID 1 array shows [U_]. What does it mean?",
+   "options": [
+    "Healthy",
+    "One member is missing or failed (degraded)",
+    "Rebuilding is finished",
+    "Stopped"
+   ],
+   "answer": 1,
+   "explain": "U = up, _ = missing."
+  },
+  {
+   "q": "Which setting makes systemd refuse to give a service new privileges through setuid programs?",
+   "options": [
+    "NoNewPrivileges=yes",
+    "PrivateTmp=yes",
+    "ProtectHome=yes",
+    "Restart=no"
+   ],
+   "answer": 0,
+   "explain": "It sets the NoNewPrivs flag."
+  },
+  {
+   "q": "Ansible reports `changed=3` on the second run of a playbook. What does that suggest?",
+   "options": [
+    "Everything is fine",
+    "Some task is not idempotent or something keeps changing",
+    "A new host appeared",
+    "The inventory is wrong"
+   ],
+   "answer": 1,
+   "explain": "A converged system reports changed=0."
+  },
+  {
+   "q": "Which bash feature runs a loop in the current shell, so variables set inside survive, while reading command output?",
+   "options": [
+    "cmd | while read",
+    "while read ...; done < <(cmd)",
+    "cmd & while read",
+    "bash -c"
+   ],
+   "answer": 1,
+   "explain": "Process substitution avoids the subshell."
+  }
+ ]
+}

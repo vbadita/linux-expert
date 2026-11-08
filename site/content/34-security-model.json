@@ -1,0 +1,525 @@
+{
+ "title": "The Linux security model",
+ "lessons": [
+  {
+   "id": "security-layers",
+   "title": "The layers of the Linux security model",
+   "level": "beginner",
+   "goal": "Get the map: which mechanisms decide whether a process may do something, in what order, and how to see each one on a running system.\n\nWhy it matters: when an action fails with \"Permission denied\" you must know which layer said no. Each layer has its own tool.",
+   "setup": {
+    "note": "Steps with sudo use file capabilities and a temporary PAM service file (`/etc/pam.d/lab-pam`), removed at the end. Programs are small C files; the PAM one needs `pam-devel`.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rm -f /etc/pam.d/lab-pam; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The layers",
+     "text": "A request such as `open()` passes several independent checks. All must agree.\n\n1. **Identity and DAC** (discretionary access control): UIDs, GIDs and file modes (module 3).\n2. **Capabilities**: root's power split into ~40 pieces (next lesson).\n3. **LSM / MAC** (mandatory access control): SELinux or AppArmor policy that even root cannot change at run time (module 35).\n4. **Namespaces and cgroups**: isolate and limit (module 37 and 38).\n5. **seccomp**: a filter on which system calls a process may make.\n6. **Kernel hardening**: ASLR, restricted ptrace and kernel pointers, protected links.",
+     "run": [
+      {
+       "cmd": "cat /sys/kernel/security/lsm | tr ',' ' '; echo",
+       "output": "lockdown capability yama selinux bpf ima evm"
+      }
+     ]
+    },
+    {
+     "title": "Your identity",
+     "text": "Every process carries user and group IDs and supplementary groups.",
+     "run": [
+      {
+       "cmd": "id -u; id -g; id -G | wc -w | awk '{print $1, \"groups\"}'",
+       "output": "1000\n1000\n3 groups"
+      },
+      {
+       "cmd": "grep -E '^(Uid|Gid):' /proc/self/status",
+       "output": "Uid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000"
+      }
+     ]
+    },
+    {
+     "title": "Per-process security flags in /proc",
+     "text": "`NoNewPrivs` set to 1 means the process can never gain privileges through setuid programs. `Seccomp` shows the filter mode (0 none, 2 filter). Sandboxed services (systemd units with `NoNewPrivileges`, containers) have them set.",
+     "run": [
+      {
+       "cmd": "grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status",
+       "output": "NoNewPrivs:\t0\nSeccomp:\t0"
+      },
+      {
+       "cmd": "sudo systemd-run --pipe --wait --collect -q -p NoNewPrivileges=yes -p SystemCallFilter=@system-service sh -c \"grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status\"",
+       "output": "NoNewPrivs:\t1\nSeccomp:\t2"
+      }
+     ]
+    },
+    {
+     "title": "Kernel hardening switches",
+     "text": "Sysctls restrict what even a same-user process may do to others: `yama.ptrace_scope` (who may attach a debugger), `kptr_restrict` (hide kernel addresses), `dmesg_restrict`, and protection against link-based tricks in shared directories.",
+     "run": [
+      {
+       "cmd": "sysctl kernel.yama.ptrace_scope kernel.kptr_restrict kernel.dmesg_restrict fs.protected_hardlinks fs.protected_symlinks fs.protected_regular | tr -s ' ' ' '",
+       "output": "kernel.yama.ptrace_scope = 0\nkernel.kptr_restrict = 1\nkernel.dmesg_restrict = 1\nfs.protected_hardlinks = 1\nfs.protected_symlinks = 1\nfs.protected_regular = 1"
+      }
+     ],
+     "under": "The checks happen at specific points in the kernel. For `open()`: the VFS checks DAC permissions, then calls the **LSM hooks** (`security_file_open`), where SELinux and the capability module add their verdicts. seccomp acts earlier, at system call entry. A denial from any layer returns `EACCES` or `EPERM`, which is why the message alone does not tell you which layer refused."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which layer can restrict even the root user, and cannot be disabled by the process itself?",
+     "options": [
+      "File permissions",
+      "Mandatory access control (SELinux)",
+      "umask",
+      "PATH"
+     ],
+     "answer": 1,
+     "explain": "MAC policy is enforced by the kernel."
+    },
+    {
+     "q": "What does NoNewPrivs=1 prevent?",
+     "options": [
+      "Network access",
+      "Gaining privileges through setuid/file capabilities on exec",
+      "Reading files",
+      "Forking"
+     ],
+     "answer": 1,
+     "explain": "No privilege escalation by exec."
+    },
+    {
+     "q": "Which tool shows the active Linux Security Modules?",
+     "options": [
+      "/sys/kernel/security/lsm",
+      "/etc/lsm",
+      "lsmod",
+      "ps"
+     ],
+     "answer": 0,
+     "explain": "The file lists the modules in order."
+    },
+    {
+     "q": "A request fails with EACCES. What does that tell you?",
+     "options": [
+      "Exactly which layer refused",
+      "That some layer refused; you must check each",
+      "File missing",
+      "Disk full"
+     ],
+     "answer": 1,
+     "explain": "DAC, capabilities, MAC and seccomp all return similar errors."
+    }
+   ],
+   "check": {
+    "scenario": "A service running as root cannot read a file whose mode is 644. List the layers you check.",
+    "answer": "DAC is fine (644, and root usually bypasses it), so check: the **path** (a parent directory not searchable? `namei -l`), **SELinux** (`ls -Z`, `ausearch -m avc`), **capabilities** (the unit drops `CAP_DAC_OVERRIDE`), **mount options** (`noexec`, read-only), and **sandboxing** (`ProtectSystem`, `ProtectHome`, `PrivateTmp`, seccomp)."
+   }
+  },
+  {
+   "id": "capabilities",
+   "title": "Capabilities: splitting root's power",
+   "level": "intermediate",
+   "goal": "Learn that \"root\" is a collection of about 40 separate privileges, see them in `/proc`, and give a program exactly one of them instead of full root.\n\nWhy it matters: running a web server as root only to bind port 80 is unnecessary and dangerous. A single capability on the binary is the safe answer.",
+   "setup": {
+    "note": "Steps with sudo use file capabilities and a temporary PAM service file (`/etc/pam.d/lab-pam`), removed at the end. Programs are small C files; the PAM one needs `pam-devel`.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rm -f /etc/pam.d/lab-pam; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Root is a set of capabilities",
+     "text": "A process is allowed to do privileged things only if it holds the matching **capability**: `CAP_CHOWN` (change owners), `CAP_NET_BIND_SERVICE` (ports below 1024), `CAP_NET_RAW` (raw sockets), `CAP_SYS_ADMIN` (a huge catch-all), `CAP_KILL`... UID 0 simply starts with all of them. The masks are in `/proc/PID/status`: `CapPrm` (permitted), `CapEff` (effective now), `CapBnd` (bounding limit).",
+     "run": [
+      {
+       "cmd": "grep -E '^Cap(Prm|Eff|Bnd):' /proc/self/status",
+       "output": "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff"
+      },
+      {
+       "cmd": "sudo sh -c \"grep -E '^Cap(Prm|Eff):' /proc/self/status\"",
+       "output": "CapPrm:\t000001ffffffffff\nCapEff:\t000001ffffffffff"
+      },
+      {
+       "cmd": "capsh --decode=000001ffffffffff | tr ',' '\\n' | wc -l | awk '{print $1, \"capabilities in the full set\"}'",
+       "output": "41 capabilities in the full set"
+      }
+     ]
+    },
+    {
+     "title": "A normal user cannot bind port 80",
+     "text": "Ports below 1024 are privileged: binding needs `CAP_NET_BIND_SERVICE`. This program tries to bind port 80 on loopback.",
+     "code": {
+      "file": "bind80.c",
+      "lang": "c",
+      "src": "#include <arpa/inet.h>\n#include <errno.h>\n#include <netinet/in.h>\n#include <stdio.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <unistd.h>\n\nint main(void) {\n    int s = socket(AF_INET, SOCK_STREAM, 0);\n    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(80)};\n    inet_pton(AF_INET, \"127.0.0.1\", &a.sin_addr);\n    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) {\n        printf(\"bind to port 80: %s\\n\", strerror(errno));\n        return 1;\n    }\n    printf(\"bound to port 80\\n\");\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o bind80 bind80.c",
+       "output": ""
+      },
+      {
+       "cmd": "./bind80",
+       "output": "bind to port 80: Permission denied"
+      }
+     ]
+    },
+    {
+     "title": "Give the program one capability",
+     "text": "`setcap cap_net_bind_service=ep FILE` stores a capability in the file's extended attributes (`e` effective, `p` permitted). Run by an ordinary user the program now holds that one capability and nothing else. No setuid root, no full root.",
+     "run": [
+      {
+       "cmd": "sudo setcap cap_net_bind_service=ep ./bind80; getcap ./bind80",
+       "output": "./bind80 cap_net_bind_service=ep"
+      },
+      {
+       "cmd": "./bind80",
+       "output": "bind to port 80: Address already in use"
+      },
+      {
+       "cmd": "sudo setcap -r ./bind80; getcap ./bind80 | wc -l; ./bind80",
+       "output": "0\nbind to port 80: Permission denied"
+      }
+     ],
+     "under": "At `execve` the kernel combines the file's capabilities with the process's to compute the new sets (a formula with permitted, inheritable, effective and bounding sets). Capabilities stored in file attributes are the safe replacement for **setuid root**: a bug in a setuid program gives full root, a bug in a program with one capability gives only that one."
+    },
+    {
+     "title": "Root without capabilities is not root",
+     "text": "`capsh --drop=cap_chown` runs a command without `CAP_CHOWN`. Even as UID 0, `chown` now fails. This is what container runtimes do: they run root with a reduced set.",
+     "run": [
+      {
+       "cmd": "sudo capsh --drop=cap_chown -- -c 'touch /tmp/lab/rootfile; chown nobody /tmp/lab/rootfile' 2>&1; sudo rm -f /tmp/lab/rootfile",
+       "output": "chown: changing ownership of '/tmp/lab/rootfile': Operation not permitted"
+      }
+     ]
+    },
+    {
+     "title": "An alternative for services: ambient capabilities in systemd",
+     "text": "systemd can grant capabilities to a service that runs as an unprivileged user, without touching the binary. `AmbientCapabilities=CAP_NET_BIND_SERVICE` and `User=` do it. We test with a transient unit: the program binds port 80 as user `nobody`.",
+     "run": [
+      {
+       "cmd": "sudo systemd-run --pipe --wait --collect -q -p User=nobody -p AmbientCapabilities=CAP_NET_BIND_SERVICE /tmp/lab/bind80",
+       "output": ""
+      },
+      {
+       "cmd": "sudo systemd-run --pipe --wait --collect -q -p User=nobody /tmp/lab/bind80",
+       "output": ""
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does CAP_NET_BIND_SERVICE allow?",
+     "options": [
+      "Reading network files",
+      "Binding ports below 1024",
+      "Mounting NFS",
+      "Sending ICMP"
+     ],
+     "answer": 1,
+     "explain": "Privileged ports."
+    },
+    {
+     "q": "Why is a file capability safer than setuid root?",
+     "options": [
+      "It is faster",
+      "A flaw gives only that one capability, not all of root",
+      "It needs no file",
+      "It hides the file"
+     ],
+     "answer": 1,
+     "explain": "Least privilege."
+    },
+    {
+     "q": "Which field in /proc/PID/status shows the capabilities in effect now?",
+     "options": [
+      "CapPrm",
+      "CapEff",
+      "CapBnd",
+      "CapAmb"
+     ],
+     "answer": 1,
+     "explain": "Effective."
+    },
+    {
+     "q": "Root runs a command with `capsh --drop=cap_chown`. What happens to chown?",
+     "options": [
+      "It works",
+      "It fails with Operation not permitted",
+      "It needs sudo",
+      "It prompts"
+     ],
+     "answer": 1,
+     "explain": "UID 0 alone is not enough."
+    }
+   ],
+   "check": {
+    "scenario": "You need to run a Go web server on port 443 without root. Give two ways.",
+    "answer": "1) `setcap cap_net_bind_service=ep /usr/local/bin/server` (re-apply after each upgrade of the binary). 2) A systemd unit with `User=web`, `AmbientCapabilities=CAP_NET_BIND_SERVICE` and `NoNewPrivileges=yes`. Alternatives: listen on 8443 behind a reverse proxy or a firewall redirect, or lower `net.ipv4.ip_unprivileged_port_start` (affects every program, so less safe)."
+   }
+  },
+  {
+   "id": "pam",
+   "title": "PAM: pluggable authentication modules",
+   "level": "intermediate",
+   "goal": "Learn what PAM is, how a service's stack of modules decides about a login or a `sudo`, and what `required`, `requisite` and `sufficient` mean, by writing a stack ourselves and testing it with a program.\n\nWhy it matters: `sshd`, `sudo`, `su`, `login` and screen lockers all ask PAM. Password policy, lockouts after failed logins and MFA are configured here, and a mistake can lock everybody out.",
+   "setup": {
+    "note": "Steps with sudo use file capabilities and a temporary PAM service file (`/etc/pam.d/lab-pam`), removed at the end. Programs are small C files; the PAM one needs `pam-devel`.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rm -f /etc/pam.d/lab-pam; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A stack per service",
+     "text": "A program does not check passwords itself. It calls **libpam** with its **service name**; PAM reads `/etc/pam.d/SERVICE`. Each line is `TYPE CONTROL MODULE [arguments]`:\n\n- **TYPE**: `auth` (who are you), `account` (may you log in now), `password` (change the secret), `session` (set up/tear down).\n- **CONTROL**: how the result counts (below).\n- **MODULE**: a shared library in `/usr/lib64/security/`.",
+     "run": [
+      {
+       "cmd": "grep -vE '^(#|$)' /etc/pam.d/sudo",
+       "output": "auth       include      system-auth\naccount    include      system-auth\npassword   include      system-auth\nsession    include      system-auth"
+      },
+      {
+       "cmd": "ls /usr/lib64/security | grep -E '^pam_(unix|deny|permit|succeed_if|faillock|limits)' | tr '\\n' ' '; echo",
+       "output": "pam_deny.so pam_faillock.so pam_limits.so pam_permit.so pam_succeed_if.so pam_unix_acct.so pam_unix_auth.so pam_unix_passwd.so pam_unix_session.so pam_unix.so "
+      }
+     ]
+    },
+    {
+     "title": "A test program",
+     "text": "`pam_authenticate` runs the `auth` stack of the service `lab-pam`. The conversation function answers every prompt with the same text. The program prints the result.",
+     "code": {
+      "file": "pamtest.c",
+      "lang": "c",
+      "src": "#include <security/pam_appl.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nstatic int conv(int n, const struct pam_message **msg, struct pam_response **resp, void *data) {\n    *resp = calloc(n, sizeof **resp);\n    for (int i = 0; i < n; i++)\n        (*resp)[i].resp = strdup(\"secret\");     /* answer every prompt */\n    return PAM_SUCCESS;\n}\n\nint main(int argc, char **argv) {\n    struct pam_conv c = {conv, NULL};\n    pam_handle_t *h;\n    int r = pam_start(\"lab-pam\", argv[1], &c, &h);   /* service name = file in /etc/pam.d */\n    if (r == PAM_SUCCESS)\n        r = pam_authenticate(h, 0);                  /* run the \"auth\" stack */\n    printf(\"user %-8s -> %s\\\\n\", argv[1], pam_strerror(h, r));\n    pam_end(h, r);\n    return r != PAM_SUCCESS;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o pamtest pamtest.c -lpam",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "Our own stack: required",
+     "text": "We write a service whose only `auth` rule is `pam_succeed_if.so user = opc`: the module succeeds only for the user `opc`. `required` means: it must succeed, but evaluate the rest first.",
+     "run": [
+      {
+       "cmd": "printf 'auth required pam_succeed_if.so user = opc\\naccount required pam_permit.so\\n' | sudo tee /etc/pam.d/lab-pam",
+       "output": "auth required pam_succeed_if.so user = opc\naccount required pam_permit.so"
+      },
+      {
+       "cmd": "./pamtest opc; ./pamtest nobody; true",
+       "output": "user opc      -> Success\\nuser nobody   -> Authentication failure\\n"
+      }
+     ]
+    },
+    {
+     "title": "sufficient and requisite",
+     "text": "Controls decide the order of evaluation:\n\n- `required`: failure is remembered, the stack continues, and the final result is failure.\n- `requisite`: failure ends the stack **at once**.\n- `sufficient`: success ends the stack at once with success (if no earlier required failed).\n- `optional`: only counts when it is the only module.\n\nWe write: succeed immediately for `nobody`; otherwise `pam_deny` fails at once.",
+     "run": [
+      {
+       "cmd": "printf 'auth sufficient pam_succeed_if.so user = nobody\\nauth requisite pam_deny.so\\nauth required pam_permit.so\\n' | sudo tee /etc/pam.d/lab-pam",
+       "output": "auth sufficient pam_succeed_if.so user = nobody\nauth requisite pam_deny.so\nauth required pam_permit.so"
+      },
+      {
+       "cmd": "./pamtest opc; ./pamtest nobody; true",
+       "output": "user opc      -> Authentication failure\\nuser nobody   -> Success\\n"
+      }
+     ],
+     "under": "Order matters. The same lines in another order change the result: `pam_permit.so` above `pam_deny.so` would let everyone in. That is why distributions generate `/etc/pam.d/system-auth` with a tool (`authselect`) instead of by hand, and why you must keep a root shell open while testing PAM changes."
+    },
+    {
+     "title": "Where policy lives",
+     "text": "Password quality is `pam_pwquality`, lockout after failures is `pam_faillock`, resource limits `pam_limits` (reads `/etc/security/limits.conf`), and time or host restrictions `pam_access`/`pam_time`. On Oracle Linux the profile is managed by `authselect`.",
+     "run": [
+      {
+       "cmd": "authselect current 2>&1 | head -n 2",
+       "output": "Profile ID: custom/oci-default\nEnabled features: None"
+      },
+      {
+       "cmd": "grep -c . /etc/security/pwquality.conf",
+       "output": "79"
+      },
+      {
+       "cmd": "sudo rm /etc/pam.d/lab-pam; echo 'lab-pam removed'",
+       "output": "lab-pam removed"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which PAM control stops the stack at once on failure?",
+     "options": [
+      "required",
+      "requisite",
+      "sufficient",
+      "optional"
+     ],
+     "answer": 1,
+     "explain": "requisite."
+    },
+    {
+     "q": "Where does PAM read the rules for the service `sshd`?",
+     "options": [
+      "/etc/pam.d/sshd",
+      "/etc/ssh/pam",
+      "/usr/lib/pam/sshd",
+      "/var/pam"
+     ],
+     "answer": 0,
+     "explain": "One file per service in /etc/pam.d."
+    },
+    {
+     "q": "What happens if `pam_permit.so` is listed before `pam_deny.so` as `sufficient`?",
+     "options": [
+      "Nothing",
+      "Everyone is let in",
+      "Everyone is denied",
+      "The stack loops"
+     ],
+     "answer": 1,
+     "explain": "It succeeds at once."
+    },
+    {
+     "q": "Which module locks an account after repeated failures?",
+     "options": [
+      "pam_faillock",
+      "pam_limits",
+      "pam_motd",
+      "pam_loginuid"
+     ],
+     "answer": 0,
+     "explain": "pam_faillock (older: pam_tally2)."
+    }
+   ],
+   "check": {
+    "scenario": "You edit /etc/pam.d/sudo and make a typo. Now nobody can use sudo. How do you recover, and how do you avoid it?",
+    "answer": "Recover with a path that does not need that service: a root shell on the console/rescue boot (or `su -` with the root password, if allowed), then fix the file. Avoid: keep a root session open while editing, test in a second terminal, use `authselect` for system-auth, and keep a backup of `/etc/pam.d/`."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What are Linux capabilities?",
+   "a": "A split of root's power into about 40 independent privileges (CAP_NET_BIND_SERVICE, CAP_CHOWN, ...). A process can hold some and not others. See [the lesson](#/lesson/34/capabilities).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you let a program bind port 80 without running as root?",
+   "a": "`setcap cap_net_bind_service=ep BINARY`, or systemd `AmbientCapabilities=CAP_NET_BIND_SERVICE` with an unprivileged `User=`.",
+   "level": "intermediate"
+  },
+  {
+   "q": "List the layers of Linux access control.",
+   "a": "DAC (UID/mode), capabilities, LSM/MAC (SELinux, AppArmor), namespaces/cgroups, seccomp, and kernel hardening sysctls. See [the lesson](#/lesson/34/security-layers).",
+   "level": "beginner"
+  },
+  {
+   "q": "What is PAM?",
+   "a": "A library that applications call for authentication, account checks, password changes and sessions, configured per service in /etc/pam.d with stacks of modules. See [the lesson](#/lesson/34/pam).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Explain required, requisite, sufficient and optional.",
+   "a": "required: must succeed, evaluation continues. requisite: failure stops immediately. sufficient: success stops immediately (if no required failed). optional: only matters if alone.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why is setuid root risky compared with file capabilities?",
+   "a": "A bug in a setuid root program yields full root; with capabilities the program holds only the privileges you gave it.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Capability",
+   "def": "One of the separate privileges that together make up root's power.",
+   "lesson": "34/capabilities"
+  },
+  {
+   "term": "DAC",
+   "def": "Discretionary access control: owner-controlled permissions (UID, mode).",
+   "lesson": "34/security-layers"
+  },
+  {
+   "term": "MAC",
+   "def": "Mandatory access control: system-wide policy enforced by the kernel (SELinux, AppArmor).",
+   "lesson": "34/security-layers"
+  },
+  {
+   "term": "LSM",
+   "def": "Linux Security Module framework: hooks where SELinux/AppArmor and others decide.",
+   "lesson": "34/security-layers"
+  },
+  {
+   "term": "seccomp",
+   "def": "A kernel filter restricting which system calls a process may make.",
+   "lesson": "34/security-layers"
+  },
+  {
+   "term": "PAM",
+   "def": "Pluggable Authentication Modules: the library applications use for authentication.",
+   "lesson": "34/pam"
+  },
+  {
+   "term": "NoNewPrivs",
+   "def": "A process flag: exec can never grant more privileges than it had.",
+   "lesson": "34/security-layers"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "capsh --print",
+   "desc": "Show the current capability sets.",
+   "topic": "Security",
+   "lesson": "34/capabilities"
+  },
+  {
+   "cmd": "grep Cap /proc/PID/status",
+   "desc": "Show a process's capability masks.",
+   "topic": "Security",
+   "lesson": "34/capabilities"
+  },
+  {
+   "cmd": "capsh --decode=MASK",
+   "desc": "Decode a capability mask into names.",
+   "topic": "Security",
+   "lesson": "34/capabilities"
+  },
+  {
+   "cmd": "sudo setcap cap_net_bind_service=ep FILE",
+   "desc": "Give a binary the capability to bind low ports.",
+   "topic": "Security",
+   "lesson": "34/capabilities"
+  },
+  {
+   "cmd": "getcap FILE",
+   "desc": "Show file capabilities.",
+   "topic": "Security",
+   "lesson": "34/capabilities"
+  },
+  {
+   "cmd": "authselect current",
+   "desc": "Show the active PAM profile.",
+   "topic": "Security",
+   "lesson": "34/pam"
+  },
+  {
+   "cmd": "cat /sys/kernel/security/lsm",
+   "desc": "List active security modules.",
+   "topic": "Security",
+   "lesson": "34/security-layers"
+  },
+  {
+   "cmd": "grep -E 'NoNewPrivs|Seccomp' /proc/PID/status",
+   "desc": "Show sandbox flags of a process.",
+   "topic": "Security",
+   "lesson": "34/security-layers"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

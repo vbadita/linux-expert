@@ -1,0 +1,637 @@
+{
+ "title": "Text processing",
+ "lessons": [
+  {
+   "id": "grep-sort-count",
+   "title": "Search and count: grep, cut, sort, uniq, wc",
+   "level": "beginner",
+   "goal": "Learn the small tools that answer most log questions: find lines, pick columns, and count.\n\nWhy it matters: each tool does one thing. Joined with pipes they answer questions such as \"which client sends the most requests?\" in one line.",
+   "setup": {
+    "note": "Create a small web server log to practise on. The addresses are from the documentation ranges, so they are fake.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "cat > web.log <<'EOF'\n203.0.113.5 - - [07/Nov/2026:10:00:01] \"GET /index.html HTTP/1.1\" 200 512\n203.0.113.9 - - [07/Nov/2026:10:00:03] \"GET /about.html HTTP/1.1\" 200 1024\n198.51.100.7 - - [07/Nov/2026:10:00:07] \"POST /login HTTP/1.1\" 302 0\n203.0.113.5 - - [07/Nov/2026:10:00:09] \"GET /missing.png HTTP/1.1\" 404 128\n198.51.100.7 - - [07/Nov/2026:10:01:15] \"GET /index.html HTTP/1.1\" 200 512\n203.0.113.5 - - [07/Nov/2026:10:01:20] \"GET /style.css HTTP/1.1\" 200 2048\n203.0.113.77 - - [07/Nov/2026:10:02:00] \"GET /admin HTTP/1.1\" 403 64\n203.0.113.77 - - [07/Nov/2026:10:02:01] \"GET /admin HTTP/1.1\" 403 64\n203.0.113.77 - - [07/Nov/2026:10:02:02] \"GET /admin/login HTTP/1.1\" 404 128\n203.0.113.9 - - [07/Nov/2026:10:03:30] \"GET /index.html HTTP/1.1\" 200 512\n198.51.100.7 - - [07/Nov/2026:10:04:10] \"GET /api/items HTTP/1.1\" 500 32\n203.0.113.5 - - [07/Nov/2026:10:05:44] \"GET /api/items HTTP/1.1\" 200 4096\nEOF"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The data",
+     "text": "Every line of `web.log` is one request: client address, time, request, status code and bytes. `wc -l` counts lines, `head` and `tail` show the start and the end.",
+     "run": [
+      {
+       "cmd": "wc -l web.log",
+       "output": "12 web.log"
+      },
+      {
+       "cmd": "head -n 2 web.log",
+       "output": "203.0.113.5 - - [07/Nov/2026:10:00:01] \"GET /index.html HTTP/1.1\" 200 512\n203.0.113.9 - - [07/Nov/2026:10:00:03] \"GET /about.html HTTP/1.1\" 200 1024"
+      },
+      {
+       "cmd": "tail -n 1 web.log",
+       "output": "203.0.113.5 - - [07/Nov/2026:10:05:44] \"GET /api/items HTTP/1.1\" 200 4096"
+      }
+     ]
+    },
+    {
+     "title": "grep selects lines",
+     "text": "`grep PATTERN FILE` prints the lines that match. `-n` shows line numbers, `-c` counts matches, `-v` inverts, `-i` ignores case.",
+     "run": [
+      {
+       "cmd": "grep POST web.log",
+       "output": "198.51.100.7 - - [07/Nov/2026:10:00:07] \"POST /login HTTP/1.1\" 302 0"
+      },
+      {
+       "cmd": "grep -c ' 404 ' web.log",
+       "output": "2"
+      },
+      {
+       "cmd": "grep -n -v ' 200 ' web.log | head -n 3",
+       "output": "3:198.51.100.7 - - [07/Nov/2026:10:00:07] \"POST /login HTTP/1.1\" 302 0\n4:203.0.113.5 - - [07/Nov/2026:10:00:09] \"GET /missing.png HTTP/1.1\" 404 128\n7:203.0.113.77 - - [07/Nov/2026:10:02:00] \"GET /admin HTTP/1.1\" 403 64"
+      }
+     ]
+    },
+    {
+     "title": "Extended regular expressions",
+     "text": "`grep -E` allows `|` (or), `+`, `?` and groups. Here: all status codes that start with 4 or 5.",
+     "run": [
+      {
+       "cmd": "grep -E ' (4|5)[0-9][0-9] ' web.log | wc -l",
+       "output": "5"
+      },
+      {
+       "cmd": "grep -oE '\"[A-Z]+ [^ ]+' web.log | head -n 3",
+       "output": "\"GET /index.html\n\"GET /about.html\n\"POST /login"
+      }
+     ]
+    },
+    {
+     "title": "cut picks columns",
+     "text": "`cut -d' ' -f1` splits each line at blanks and prints the first field. The result is a list of client addresses.",
+     "run": [
+      {
+       "cmd": "cut -d' ' -f1 web.log | head -n 4",
+       "output": "203.0.113.5\n203.0.113.9\n198.51.100.7\n203.0.113.5"
+      }
+     ]
+    },
+    {
+     "title": "sort, uniq: count the repeats",
+     "text": "`uniq` only merges **adjacent** equal lines, so you must `sort` first. `uniq -c` adds the count. `sort -rn` sorts numbers, biggest first.",
+     "run": [
+      {
+       "cmd": "cut -d' ' -f1 web.log | sort | uniq -c | sort -rn",
+       "output": "      4 203.0.113.5\n      3 203.0.113.77\n      3 198.51.100.7\n      2 203.0.113.9"
+      }
+     ],
+     "under": "`sort` reads all input before it can write (it must see every line to know the order). That is why a pipeline with `sort` shows nothing until the input ends. It uses temporary files if the data does not fit in memory."
+    },
+    {
+     "title": "tr and tee",
+     "text": "`tr` translates or deletes single characters. `tee` copies its input to a file **and** to the next command, so you can save a middle result.",
+     "run": [
+      {
+       "cmd": "echo 'Mixed Case' | tr 'a-z' 'A-Z'",
+       "output": "MIXED CASE"
+      },
+      {
+       "cmd": "echo 'a1b2c3' | tr -d '0-9'",
+       "output": "abc"
+      },
+      {
+       "cmd": "grep ' 404 ' web.log | tee notfound.txt | wc -l",
+       "output": "2"
+      },
+      {
+       "cmd": "wc -l notfound.txt",
+       "output": "2 notfound.txt"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Why must you `sort` before `uniq -c`?",
+     "options": [
+      "uniq is slow",
+      "uniq only compares adjacent lines",
+      "sort removes blanks",
+      "uniq needs a file"
+     ],
+     "answer": 1,
+     "explain": "Equal lines that are not next to each other are counted separately."
+    },
+    {
+     "q": "Which command prints the number of lines containing `404`?",
+     "options": [
+      "grep 404 f | wc -w",
+      "grep -c 404 f",
+      "cut -f404 f",
+      "sort 404 f"
+     ],
+     "answer": 1,
+     "explain": "`grep -c` counts matching lines."
+    },
+    {
+     "q": "What does `grep -v ' 200 '` print?",
+     "options": [
+      "Lines with 200",
+      "Lines without 200",
+      "Only the number",
+      "Verbose output"
+     ],
+     "answer": 1,
+     "explain": "`-v` inverts the match."
+    },
+    {
+     "q": "What does `tee` do?",
+     "options": [
+      "Sends output to a file and to stdout",
+      "Sorts the output",
+      "Deletes duplicates",
+      "Counts words"
+     ],
+     "answer": 0,
+     "explain": "It splits the stream in two."
+    }
+   ],
+   "check": {
+    "scenario": "Print the three most frequent client addresses of web.log with their counts, as one pipeline.",
+    "answer": "`cut -d' ' -f1 web.log | sort | uniq -c | sort -rn | head -n 3`. Cut the first field, sort so equal lines are adjacent, count with `uniq -c`, sort by count descending, keep three."
+   }
+  },
+  {
+   "id": "sed-awk",
+   "title": "sed and awk",
+   "level": "intermediate",
+   "goal": "Learn `sed` for editing a stream and `awk` for working with columns.\n\nWhy it matters: when `cut` and `grep` are not enough (substitute text, add up numbers, group by a column) these two tools do it in one line without a script.",
+   "setup": {
+    "note": "Create a small web server log to practise on. The addresses are from the documentation ranges, so they are fake.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "cat > web.log <<'EOF'\n203.0.113.5 - - [07/Nov/2026:10:00:01] \"GET /index.html HTTP/1.1\" 200 512\n203.0.113.9 - - [07/Nov/2026:10:00:03] \"GET /about.html HTTP/1.1\" 200 1024\n198.51.100.7 - - [07/Nov/2026:10:00:07] \"POST /login HTTP/1.1\" 302 0\n203.0.113.5 - - [07/Nov/2026:10:00:09] \"GET /missing.png HTTP/1.1\" 404 128\n198.51.100.7 - - [07/Nov/2026:10:01:15] \"GET /index.html HTTP/1.1\" 200 512\n203.0.113.5 - - [07/Nov/2026:10:01:20] \"GET /style.css HTTP/1.1\" 200 2048\n203.0.113.77 - - [07/Nov/2026:10:02:00] \"GET /admin HTTP/1.1\" 403 64\n203.0.113.77 - - [07/Nov/2026:10:02:01] \"GET /admin HTTP/1.1\" 403 64\n203.0.113.77 - - [07/Nov/2026:10:02:02] \"GET /admin/login HTTP/1.1\" 404 128\n203.0.113.9 - - [07/Nov/2026:10:03:30] \"GET /index.html HTTP/1.1\" 200 512\n198.51.100.7 - - [07/Nov/2026:10:04:10] \"GET /api/items HTTP/1.1\" 500 32\n203.0.113.5 - - [07/Nov/2026:10:05:44] \"GET /api/items HTTP/1.1\" 200 4096\nEOF"
+    ]
+   },
+   "steps": [
+    {
+     "title": "sed substitutes text",
+     "text": "`sed 's/OLD/NEW/'` replaces the first match on each line. Add `g` for all matches. With `-n` and `p` it prints only the lines you select.",
+     "run": [
+      {
+       "cmd": "sed 's/HTTP\\/1.1/H1/' web.log | head -n 2",
+       "output": "203.0.113.5 - - [07/Nov/2026:10:00:01] \"GET /index.html H1\" 200 512\n203.0.113.9 - - [07/Nov/2026:10:00:03] \"GET /about.html H1\" 200 1024"
+      },
+      {
+       "cmd": "sed -n '/404/p' web.log",
+       "output": "203.0.113.5 - - [07/Nov/2026:10:00:09] \"GET /missing.png HTTP/1.1\" 404 128\n203.0.113.77 - - [07/Nov/2026:10:02:02] \"GET /admin/login HTTP/1.1\" 404 128"
+      },
+      {
+       "cmd": "sed -n '2,4p' web.log | cut -c1-40",
+       "output": "203.0.113.9 - - [07/Nov/2026:10:00:03] \"\n198.51.100.7 - - [07/Nov/2026:10:00:07] \n203.0.113.5 - - [07/Nov/2026:10:00:09] \""
+      }
+     ]
+    },
+    {
+     "title": "sed can delete and edit files in place",
+     "text": "`sed '/PATTERN/d'` deletes matching lines. `-i.bak` edits the file in place and keeps a backup with the suffix.",
+     "run": [
+      {
+       "cmd": "sed '/POST/d' web.log | wc -l",
+       "output": "11"
+      },
+      {
+       "cmd": "cp web.log copy.log; sed -i.bak 's/GET/get/' copy.log; ls copy.log*",
+       "output": "copy.log\ncopy.log.bak"
+      },
+      {
+       "cmd": "grep -c get copy.log; grep -c GET copy.log.bak",
+       "output": "11\n11"
+      }
+     ]
+    },
+    {
+     "title": "awk splits every line into fields",
+     "text": "awk reads a line, splits it into `$1`, `$2`, ... and runs your code. `NF` is the number of fields, `$NF` the last field. The pattern before `{...}` selects the lines.",
+     "run": [
+      {
+       "cmd": "awk '{print $1, $(NF-1)}' web.log | head -n 3",
+       "output": "203.0.113.5 200\n203.0.113.9 200\n198.51.100.7 302"
+      },
+      {
+       "cmd": "awk '$(NF-1) >= 400 {print $1, $(NF-1), $6}' web.log",
+       "output": "203.0.113.5 404 /missing.png\n203.0.113.77 403 /admin\n203.0.113.77 403 /admin\n203.0.113.77 404 /admin/login\n198.51.100.7 500 /api/items"
+      }
+     ]
+    },
+    {
+     "title": "awk can calculate",
+     "text": "Variables keep values between lines. `END` runs after the last line. Here: total bytes, and the average.",
+     "run": [
+      {
+       "cmd": "awk '{s += $NF} END {print s, \"bytes\"}' web.log",
+       "output": "9120 bytes"
+      },
+      {
+       "cmd": "awk '{s += $NF} END {printf \"%.1f average\\n\", s/NR}' web.log",
+       "output": "760.0 average"
+      }
+     ]
+    },
+    {
+     "title": "awk arrays group by a key",
+     "text": "An awk array can be indexed by any string. `c[$key]++` counts occurrences. This replaces `sort | uniq -c` and lets you do more with each group.",
+     "run": [
+      {
+       "cmd": "awk '{c[$(NF-1)]++} END {for (k in c) print k, c[k]}' web.log | sort",
+       "output": "200 6\n302 1\n403 2\n404 2\n500 1"
+      },
+      {
+       "cmd": "awk '{b[$1] += $NF} END {for (k in b) print k, b[k]}' web.log | sort -k2 -rn | head -n 2",
+       "output": "203.0.113.5 6784\n203.0.113.9 1536"
+      }
+     ],
+     "under": "awk is a tiny interpreter. It reads input record by record (default separator: newline) and splits each into fields (default separator: blanks). `-F:` changes the field separator, for example for `/etc/passwd`."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `awk '{print $NF}'` print?",
+     "options": [
+      "The first field",
+      "The last field",
+      "The number of fields",
+      "The whole line"
+     ],
+     "answer": 1,
+     "explain": "`$NF` is the field whose number is NF, the last one."
+    },
+    {
+     "q": "Which sed command deletes lines containing `debug`?",
+     "options": [
+      "sed 's/debug//' f",
+      "sed '/debug/d' f",
+      "sed -n '/debug/p' f",
+      "sed -d debug f"
+     ],
+     "answer": 1,
+     "explain": "`/pattern/d` deletes matching lines."
+    },
+    {
+     "q": "What does `sed -i.bak 's/a/b/' f` do?",
+     "options": [
+      "Prints the result",
+      "Edits f in place and saves f.bak",
+      "Creates f.bak only",
+      "Fails"
+     ],
+     "answer": 1,
+     "explain": "The suffix after -i is the backup name."
+    },
+    {
+     "q": "In awk, what does `c[$1]++` do?",
+     "options": [
+      "Counts lines per value of the first field",
+      "Increments the first field",
+      "Declares a function",
+      "Sorts"
+     ],
+     "answer": 0,
+     "explain": "It keeps one counter per distinct key."
+    }
+   ],
+   "check": {
+    "scenario": "Show the total bytes sent to each client of web.log, largest first.",
+    "answer": "`awk '{b[$1] += $NF} END {for (k in b) print k, b[k]}' web.log | sort -k2 -rn`. awk adds the last field per client address; sort orders by the second column, numerically, descending."
+   }
+  },
+  {
+   "id": "find-xargs-diff",
+   "title": "find, xargs, diff and safe pipelines",
+   "level": "advanced",
+   "goal": "Learn to find files by properties, to pass their names safely to other commands, and to compare files.\n\nWhy it matters: file names can contain spaces and even newlines. A pipeline that ignores this works on your test data and fails (or deletes the wrong file) in production.",
+   "setup": {
+    "note": "Create a small web server log to practise on. The addresses are from the documentation ranges, so they are fake.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "cat > web.log <<'EOF'\n203.0.113.5 - - [07/Nov/2026:10:00:01] \"GET /index.html HTTP/1.1\" 200 512\n203.0.113.9 - - [07/Nov/2026:10:00:03] \"GET /about.html HTTP/1.1\" 200 1024\n198.51.100.7 - - [07/Nov/2026:10:00:07] \"POST /login HTTP/1.1\" 302 0\n203.0.113.5 - - [07/Nov/2026:10:00:09] \"GET /missing.png HTTP/1.1\" 404 128\n198.51.100.7 - - [07/Nov/2026:10:01:15] \"GET /index.html HTTP/1.1\" 200 512\n203.0.113.5 - - [07/Nov/2026:10:01:20] \"GET /style.css HTTP/1.1\" 200 2048\n203.0.113.77 - - [07/Nov/2026:10:02:00] \"GET /admin HTTP/1.1\" 403 64\n203.0.113.77 - - [07/Nov/2026:10:02:01] \"GET /admin HTTP/1.1\" 403 64\n203.0.113.77 - - [07/Nov/2026:10:02:02] \"GET /admin/login HTTP/1.1\" 404 128\n203.0.113.9 - - [07/Nov/2026:10:03:30] \"GET /index.html HTTP/1.1\" 200 512\n198.51.100.7 - - [07/Nov/2026:10:04:10] \"GET /api/items HTTP/1.1\" 500 32\n203.0.113.5 - - [07/Nov/2026:10:05:44] \"GET /api/items HTTP/1.1\" 200 4096\nEOF"
+    ]
+   },
+   "steps": [
+    {
+     "title": "find walks a directory tree",
+     "text": "`find DIR TESTS ACTION`. Tests: `-name`, `-type f|d`, `-size`, `-mtime`. The default action prints the path.",
+     "run": [
+      {
+       "cmd": "mkdir -p proj/src proj/docs; printf 'int a;\\n' > proj/src/a.c; printf 'int b;\\nint c;\\n' > proj/src/b.c; echo hi > proj/docs/readme.txt",
+       "output": ""
+      },
+      {
+       "cmd": "find proj -type f -name '*.c'",
+       "output": "proj/src/a.c\nproj/src/b.c"
+      },
+      {
+       "cmd": "find proj -type d",
+       "output": "proj\nproj/src\nproj/docs"
+      }
+     ]
+    },
+    {
+     "title": "Run a command on each match",
+     "text": "`-exec CMD {} \\;` runs CMD once per file. `-exec CMD {} +` passes many files to one run, which is much faster.",
+     "run": [
+      {
+       "cmd": "find proj -name '*.c' -exec wc -c {} \\;",
+       "output": "7 proj/src/a.c\n14 proj/src/b.c"
+      },
+      {
+       "cmd": "find proj -name '*.c' -exec wc -c {} +",
+       "output": " 7 proj/src/a.c\n14 proj/src/b.c\n21 total"
+      }
+     ]
+    },
+    {
+     "title": "xargs builds a command line from input",
+     "text": "`xargs CMD` reads words from stdin and runs CMD with them as arguments. It is the bridge between a list and a command that takes arguments.",
+     "run": [
+      {
+       "cmd": "find proj -name '*.c' | xargs wc -l",
+       "output": " 1 proj/src/a.c\n 2 proj/src/b.c\n 3 total"
+      },
+      {
+       "cmd": "echo a b c | xargs -n1 echo item",
+       "output": "item a\nitem b\nitem c"
+      }
+     ]
+    },
+    {
+     "title": "The trap: file names with spaces",
+     "text": "`xargs` splits at blanks. A file name with a space becomes two arguments, and the command acts on the wrong names.",
+     "run": [
+      {
+       "cmd": "echo 1 > 'my notes.txt'; echo 22 > other.txt",
+       "output": ""
+      },
+      {
+       "cmd": "ls *.txt | xargs wc -c 2>&1 | head -n 4",
+       "output": "wc: my: No such file or directory\nwc: notes.txt: No such file or directory\n3 other.txt\n3 total"
+      }
+     ]
+    },
+    {
+     "title": "The fix: NUL-separated names",
+     "text": "A file name can never contain a NUL byte. `find -print0` ends each name with NUL and `xargs -0` reads that format.",
+     "run": [
+      {
+       "cmd": "find . -maxdepth 1 -name '*.txt' -print0 | xargs -0 wc -c",
+       "output": "2 ./my notes.txt\n3 ./other.txt\n5 total"
+      }
+     ],
+     "under": "`xargs` also splits the work: if the argument list would exceed the kernel limit for `execve` arguments (`getconf ARG_MAX`), it runs the command several times."
+    },
+    {
+     "title": "diff shows what changed",
+     "text": "`diff -u OLD NEW` prints a unified diff: lines starting with `-` were removed, `+` were added. The exit code is 0 if the files are equal, 1 if they differ.",
+     "run": [
+      {
+       "cmd": "printf 'one\\ntwo\\nthree\\n' > v1.txt; printf 'one\\n2\\nthree\\nfour\\n' > v2.txt",
+       "output": ""
+      },
+      {
+       "cmd": "diff -u v1.txt v2.txt | tail -n +3",
+       "output": "@@ -1,3 +1,4 @@\n one\n-two\n+2\n three\n+four"
+      },
+      {
+       "cmd": "diff -q v1.txt v1.txt; echo \"exit code: $?\"",
+       "output": "exit code: 0"
+      }
+     ]
+    },
+    {
+     "title": "patch applies a diff",
+     "text": "A diff is a patch. `patch` applies it to the old file and produces the new one.",
+     "run": [
+      {
+       "cmd": "diff -u v1.txt v2.txt > change.patch",
+       "output": ""
+      },
+      {
+       "cmd": "cp v1.txt v3.txt; patch v3.txt < change.patch",
+       "output": "patching file v3.txt"
+      },
+      {
+       "cmd": "cmp v2.txt v3.txt && echo identical",
+       "output": "identical"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "A file is called `my notes.txt`. What goes wrong with `ls | xargs rm`?",
+     "options": [
+      "Nothing",
+      "rm receives two arguments, `my` and `notes.txt`",
+      "rm asks for confirmation",
+      "ls fails"
+     ],
+     "answer": 1,
+     "explain": "xargs splits at blanks."
+    },
+    {
+     "q": "Which pair is safe for any file name?",
+     "options": [
+      "find ... | xargs ...",
+      "find ... -print0 | xargs -0 ...",
+      "ls | xargs ...",
+      "echo * | xargs ..."
+     ],
+     "answer": 1,
+     "explain": "NUL cannot appear in a path."
+    },
+    {
+     "q": "What is the exit code of `diff a b` when the files differ?",
+     "options": [
+      "0",
+      "1",
+      "2",
+      "127"
+     ],
+     "answer": 1,
+     "explain": "0 = same, 1 = different, 2 = trouble."
+    },
+    {
+     "q": "What is the difference between `-exec ... \\;` and `-exec ... +`?",
+     "options": [
+      "None",
+      "`+` passes many files per command run",
+      "`;` is faster",
+      "`+` is recursive"
+     ],
+     "answer": 1,
+     "explain": "`+` batches the file names."
+    }
+   ],
+   "check": {
+    "scenario": "You must delete all `*.tmp` files older than 7 days under /var/app, including names with spaces. Write the command.",
+    "answer": "`find /var/app -type f -name '*.tmp' -mtime +7 -print0 | xargs -0 rm --` or simply `find /var/app -type f -name '*.tmp' -mtime +7 -delete`. First run it with `-print` to see the list."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "How do you find the top 5 IP addresses in an access log?",
+   "a": "`awk '{print $1}' access.log | sort | uniq -c | sort -rn | head -5`. See [the lesson](#/lesson/5/grep-sort-count).",
+   "level": "beginner"
+  },
+  {
+   "q": "What is the difference between grep, sed and awk?",
+   "a": "grep selects lines, sed edits a stream with commands such as substitute and delete, awk is a small language that splits lines into fields and can compute. See [sed and awk](#/lesson/5/sed-awk).",
+   "level": "beginner"
+  },
+  {
+   "q": "Why must the input of uniq be sorted?",
+   "a": "uniq compares only adjacent lines.",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you safely pass file names with spaces from find to another command?",
+   "a": "`find ... -print0 | xargs -0 CMD`, or `find ... -exec CMD {} +`. See [find and xargs](#/lesson/5/find-xargs-diff).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you replace text in many files in place?",
+   "a": "`sed -i 's/old/new/g' files` (add `.bak` to keep backups). Test without -i first. Combine with `find -exec` or `xargs -0` for trees.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What do the exit codes of grep mean?",
+   "a": "0: a line matched. 1: no line matched. 2: an error occurred. Scripts often test this: `if grep -q pattern file; then ...`.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Regular expression",
+   "def": "A pattern language for matching text. grep -E uses extended regular expressions.",
+   "lesson": "5/grep-sort-count"
+  },
+  {
+   "term": "Field",
+   "def": "A column of a line after splitting at a separator. awk names them $1, $2, ...",
+   "lesson": "5/sed-awk"
+  },
+  {
+   "term": "Pipeline",
+   "def": "Commands joined by | so that each one's output is the next one's input.",
+   "lesson": "5/grep-sort-count"
+  },
+  {
+   "term": "NUL separator",
+   "def": "A zero byte used between file names because it cannot occur in a name (find -print0).",
+   "lesson": "5/find-xargs-diff"
+  },
+  {
+   "term": "Unified diff",
+   "def": "The patch format printed by diff -u with - and + lines.",
+   "lesson": "5/find-xargs-diff"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "grep -n PATTERN FILE",
+   "desc": "Show matching lines with line numbers.",
+   "topic": "Text",
+   "lesson": "5/grep-sort-count"
+  },
+  {
+   "cmd": "grep -c PATTERN FILE",
+   "desc": "Count matching lines.",
+   "topic": "Text",
+   "lesson": "5/grep-sort-count"
+  },
+  {
+   "cmd": "grep -rE 'a|b' DIR",
+   "desc": "Search a tree with an extended regex.",
+   "topic": "Text",
+   "lesson": "5/grep-sort-count"
+  },
+  {
+   "cmd": "cut -d' ' -f1 FILE",
+   "desc": "Print the first blank-separated field.",
+   "topic": "Text",
+   "lesson": "5/grep-sort-count"
+  },
+  {
+   "cmd": "sort | uniq -c | sort -rn",
+   "desc": "Count equal lines, biggest first.",
+   "topic": "Text",
+   "lesson": "5/grep-sort-count"
+  },
+  {
+   "cmd": "tee FILE",
+   "desc": "Copy stdin to FILE and stdout.",
+   "topic": "Text",
+   "lesson": "5/grep-sort-count"
+  },
+  {
+   "cmd": "tr -d '0-9'",
+   "desc": "Delete characters.",
+   "topic": "Text",
+   "lesson": "5/grep-sort-count"
+  },
+  {
+   "cmd": "sed 's/old/new/g' FILE",
+   "desc": "Substitute text.",
+   "topic": "Text",
+   "lesson": "5/sed-awk"
+  },
+  {
+   "cmd": "sed -n '2,4p' FILE",
+   "desc": "Print lines 2 to 4.",
+   "topic": "Text",
+   "lesson": "5/sed-awk"
+  },
+  {
+   "cmd": "sed -i.bak 's/a/b/' FILE",
+   "desc": "Edit in place with a backup.",
+   "topic": "Text",
+   "lesson": "5/sed-awk"
+  },
+  {
+   "cmd": "awk '{print $1, $NF}' FILE",
+   "desc": "Print the first and last field.",
+   "topic": "Text",
+   "lesson": "5/sed-awk"
+  },
+  {
+   "cmd": "awk '{c[$1]++} END {for (k in c) print k, c[k]}' FILE",
+   "desc": "Count by first field.",
+   "topic": "Text",
+   "lesson": "5/sed-awk"
+  },
+  {
+   "cmd": "find DIR -type f -name '*.log' -mtime +7",
+   "desc": "Find old log files.",
+   "topic": "Files",
+   "lesson": "5/find-xargs-diff"
+  },
+  {
+   "cmd": "find . -print0 | xargs -0 CMD",
+   "desc": "Pass file names safely.",
+   "topic": "Files",
+   "lesson": "5/find-xargs-diff"
+  },
+  {
+   "cmd": "diff -u OLD NEW",
+   "desc": "Show differences as a unified diff.",
+   "topic": "Text",
+   "lesson": "5/find-xargs-diff"
+  },
+  {
+   "cmd": "patch FILE < change.patch",
+   "desc": "Apply a diff.",
+   "topic": "Text",
+   "lesson": "5/find-xargs-diff"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

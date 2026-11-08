@@ -1,0 +1,547 @@
+{
+ "title": "Filesystem hierarchy",
+ "lessons": [
+  {
+   "id": "fhs-tour",
+   "title": "A tour of the filesystem hierarchy",
+   "level": "beginner",
+   "goal": "Learn what each top-level directory is for, so you know where to look for configuration, logs, programs and temporary files.\n\nWhy it matters: on any Linux machine you can find things fast if you know the standard layout (the Filesystem Hierarchy Standard).",
+   "setup": {
+    "note": "These commands only read the system. Output differs between distributions and machines.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "One tree, starting at /",
+     "text": "Linux has a single directory tree. Everything starts at `/` (root). There are no drive letters. Other disks are attached somewhere inside this tree.",
+     "run": [
+      {
+       "cmd": "ls /",
+       "output": "afs\nbin\nboot\ndev\netc\nhome\nlib\nlib64\nmedia\nmnt\nopt\nproc\nroot\nrun\nsbin\nsrv\nsys\ntmp\nusr\nvar"
+      }
+     ]
+    },
+    {
+     "title": "/etc: configuration",
+     "text": "`/etc` holds system-wide configuration as plain text files. Look here first when a service behaves differently than you expect.",
+     "run": [
+      {
+       "cmd": "ls /etc | grep -E '^(fstab|hosts|passwd|ssh|sudoers|systemd)$'",
+       "output": "fstab\nhosts\npasswd\nssh\nsudoers\nsystemd"
+      },
+      {
+       "cmd": "head -3 /etc/os-release",
+       "output": "NAME=\"Oracle Linux Server\"\nVERSION=\"9.8\"\nID=\"ol\""
+      }
+     ]
+    },
+    {
+     "title": "/usr: programs and libraries",
+     "text": "`/usr` holds most installed software. Programs are in `/usr/bin` and `/usr/sbin`, libraries in `/usr/lib64`. It should be read-only during normal use.",
+     "run": [
+      {
+       "cmd": "ls /usr",
+       "output": "bin\ngames\ninclude\nlib\nlib64\nlibexec\nlocal\nsbin\nshare\nsrc\ntmp"
+      },
+      {
+       "cmd": "ls /usr/bin | wc -l",
+       "output": "1342"
+      }
+     ]
+    },
+    {
+     "title": "The old directories are links into /usr",
+     "text": "On modern distributions `/bin`, `/sbin`, `/lib` and `/lib64` are symbolic links into `/usr`. This is called the \"usr merge\". Old scripts that say `#!/bin/sh` still work.",
+     "run": [
+      {
+       "cmd": "ls -ld /bin /sbin /lib /lib64",
+       "output": "lrwxrwxrwx. 1 root root 7 Oct 26  2024 /bin -> usr/bin\nlrwxrwxrwx. 1 root root 7 Oct 26  2024 /lib -> usr/lib\nlrwxrwxrwx. 1 root root 9 Oct 26  2024 /lib64 -> usr/lib64\nlrwxrwxrwx. 1 root root 8 Oct 26  2024 /sbin -> usr/sbin"
+      },
+      {
+       "cmd": "readlink -f /bin/ls",
+       "output": "/usr/bin/ls"
+      }
+     ]
+    },
+    {
+     "title": "/var: data that changes",
+     "text": "`/var` holds data that grows while the system runs: logs (`/var/log`), package caches, spool queues, databases.",
+     "run": [
+      {
+       "cmd": "ls /var",
+       "output": "account\nadm\ncache\ncrash\ndb\nempty\nftp\ngames\nkerberos\nlib\nlocal\nlock\nlog\nmail\nnis\noled\nopt\npreserve\nrun\nspool\ntmp\nyp"
+      },
+      {
+       "cmd": "ls -d /var/log /var/cache /var/lib /var/spool",
+       "output": "/var/cache\n/var/lib\n/var/log\n/var/spool"
+      }
+     ]
+    },
+    {
+     "title": "/tmp, /home and /boot",
+     "text": "`/tmp` is for temporary files that anyone can create. It has the **sticky bit** (the `t`), so users cannot delete each other's files. `/home` holds user files. `/boot` holds the kernel and boot loader files.",
+     "run": [
+      {
+       "cmd": "ls -ld /tmp /home",
+       "output": "drwxr-xr-x.  3 root root   17 Sep 22 15:31 /home\ndrwxrwxrwt. 29 root root 4096 Nov  8 10:36 /tmp"
+      },
+      {
+       "cmd": "ls /boot | grep -E '^(config|efi|grub2)'",
+       "output": "config-6.12.0-206.104.4.4.el9uek.aarch64\nefi\ngrub2"
+      }
+     ],
+     "under": "The standard is written down in the Filesystem Hierarchy Standard and summarised in `man hier`. It is a convention, not enforced by the kernel. The kernel only knows mount points and paths."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Where do you look first for the configuration of a service?",
+     "options": [
+      "/var",
+      "/etc",
+      "/boot",
+      "/tmp"
+     ],
+     "answer": 1,
+     "explain": "System-wide configuration files live in /etc."
+    },
+    {
+     "q": "Where are log files normally written?",
+     "options": [
+      "/etc/log",
+      "/var/log",
+      "/usr/log",
+      "/home/log"
+     ],
+     "answer": 1,
+     "explain": "/var holds data that changes at run time, including /var/log."
+    },
+    {
+     "q": "Why can you not delete another user's file in /tmp even though everyone can write there?",
+     "options": [
+      "/tmp is read-only",
+      "The sticky bit",
+      "Files in /tmp are encrypted",
+      "Root owns them"
+     ],
+     "answer": 1,
+     "explain": "With the sticky bit, only the file's owner, the directory's owner or root may delete or rename an entry."
+    },
+    {
+     "q": "On a modern system, what is /bin?",
+     "options": [
+      "An empty directory",
+      "A symbolic link to usr/bin",
+      "A separate disk",
+      "A kernel file"
+     ],
+     "answer": 1,
+     "explain": "Step 4 showed `/bin -> usr/bin`."
+    }
+   ],
+   "check": {
+    "scenario": "A disk fills up under /var/log. Name the directory tree you would check and the one command to find the biggest items.",
+    "answer": "Check `/var/log` first. `du -xh /var/log --max-depth=1 | sort -h | tail` lists the largest subdirectories (`-x` stays on one filesystem). Then look inside the biggest one."
+   }
+  },
+  {
+   "id": "everything-is-a-file",
+   "title": "Everything is a file: /dev, /proc and /sys",
+   "level": "intermediate",
+   "goal": "Learn that devices, kernel data and system settings are exposed as files, and that some of those files are generated on the fly by the kernel.\n\nWhy it matters: because they look like files, you can inspect and tune the kernel with `cat`, `echo` and shell scripts.",
+   "setup": {
+    "note": "These commands only read the system. Output differs between distributions and machines.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Devices are files in /dev",
+     "text": "A **device file** is a name that connects to a driver. The first letter of `ls -l` shows the type: `c` is a character device, `b` is a block device.",
+     "run": [
+      {
+       "cmd": "ls -l /dev/null /dev/zero /dev/urandom",
+       "output": "crw-rw-rw-. 1 root root 1, 3 Sep 22 15:30 /dev/null\ncrw-rw-rw-. 1 root root 1, 9 Sep 22 15:30 /dev/urandom\ncrw-rw-rw-. 1 root root 1, 5 Sep 22 15:30 /dev/zero"
+      },
+      {
+       "cmd": "lsblk -d -o NAME,TYPE | head -4",
+       "output": "NAME TYPE\nsda  disk"
+      }
+     ]
+    },
+    {
+     "title": "Read from and write to them like files",
+     "text": "`/dev/null` discards everything written to it. `/dev/zero` gives endless zero bytes. `/dev/urandom` gives random bytes. Any tool that reads a file works with them.",
+     "run": [
+      {
+       "cmd": "head -c 8 /dev/zero | xxd",
+       "output": "00000000: 0000 0000 0000 0000                      ........"
+      },
+      {
+       "cmd": "echo hello > /dev/null; echo \"exit code: $?\"",
+       "output": "exit code: 0"
+      },
+      {
+       "cmd": "head -c 16 /dev/urandom | wc -c",
+       "output": "16"
+      }
+     ]
+    },
+    {
+     "title": "/proc shows processes and kernel state",
+     "text": "`/proc` is a **pseudo filesystem**. Each process has a directory `/proc/PID`. Files like `/proc/meminfo` and `/proc/loadavg` show kernel data.",
+     "run": [
+      {
+       "cmd": "cat /proc/loadavg | awk '{print NF, \"fields\"}'",
+       "output": "5 fields"
+      },
+      {
+       "cmd": "head -3 /proc/meminfo | cut -d: -f1",
+       "output": "MemTotal\nMemFree\nMemAvailable"
+      },
+      {
+       "cmd": "tr '\\0' ' ' < /proc/self/cmdline; echo",
+       "output": "tr \\0   "
+      }
+     ]
+    },
+    {
+     "title": "/sys shows devices and drivers",
+     "text": "`/sys` (sysfs) exposes the kernel's device model. Reading a file reads a value from a driver. Writing to some files changes a setting.",
+     "run": [
+      {
+       "cmd": "ls /sys/class | head -5",
+       "output": "ata_device\nata_link\nata_port\nbdi\nblock"
+      },
+      {
+       "cmd": "cat /sys/class/net/lo/mtu",
+       "output": "65536"
+      },
+      {
+       "cmd": "ls /sys/block",
+       "output": "dm-0\ndm-1\nsda"
+      }
+     ]
+    },
+    {
+     "title": "Underneath: the content is generated when you read",
+     "text": "These files are **not stored on disk**. The kernel creates the text each time you read. That is why `stat` reports size 0 while `wc` finds bytes.",
+     "run": [
+      {
+       "cmd": "stat -c 'size=%s type=%F' /proc/meminfo",
+       "output": "size=0 type=regular empty file"
+      },
+      {
+       "cmd": "wc -c < /proc/meminfo",
+       "output": "1476"
+      },
+      {
+       "cmd": "for d in /proc /sys /dev; do findmnt -no FSTYPE $d; done",
+       "output": "proc\nsysfs\ndevtmpfs"
+      }
+     ],
+     "under": "Each pseudo filesystem registers file operations with the VFS. When you `read()` a file in /proc, the kernel calls a function (for example `meminfo_proc_show`) that formats the current values into the buffer. No disk is involved."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which first character in `ls -l` marks a block device?",
+     "options": [
+      "-",
+      "d",
+      "b",
+      "c"
+     ],
+     "answer": 2,
+     "explain": "`b` = block device, `c` = character device, `d` = directory."
+    },
+    {
+     "q": "Why does `stat` report size 0 for /proc/meminfo?",
+     "options": [
+      "The file is empty on disk",
+      "The content is generated by the kernel when read",
+      "stat is broken for text files",
+      "The file is compressed"
+     ],
+     "answer": 1,
+     "explain": "Step 5: the file has no stored data. `wc -c` reads it and finds bytes."
+    },
+    {
+     "q": "Which file shows the kernel's load averages?",
+     "options": [
+      "/sys/loadavg",
+      "/proc/loadavg",
+      "/etc/loadavg",
+      "/dev/load"
+     ],
+     "answer": 1,
+     "explain": "/proc/loadavg."
+    },
+    {
+     "q": "What happens to data written to /dev/null?",
+     "options": [
+      "Stored in RAM",
+      "Discarded",
+      "Sent to the log",
+      "Written to the first disk"
+     ],
+     "answer": 1,
+     "explain": "The driver accepts the data and throws it away."
+    }
+   ],
+   "check": {
+    "scenario": "You need to know a process's command line and it has no `ps`-readable name. Which file do you read and why is it NUL-separated?",
+    "answer": "`/proc/PID/cmdline`. It is the raw `argv` array copied from `execve`. Strings in C end with a NUL byte, so arguments are separated by NULs (`tr '\\0' ' '` makes it readable)."
+   }
+  },
+  {
+   "id": "mounts-and-bind",
+   "title": "Mount points, the usr merge and bind mounts",
+   "level": "advanced",
+   "goal": "See how the single tree is built from several filesystems, and how to make the same directory appear in two places.\n\nWhy it matters: when `df` or a path behaves strangely, the cause is often a mount. Containers use the same mechanism.",
+   "setup": {
+    "note": "These commands only read the system. Output differs between distributions and machines.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "findmnt shows the tree of mounts",
+     "text": "Each mount attaches one filesystem to a directory. `findmnt` prints them as a tree. Here are the mounts of the top-level kernel filesystems.",
+     "run": [
+      {
+       "cmd": "findmnt -o TARGET,FSTYPE -t proc,sysfs,devtmpfs,tmpfs,cgroup2 | head -12",
+       "output": "TARGET           FSTYPE\n/proc            proc\n/sys             sysfs\n└─/sys/fs/cgroup cgroup2\n/dev             devtmpfs\n└─/dev/shm       tmpfs\n/run             tmpfs\n├─/run/user/1000 tmpfs\n└─/run/user/988  tmpfs"
+      }
+     ]
+    },
+    {
+     "title": "Which filesystem holds a path?",
+     "text": "`df` and `stat -f` tell you which filesystem a path lives on. `-T` adds the type.",
+     "run": [
+      {
+       "cmd": "df -hT /usr /tmp | awk '{print $1, $2, $7}'",
+       "output": "Filesystem Type Mounted\n/dev/mapper/ocivolume-root xfs /\n/dev/mapper/ocivolume-root xfs /"
+      },
+      {
+       "cmd": "stat -f -c 'type=%T' /usr /dev/shm",
+       "output": "type=xfs\ntype=tmpfs"
+      }
+     ]
+    },
+    {
+     "title": "Mounts can hide files",
+     "text": "Mounting on a directory **hides** what was there. This is a classic trap: files written before the mount seem to vanish.",
+     "run": [
+      {
+       "cmd": "mkdir -p /tmp/lab/dir && echo original > /tmp/lab/dir/old.txt",
+       "output": ""
+      },
+      {
+       "cmd": "sudo mount -t tmpfs tmpfs /tmp/lab/dir",
+       "output": ""
+      },
+      {
+       "cmd": "ls /tmp/lab/dir | wc -l",
+       "output": "0"
+      },
+      {
+       "cmd": "sudo umount /tmp/lab/dir && ls /tmp/lab/dir",
+       "output": "old.txt"
+      }
+     ],
+     "after": "After `umount` the original file is back. It was never deleted, only covered."
+    },
+    {
+     "title": "A bind mount shows a directory in a second place",
+     "text": "`mount --bind A B` makes the directory A visible at B. There is no copy: both paths lead to the same files.",
+     "run": [
+      {
+       "cmd": "mkdir -p /tmp/lab/a /tmp/lab/b && echo shared > /tmp/lab/a/f.txt",
+       "output": ""
+      },
+      {
+       "cmd": "sudo mount --bind /tmp/lab/a /tmp/lab/b",
+       "output": ""
+      },
+      {
+       "cmd": "cat /tmp/lab/b/f.txt",
+       "output": "shared"
+      },
+      {
+       "cmd": "echo more > /tmp/lab/b/g.txt; ls /tmp/lab/a",
+       "output": "f.txt\ng.txt"
+      },
+      {
+       "cmd": "sudo umount /tmp/lab/b",
+       "output": ""
+      }
+     ],
+     "under": "The kernel keeps a table of mounts per **mount namespace**. A path lookup walks the dentry tree and, at each mount point, jumps to the root of the mounted filesystem. A bind mount adds an entry that points at an existing directory instead of a new filesystem. Containers (module 37) give each container its own table."
+    },
+    {
+     "title": "Where the kernel lists its mounts",
+     "text": "The list is a file, `/proc/self/mountinfo`. Each line has the mount ID, parent ID, device, root, mount point and options.",
+     "run": [
+      {
+       "cmd": "head -2 /proc/self/mountinfo | cut -c1-100",
+       "output": "25 149 0:24 / /proc rw,nosuid,nodev,noexec,relatime shared:15 - proc proc rw\n26 149 0:25 / /sys rw,nosuid,nodev,noexec,relatime shared:3 - sysfs sysfs rw,seclabel"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "You mount a filesystem on /data, which already had files. What happens to those files?",
+     "options": [
+      "They are deleted",
+      "They are hidden until you unmount",
+      "They are merged",
+      "They move to /lost+found"
+     ],
+     "answer": 1,
+     "explain": "A mount covers the directory contents. They reappear after umount."
+    },
+    {
+     "q": "What does `mount --bind /a /b` do?",
+     "options": [
+      "Copies /a to /b",
+      "Makes /a visible at /b without copying",
+      "Moves /a",
+      "Links the disks"
+     ],
+     "answer": 1,
+     "explain": "Both paths show the same files."
+    },
+    {
+     "q": "Which file lists the mounts of the current process's mount namespace?",
+     "options": [
+      "/etc/fstab",
+      "/proc/self/mountinfo",
+      "/sys/mounts",
+      "/var/mounts"
+     ],
+     "answer": 1,
+     "explain": "/etc/fstab is only configuration. mountinfo is the live table."
+    }
+   ],
+   "check": {
+    "scenario": "`df` says /var is 100% full but `du -sh /var` shows only half. Name two mount-related reasons.",
+    "answer": "1. Files hidden **under a mount point**: data was written to /var/xyz before another filesystem was mounted on /var/xyz. `du` cannot see it, `df` counts it. Unmount (or bind-mount the parent elsewhere) to look.\n2. Deleted files still held open by a process (see module 18)."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "Name the purpose of /etc, /var, /usr and /tmp.",
+   "a": "/etc: configuration. /var: variable data (logs, caches, spools). /usr: installed programs and libraries. /tmp: temporary files for everyone, with the sticky bit. See [the tour](#/lesson/2/fhs-tour).",
+   "level": "beginner"
+  },
+  {
+   "q": "What does \"everything is a file\" mean in Linux?",
+   "a": "Files, directories, devices, pipes, sockets and kernel data are accessed through the same file calls (`open`, `read`, `write`, `close`) and file descriptors. A driver or the kernel provides the content. See [the lesson](#/lesson/2/everything-is-a-file).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why does /proc/meminfo show size 0?",
+   "a": "It is a pseudo file. The kernel generates the text when you read it, so there is no stored size.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the usr merge?",
+   "a": "/bin, /sbin, /lib and /lib64 are symbolic links to /usr/bin, /usr/sbin, /usr/lib, /usr/lib64. It lets /usr hold all vendor files, so it can be shared or mounted read-only.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Files vanished after you mounted a disk on a directory. How do you get them back?",
+   "a": "They are hidden under the mount, not deleted. Unmount the disk, or bind-mount the parent filesystem somewhere else to see them. See [mounts](#/lesson/2/mounts-and-bind).",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "FHS",
+   "def": "Filesystem Hierarchy Standard: the agreed purpose of the top-level directories.",
+   "lesson": "2/fhs-tour"
+  },
+  {
+   "term": "Device file",
+   "def": "A file in /dev that connects to a kernel driver. Character (c) or block (b).",
+   "lesson": "2/everything-is-a-file"
+  },
+  {
+   "term": "procfs",
+   "def": "The pseudo filesystem on /proc with process and kernel information generated on read.",
+   "lesson": "2/everything-is-a-file"
+  },
+  {
+   "term": "sysfs",
+   "def": "The pseudo filesystem on /sys that exposes the kernel's devices and drivers.",
+   "lesson": "2/everything-is-a-file"
+  },
+  {
+   "term": "Mount point",
+   "def": "A directory where another filesystem is attached to the tree.",
+   "lesson": "2/mounts-and-bind"
+  },
+  {
+   "term": "Bind mount",
+   "def": "A mount that makes an existing directory visible at a second path without copying.",
+   "lesson": "2/mounts-and-bind"
+  },
+  {
+   "term": "Sticky bit",
+   "def": "A permission bit on a directory: only the owner of an entry (or root) may delete or rename it. Shown as t, as on /tmp.",
+   "lesson": "2/fhs-tour"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "findmnt",
+   "desc": "Show all mounts as a tree.",
+   "topic": "Filesystem",
+   "lesson": "2/mounts-and-bind"
+  },
+  {
+   "cmd": "df -hT PATH",
+   "desc": "Show size, use and type of the filesystem holding PATH.",
+   "topic": "Filesystem",
+   "lesson": "2/mounts-and-bind"
+  },
+  {
+   "cmd": "mount --bind /a /b",
+   "desc": "Make /a visible at /b.",
+   "topic": "Filesystem",
+   "lesson": "2/mounts-and-bind"
+  },
+  {
+   "cmd": "ls -l /dev/NAME",
+   "desc": "Show device type (c or b) and major/minor numbers.",
+   "topic": "Filesystem",
+   "lesson": "2/everything-is-a-file"
+  },
+  {
+   "cmd": "cat /proc/self/mountinfo",
+   "desc": "Show the live mount table of this process.",
+   "topic": "Filesystem",
+   "lesson": "2/mounts-and-bind"
+  },
+  {
+   "cmd": "readlink -f PATH",
+   "desc": "Resolve all symbolic links in PATH.",
+   "topic": "Filesystem",
+   "lesson": "2/fhs-tour"
+  },
+  {
+   "cmd": "tr '\\0' ' ' < /proc/PID/cmdline",
+   "desc": "Show a process's command line.",
+   "topic": "Processes",
+   "lesson": "2/everything-is-a-file"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

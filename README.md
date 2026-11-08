@@ -48,10 +48,20 @@ Module file top level: `title`, `lessons[]`, `interview[]` (`{q, a, level}`), `g
 `commands[]` (`{cmd, desc, topic, lesson?}`, the cheat sheet), `exam[]` (extra exam questions, same shape as quiz), `labs[]`.
 Order lessons basics, intermediate, advanced; module interview questions come last (rule 7).
 
+## Recording rules (what `capture.py` guarantees)
+- Every lesson runs in **one** interactive `bash` session in `/tmp/lab`, so variables, `cd` and background jobs carry from step to step like at a terminal. Commands must not read stdin.
+- A step's `code` file is written into the session's current directory before its runs.
+- The recorder refuses to store output that contains this machine's hostname, IP addresses, MAC addresses or machine-id (the site is public). Use namespaces, loopback or documentation addresses (10.200.x.x, 192.0.2.x). A version string that looks like an IP can be allowed with `"ok": "ip"` on the run.
+- Two captures never run at once (a lock file), because they share `/tmp/lab`. Never use a bare `wait` in a recorded command when earlier steps started background jobs: wait for a specific PID (`wait $T`).
+- Never use `pkill -f` on a pattern that also appears in the command line that runs it.
+
 ## Lab JSON
 `{id, title, level, symptom, build[], teardown[], steps[{prompt, choices[{cmd, verdict: good|ok|poor, note, next}]}], conclusion}`.
 `next` is a step index, or `"done"` to finish; no `next` keeps the learner on the same step. `build` (may use sudo) prepares the
 situation during capture and is shown to the learner. Put destructive choices last-resort as `explanationOnly`.
+
+## Final exam
+Module 49 draws up to 20 random questions from **every lesson quiz** plus the `exam` array of any module file (module 49's own file holds extra mixed questions). Nothing to configure.
 
 ## Test locally
 ```

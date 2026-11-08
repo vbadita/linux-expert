@@ -1,0 +1,510 @@
+{
+ "title": "Advanced memory",
+ "lessons": [
+  {
+   "id": "hugepages-thp",
+   "title": "Huge pages and transparent huge pages",
+   "level": "advanced",
+   "goal": "Learn why the kernel has 2 MB pages next to 4 KB pages, the two ways to use them (explicit and transparent), and how to see which one a process got.\n\nWhy it matters: huge pages speed up large-memory programs (databases, JVMs), but transparent huge pages can cause latency spikes and memory bloat. Many database vendors tell you to turn them off.",
+   "setup": {
+    "note": "Programs are small C files. Steps with sudo read kernel data or reserve a few huge pages and release them again.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Why bigger pages",
+     "text": "Every memory access needs a translation from virtual to physical address. The CPU caches recent translations in the **TLB**, which has few entries. With 4 KB pages a 64 GB database needs 16 million translations; with 2 MB pages only 32 000. Fewer TLB misses means less time spent walking page tables.",
+     "run": [
+      {
+       "cmd": "getconf PAGESIZE",
+       "output": "4096"
+      },
+      {
+       "cmd": "grep -E '^(Hugepagesize|HugePages_Total|HugePages_Free|AnonHugePages):' /proc/meminfo",
+       "output": "AnonHugePages:   1159168 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugepagesize:       2048 kB"
+      }
+     ]
+    },
+    {
+     "title": "Explicit huge pages (hugetlbfs)",
+     "text": "You can **reserve** huge pages in advance with `vm.nr_hugepages`. They are taken from RAM at once, cannot be swapped, and programs must ask for them on purpose (`MAP_HUGETLB` or a hugetlbfs mount). We reserve 4 and release them again.",
+     "run": [
+      {
+       "cmd": "sudo sysctl -w vm.nr_hugepages=4",
+       "output": "vm.nr_hugepages = 4"
+      },
+      {
+       "cmd": "grep -E '^(HugePages_Total|HugePages_Free)' /proc/meminfo",
+       "output": "HugePages_Total:       4\nHugePages_Free:        4"
+      },
+      {
+       "cmd": "sudo sysctl -w vm.nr_hugepages=0",
+       "output": "vm.nr_hugepages = 0"
+      }
+     ]
+    },
+    {
+     "title": "Transparent huge pages (THP)",
+     "text": "With THP the kernel **automatically** backs aligned 2 MB regions with a huge page when a program touches them, and `khugepaged` merges small pages later. The mode is in `/sys/kernel/mm/transparent_hugepage/enabled`: `always`, `madvise` (only regions the program asks for) or `never`.",
+     "run": [
+      {
+       "cmd": "cat /sys/kernel/mm/transparent_hugepage/enabled",
+       "output": "[always] madvise never"
+      },
+      {
+       "cmd": "cat /sys/kernel/mm/transparent_hugepage/defrag",
+       "output": "always defer defer+madvise [madvise] never"
+      }
+     ]
+    },
+    {
+     "title": "See it in a process",
+     "text": "This program maps 64 MB aligned to 2 MB twice: once telling the kernel `MADV_NOHUGEPAGE`, once `MADV_HUGEPAGE`. After touching the memory it reads `AnonHugePages` from the process's `smaps_rollup`.",
+     "code": {
+      "file": "thp.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/mman.h>\n#include <unistd.h>\n\n#define SIZE (64UL << 20)\n\nstatic void run(const char *tag, int advice) {\n    void *p;\n    posix_memalign(&p, 2UL << 20, SIZE);          /* aligned to the 2 MB huge page size */\n    madvise(p, SIZE, advice);\n    memset(p, 1, SIZE);                            /* touch everything */\n    char cmd[160];\n    snprintf(cmd, sizeof cmd, \"printf '%%-22s' '%s'; grep AnonHugePages /proc/%d/smaps_rollup | awk '{print $2, $3}'\", tag, getpid());\n    system(cmd);\n    free(p);\n}\n\nint main(void) {\n    run(\"MADV_NOHUGEPAGE:\", MADV_NOHUGEPAGE);\n    run(\"MADV_HUGEPAGE:\", MADV_HUGEPAGE);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o thp thp.c",
+       "output": ""
+      },
+      {
+       "cmd": "./thp",
+       "output": "MADV_NOHUGEPAGE:      0 kB\nMADV_HUGEPAGE:        65536 kB"
+      }
+     ],
+     "under": "A fault in a THP-eligible region allocates a whole 2 MB page and zeroes all of it. That can take milliseconds if memory is fragmented and the kernel must **compact** memory first (`defrag`). It also means a program that touches one byte can consume 2 MB. These costs are the source of the \"disable THP\" advice for latency-sensitive databases."
+    },
+    {
+     "title": "Disabling THP",
+     "text": "To change it at run time, write to the sysfs file. To make it permanent use the kernel parameter `transparent_hugepage=madvise` (or `never`) or a tuned profile. The setting is lost at reboot otherwise.",
+     "run": [
+      {
+       "cmd": "echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled",
+       "explanationOnly": true,
+       "reason": "changes a system-wide setting of this machine; shown as the command you would run"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is the main benefit of huge pages?",
+     "options": [
+      "More RAM",
+      "Fewer TLB misses and smaller page tables",
+      "Faster disks",
+      "Encryption"
+     ],
+     "answer": 1,
+     "explain": "Fewer translations to cache."
+    },
+    {
+     "q": "How do explicit huge pages differ from THP?",
+     "options": [
+      "No difference",
+      "Explicit ones are reserved in advance; THP is automatic",
+      "THP is never swapped",
+      "Explicit pages are 4 KB"
+     ],
+     "answer": 1,
+     "explain": "Reserved with nr_hugepages vs. created on demand."
+    },
+    {
+     "q": "Which `enabled` mode gives huge pages only where a program asks?",
+     "options": [
+      "always",
+      "madvise",
+      "never",
+      "defrag"
+     ],
+     "answer": 1,
+     "explain": "madvise."
+    },
+    {
+     "q": "Why do some databases recommend disabling THP?",
+     "options": [
+      "It uses swap",
+      "Allocation and compaction stalls cause latency spikes",
+      "It breaks cgroups",
+      "It needs a module"
+     ],
+     "answer": 1,
+     "explain": "Page faults can stall while the kernel compacts memory."
+    }
+   ],
+   "check": {
+    "scenario": "After a kernel update a latency-sensitive Redis shows 200 ms spikes. `AnonHugePages` is large. What do you try?",
+    "answer": "Set THP to `madvise` or `never` (`echo never > /sys/kernel/mm/transparent_hugepage/enabled`, persistently via the boot parameter or tuned), restart Redis and compare latency. Redis itself warns about THP at startup for this reason."
+   }
+  },
+  {
+   "id": "smaps-leaks-numa",
+   "title": "/proc/PID/smaps, finding leaks, and NUMA",
+   "level": "advanced",
+   "goal": "Learn to read a process's memory map in detail, to find a leak by watching resident size over time, and to see what NUMA means on a machine.\n\nWhy it matters: `ps` gives one number. `smaps` tells you whether memory is heap, shared libraries or mapped files, private or shared. This is how you separate a real leak from normal behaviour.",
+   "setup": {
+    "note": "Programs are small C files. Steps with sudo read kernel data or reserve a few huge pages and release them again.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The memory map",
+     "text": "`pmap` (or `/proc/PID/maps`) lists each mapped region: address, size, permissions and what backs it (a file, `[heap]`, `[stack]` or nothing for anonymous memory).",
+     "run": [
+      {
+       "cmd": "pmap -x $$ | head -n 6 | cut -c1-72",
+       "output": "3464477:   bash --noprofile --norc --noediting -i\nAddress           Kbytes     RSS   Dirty Mode  Mapping\n0000aaaad9040000    1260    1084       0 r-x-- bash\n0000aaaad918c000      16      16      16 r---- bash\n0000aaaad9190000      36      36      36 rw--- bash\n0000aaaad9199000      44      20      20 rw---   [ anon ]"
+      }
+     ]
+    },
+    {
+     "title": "smaps: details per region",
+     "text": "`/proc/PID/smaps` repeats every region with counters: `Rss`, `Pss`, `Shared_Clean`, `Private_Dirty`, `Anonymous` and more. `smaps_rollup` sums them for the whole process. The key split: **private dirty / anonymous** memory is what the process really owns.",
+     "run": [
+      {
+       "cmd": "grep -E '^(Rss|Pss|Shared_Clean|Private_Clean|Private_Dirty|Anonymous):' /proc/$$/smaps_rollup",
+       "output": "Rss:                7096 kB\nPss:                1471 kB\nShared_Clean:       6720 kB\nPrivate_Clean:        64 kB\nPrivate_Dirty:       312 kB\nAnonymous:           312 kB"
+      }
+     ]
+    },
+    {
+     "title": "A leaking program",
+     "text": "`leak.c` allocates 1 MB every 100 ms and never frees. After three seconds it stops allocating and sleeps.",
+     "code": {
+      "file": "leak.c",
+      "lang": "c",
+      "src": "#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n\nint main(void) {\n    for (int i = 0; i < 30; i++) {\n        char *p = malloc(1 << 20);       /* 1 MB */\n        memset(p, 1, 1 << 20);\n        usleep(100000);                  /* the pointer is lost: a leak */\n    }\n    sleep(3);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o leak leak.c",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "Watch RSS grow",
+     "text": "A leak is **steady growth of RSS (or anonymous memory) over time** with no matching workload growth. Sample it a few times.",
+     "run": [
+      {
+       "cmd": "./leak & p=$!; for i in 1 2 3 4; do sleep 1; echo \"t=${i}s RSS: $(ps -o rss= -p $p) kB\"; done; kill $p 2>/dev/null",
+       "output": "[1] 3464529\nt=1s RSS: 12360 kB\nt=2s RSS: 22640 kB\nt=3s RSS: 31892 kB\nt=4s RSS: 31892 kB"
+      }
+     ],
+     "under": "A leak in a C program is memory that is allocated and no longer reachable. Tools: `valgrind --leak-check=full`, `ltrace -e malloc+free`, address sanitizer, or eBPF `memleak-bpfcc`. In garbage-collected languages growth with a stable live set is usually a retention bug (a cache or list that is never trimmed)."
+    },
+    {
+     "title": "NUMA",
+     "text": "On multi-socket servers each CPU has memory attached close to it (**NUMA node**). Access to another node's memory is slower. This VM has one node, but the commands are the same everywhere.",
+     "run": [
+      {
+       "cmd": "numactl --hardware | head -n 3",
+       "output": "available: 1 nodes (0)\nnode 0 cpus: 0\nnode 0 size: 5642 MB"
+      },
+      {
+       "cmd": "ls /sys/devices/system/node",
+       "output": "has_cpu\nhas_generic_initiator\nhas_memory\nhas_normal_memory\nnode0\nonline\npossible\npower\nuevent"
+      },
+      {
+       "cmd": "lscpu | grep -i 'NUMA node'",
+       "output": "NUMA node(s):                            1\nNUMA node0 CPU(s):                       0"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which counter tells you how much memory a process owns privately and has modified?",
+     "options": [
+      "Shared_Clean",
+      "Private_Dirty / Anonymous",
+      "VSZ",
+      "Cached"
+     ],
+     "answer": 1,
+     "explain": "These pages belong to the process alone."
+    },
+    {
+     "q": "What is the typical sign of a leak?",
+     "options": [
+      "High VSZ",
+      "RSS grows steadily over time without workload growth",
+      "High load average",
+      "Many threads"
+     ],
+     "answer": 1,
+     "explain": "Steady growth."
+    },
+    {
+     "q": "What does NUMA mean for performance?",
+     "options": [
+      "All memory has the same speed",
+      "Memory attached to another CPU node is slower to access",
+      "RAM is encrypted",
+      "Cache is shared"
+     ],
+     "answer": 1,
+     "explain": "Local access is faster."
+    },
+    {
+     "q": "Which file sums the smaps counters for a whole process?",
+     "options": [
+      "maps",
+      "smaps_rollup",
+      "statm",
+      "stack"
+     ],
+     "answer": 1,
+     "explain": "/proc/PID/smaps_rollup."
+    }
+   ],
+   "check": {
+    "scenario": "A Java service's RSS grows by 50 MB per hour but the heap graph is flat. Where do you look?",
+    "answer": "At memory outside the Java heap: native allocations (direct buffers, JNI, thread stacks), glibc malloc arenas fragmentation (try `MALLOC_ARENA_MAX=2`), and mapped files. Use `pmap -x`/`smaps` to see which regions grow, and JVM Native Memory Tracking (`-XX:NativeMemoryTracking=summary`)."
+   }
+  },
+  {
+   "id": "slab-allocator",
+   "title": "The slab allocator: kernel memory and slabtop",
+   "level": "expert",
+   "goal": "Learn how the kernel allocates its own small objects (inodes, dentries, network buffers) and how to see which kind of object uses memory.\n\nWhy it matters: when `free` shows memory used but no process owns it, the answer is often the kernel's slab caches (for example millions of cached directory entries).",
+   "setup": {
+    "note": "Programs are small C files. Steps with sudo read kernel data or reserve a few huge pages and release them again.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Slab in meminfo",
+     "text": "The kernel allocates many small, fixed-size objects. A **slab cache** keeps pages of these objects ready so allocation is fast and memory does not fragment. `Slab` is the total, `SReclaimable` can be freed under pressure, `SUnreclaim` cannot.",
+     "run": [
+      {
+       "cmd": "grep -E '^(Slab|SReclaimable|SUnreclaim):' /proc/meminfo | awk '{printf \"%s %d MB\\n\", $1, $2/1024}'",
+       "output": "Slab: 251 MB\nSReclaimable: 109 MB\nSUnreclaim: 142 MB"
+      }
+     ]
+    },
+    {
+     "title": "slabtop",
+     "text": "`slabtop` lists the caches sorted by size. It needs root. Names tell the object: `dentry` (directory entries), `inode_cache`, `kmalloc-64` (general 64-byte allocations), `vm_area_struct` (memory mappings).",
+     "run": [
+      {
+       "cmd": "sudo slabtop -o -s c | sed -n '8,13p' | awk '{print $1, $2, $3, $7, $NF}'",
+       "output": "41056 39679 96% 41056K xfs_inode\n54880 22826 41% 31360K radix_tree_node\n20936 11628 55% 20936K kmalloc-rnd-07-1k\n70749 61608 87% 13476K dentry\n77790 77397 99% 10372K kernfs_node_cache\n906 876 96% 9664K task_struct"
+      }
+     ],
+     "after": "Columns: OBJS (objects), ACTIVE, USE (percent in use), CACHE SIZE, NAME. The top entries differ from machine to machine."
+    },
+    {
+     "title": "Make a cache grow",
+     "text": "Every file or directory entry we touch creates a **dentry** (cached name) and often an inode object. We create 20 000 empty files in `/dev/shm` (a RAM file system) and compare the object count of the `dentry` cache before and after.",
+     "run": [
+      {
+       "cmd": "sudo grep -E '^dentry ' /proc/slabinfo | awk '{print \"dentry objects before:\", $2}'",
+       "output": "dentry objects before: 61608"
+      },
+      {
+       "cmd": "mkdir -p /dev/shm/lab && cd /dev/shm/lab && seq 1 20000 | xargs touch && cd /tmp/lab",
+       "output": ""
+      },
+      {
+       "cmd": "sudo grep -E '^dentry ' /proc/slabinfo | awk '{print \"dentry objects after: \", $2}'",
+       "output": "dentry objects after:  81564"
+      },
+      {
+       "cmd": "rm -r /dev/shm/lab; echo removed",
+       "output": "removed"
+      }
+     ],
+     "under": "The slab allocator (SLUB in current kernels) keeps one cache per object type and size. Each cache holds slabs: contiguous pages cut into equal slots. Freed objects go back to the slab for quick reuse. Under memory pressure the kernel's shrinkers ask caches such as dentry and inode to release unused entries (`SReclaimable`)."
+    },
+    {
+     "title": "Dropping the reclaimable caches",
+     "text": "Writing to `drop_caches` asks the kernel to free reclaimable slab objects and page cache. This is a diagnostic tool, not a tuning knob: it throws away useful cache and slows the next reads.",
+     "run": [
+      {
+       "cmd": "sudo grep -E '^dentry ' /proc/slabinfo | awk '{print \"before:\", $2}'",
+       "output": "before: 61564"
+      },
+      {
+       "cmd": "echo 2 | sudo tee /proc/sys/vm/drop_caches > /dev/null; sudo grep -E '^dentry ' /proc/slabinfo | awk '{print \"after: \", $2}'",
+       "output": "after:  13854"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is a slab cache?",
+     "options": [
+      "A disk cache",
+      "A pool of equal-sized kernel objects",
+      "A swap area",
+      "A CPU cache"
+     ],
+     "answer": 1,
+     "explain": "It makes small kernel allocations fast."
+    },
+    {
+     "q": "Which `meminfo` field cannot be freed under memory pressure?",
+     "options": [
+      "SReclaimable",
+      "SUnreclaim",
+      "Cached",
+      "Buffers"
+     ],
+     "answer": 1,
+     "explain": "SUnreclaim."
+    },
+    {
+     "q": "Which tool lists slab caches by size?",
+     "options": [
+      "slabtop",
+      "vmstat",
+      "top",
+      "free"
+     ],
+     "answer": 0,
+     "explain": "`slabtop` (root)."
+    },
+    {
+     "q": "What is a `dentry`?",
+     "options": [
+      "A directory entry cache object (name to inode)",
+      "A device entry",
+      "A swap entry",
+      "A socket"
+     ],
+     "answer": 0,
+     "explain": "The VFS caches path components as dentries."
+    }
+   ],
+   "check": {
+    "scenario": "`free` says 20 GB used, but `ps` shows processes using only 6 GB. How do you find the rest?",
+    "answer": "Look at the kernel: `grep -E 'Slab|SUnreclaim|PageTables|KernelStack' /proc/meminfo` and `sudo slabtop -o -s c`. A huge `dentry`/`inode_cache` or network object count (for example from millions of small files or sockets) explains it. Also check shared memory (`Shmem`, tmpfs), and page cache."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What are huge pages and why use them?",
+   "a": "2 MB (or 1 GB) pages instead of 4 KB. They reduce TLB misses and page-table size, which speeds up programs with large memory. See [the lesson](#/lesson/16/hugepages-thp).",
+   "level": "advanced"
+  },
+  {
+   "q": "Why is THP sometimes disabled for databases?",
+   "a": "Allocation and compaction of 2 MB pages can stall the process and cause latency spikes; memory use can also bloat. Many databases recommend `madvise` or `never`.",
+   "level": "advanced"
+  },
+  {
+   "q": "How do you tell a leak from a large but stable footprint?",
+   "a": "Watch RSS or private/anonymous memory over time: steady growth without workload growth is a leak. VSZ alone is not evidence. See [the lesson](#/lesson/16/smaps-leaks-numa).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is NUMA?",
+   "a": "Non-uniform memory access: each CPU socket has local memory; remote memory is slower. Use `numactl`, `numastat` and memory policy to keep processes close to their memory.",
+   "level": "advanced"
+  },
+  {
+   "q": "Where does memory go that no process owns?",
+   "a": "Kernel memory: slab caches (dentries, inodes, network buffers), page tables, kernel stacks, tmpfs/shmem, and the page cache. See [the slab lesson](#/lesson/16/slab-allocator).",
+   "level": "expert"
+  },
+  {
+   "q": "What does SReclaimable mean?",
+   "a": "Slab memory the kernel can free under pressure, mostly dentry and inode caches.",
+   "level": "expert"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "TLB",
+   "def": "Translation Lookaside Buffer: the CPU cache of virtual-to-physical page translations.",
+   "lesson": "16/hugepages-thp"
+  },
+  {
+   "term": "Huge page",
+   "def": "A 2 MB (or 1 GB) memory page used instead of many 4 KB pages.",
+   "lesson": "16/hugepages-thp"
+  },
+  {
+   "term": "THP",
+   "def": "Transparent Huge Pages: automatic use of huge pages by the kernel.",
+   "lesson": "16/hugepages-thp"
+  },
+  {
+   "term": "PSS",
+   "def": "Proportional set size: a process's memory with shared pages divided by the number of sharers.",
+   "lesson": "16/smaps-leaks-numa"
+  },
+  {
+   "term": "NUMA",
+   "def": "Non-uniform memory access: memory speed depends on which CPU accesses it.",
+   "lesson": "16/smaps-leaks-numa"
+  },
+  {
+   "term": "Slab",
+   "def": "Kernel allocator that keeps pools of equal-sized objects.",
+   "lesson": "16/slab-allocator"
+  },
+  {
+   "term": "Dentry",
+   "def": "A cached directory entry that maps a name to an inode.",
+   "lesson": "16/slab-allocator"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "grep -i huge /proc/meminfo",
+   "desc": "Show huge page counters.",
+   "topic": "Memory",
+   "lesson": "16/hugepages-thp"
+  },
+  {
+   "cmd": "cat /sys/kernel/mm/transparent_hugepage/enabled",
+   "desc": "Show the THP mode.",
+   "topic": "Memory",
+   "lesson": "16/hugepages-thp"
+  },
+  {
+   "cmd": "pmap -x PID",
+   "desc": "Show the memory map of a process.",
+   "topic": "Memory",
+   "lesson": "16/smaps-leaks-numa"
+  },
+  {
+   "cmd": "cat /proc/PID/smaps_rollup",
+   "desc": "Summarise process memory by kind.",
+   "topic": "Memory",
+   "lesson": "16/smaps-leaks-numa"
+  },
+  {
+   "cmd": "numactl --hardware",
+   "desc": "Show NUMA nodes.",
+   "topic": "Memory",
+   "lesson": "16/smaps-leaks-numa"
+  },
+  {
+   "cmd": "sudo slabtop -o -s c",
+   "desc": "Show the biggest kernel slab caches.",
+   "topic": "Memory",
+   "lesson": "16/slab-allocator"
+  },
+  {
+   "cmd": "grep -E 'Slab|SReclaimable|SUnreclaim' /proc/meminfo",
+   "desc": "Show kernel slab memory.",
+   "topic": "Memory",
+   "lesson": "16/slab-allocator"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

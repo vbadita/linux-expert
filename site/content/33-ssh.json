@@ -1,0 +1,685 @@
+{
+ "title": "SSH in depth",
+ "lessons": [
+  {
+   "id": "ssh-keys-hostkeys",
+   "title": "SSH keys, host keys and known_hosts",
+   "level": "beginner",
+   "goal": "Learn how SSH proves who you are (a key pair) and who the server is (a host key), and what the warnings mean.\n\nWhy it matters: password logins on the internet get brute-forced all day. Key logins are the norm, and \"REMOTE HOST IDENTIFICATION HAS CHANGED\" is a message you must understand rather than silence.",
+   "setup": {
+    "note": "These steps run a private `sshd` on 127.0.0.1 as your own user (port 2222), so there is a real server to log in to without touching the system's sshd. It can only log in as you. All files live in /tmp/lab/ssh. Absolute paths matter: sshd re-executes itself and changes directory.",
+    "commands": [
+     "mkdir -p /tmp/lab/ssh && cd /tmp/lab/ssh && chmod 700 /tmp/lab/ssh",
+     "if [ -f /tmp/lab/ssh/sshd.pid ]; then kill $(cat /tmp/lab/ssh/sshd.pid); fi; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Two identities to check",
+     "text": "In SSH both sides prove themselves. The **server** shows its **host key**; you check it against `~/.ssh/known_hosts` so you know it is the machine you meant. You show a **user key** (a key pair); the server checks the public half in `~/.ssh/authorized_keys`. The private half never leaves your machine.",
+     "run": [
+      {
+       "cmd": "ssh -V 2>&1 | cut -d, -f1",
+       "output": "OpenSSH_9.9p1"
+      }
+     ]
+    },
+    {
+     "title": "Create a key pair",
+     "text": "`ssh-keygen -t ed25519` makes a key pair: `userkey` (private, secret) and `userkey.pub` (public, to be copied to servers). `-N ''` means no passphrase (for this lab; use a passphrase for real keys). `-C` is a comment.",
+     "run": [
+      {
+       "cmd": "ssh-keygen -q -t ed25519 -N '' -C lab-user -f userkey; ls userkey userkey.pub",
+       "output": "userkey\nuserkey.pub"
+      },
+      {
+       "cmd": "ssh-keygen -lf userkey.pub | sed -E 's/SHA256:[A-Za-z0-9+\\/]+/SHA256:<fingerprint>/'",
+       "output": "256 SHA256:<fingerprint> lab-user (ED25519)"
+      },
+      {
+       "cmd": "cut -d' ' -f1,3 userkey.pub",
+       "output": "ssh-ed25519 lab-user"
+      }
+     ],
+     "after": "A public key line is `type base64-key comment`. The fingerprint is a hash of it that you can compare by eye."
+    },
+    {
+     "title": "Permissions protect the private key",
+     "text": "ssh refuses to use a private key that other users can read. This is a safety check and a very common error.",
+     "run": [
+      {
+       "cmd": "stat -c '%a %n' userkey userkey.pub",
+       "output": "600 userkey\n644 userkey.pub"
+      },
+      {
+       "cmd": "chmod 644 userkey; ssh -p 2222 -i userkey opc@127.0.0.1 true 2>&1 | head -n 4 | sed -E 's/^@+ ?//; s/ ?@+$//' | grep -v '^$'; chmod 600 userkey",
+       "output": "ssh: connect to host 127.0.0.1 port 2222: Connection refused\r"
+      }
+     ]
+    },
+    {
+     "title": "Start the lab server",
+     "text": "We create a host key for the server, authorise our public key and start `sshd` with this configuration.",
+     "code": {
+      "file": "sshd_config",
+      "lang": "sh",
+      "src": "Port 2222\nListenAddress 127.0.0.1\nHostKey /tmp/lab/ssh/hostkey\nAuthorizedKeysFile /tmp/lab/ssh/authorized_keys\nPidFile /tmp/lab/ssh/sshd.pid\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\nPerSourcePenalties no\nLogLevel VERBOSE\n"
+     },
+     "run": [
+      {
+       "cmd": "cat > sshd_config <<'EOF'\nPort 2222\nListenAddress 127.0.0.1\nHostKey /tmp/lab/ssh/hostkey\nAuthorizedKeysFile /tmp/lab/ssh/authorized_keys\nPidFile /tmp/lab/ssh/sshd.pid\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\nPerSourcePenalties no\nLogLevel VERBOSE\nEOF",
+       "output": ""
+      },
+      {
+       "cmd": "ssh-keygen -q -t ed25519 -N '' -C lab-host -f hostkey; cp userkey.pub authorized_keys; chmod 600 authorized_keys",
+       "output": ""
+      },
+      {
+       "cmd": "/usr/sbin/sshd -f /tmp/lab/ssh/sshd_config -E /tmp/lab/ssh/sshd.log; sleep 1; ss -ltn 'sport = :2222' | awk 'NR>1 {print \"sshd listening on\", $4}'",
+       "output": "sshd listening on 127.0.0.1:2222"
+      }
+     ]
+    },
+    {
+     "title": "First connection: trust on first use",
+     "text": "The first time, ssh does not know the server. `StrictHostKeyChecking=accept-new` records an unknown host key automatically (the default is to ask you to type `yes`). The next connection is silent.",
+     "run": [
+      {
+       "cmd": "ssh -p 2222 -i userkey -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/lab/ssh/known_hosts -o StrictHostKeyChecking=accept-new opc@127.0.0.1 'echo hello; id -un' 2>&1",
+       "output": "Warning: Permanently added '[127.0.0.1]:2222' (ED25519) to the list of known hosts.\r\nhello\nopc"
+      },
+      {
+       "cmd": "ssh -p 2222 -i userkey -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/lab/ssh/known_hosts opc@127.0.0.1 'echo second login, no warning' 2>&1",
+       "output": "second login, no warning"
+      },
+      {
+       "cmd": "cut -d' ' -f1,2 known_hosts",
+       "output": "[127.0.0.1]:2222 ssh-ed25519"
+      }
+     ]
+    },
+    {
+     "title": "The key changes: a warning you must not ignore",
+     "text": "We replace the server's host key (as if the machine were reinstalled, or an attacker answered instead). ssh refuses to connect and explains why.",
+     "run": [
+      {
+       "cmd": "kill $(cat /tmp/lab/ssh/sshd.pid); sleep 0.3; echo 'sshd stopped'",
+       "output": "sshd stopped"
+      },
+      {
+       "cmd": "ssh-keygen -q -t ed25519 -N '' -C lab-host2 -f hostkey2; sed -i 's#/tmp/lab/ssh/hostkey$#/tmp/lab/ssh/hostkey2#' sshd_config; /usr/sbin/sshd -f /tmp/lab/ssh/sshd_config -E /tmp/lab/ssh/sshd.log; sleep 1; ss -ltn 'sport = :2222' | awk 'NR>1 {print \"sshd listening on\", $4}'",
+       "output": "sshd listening on 127.0.0.1:2222"
+      },
+      {
+       "cmd": "ssh -p 2222 -i userkey -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/lab/ssh/known_hosts opc@127.0.0.1 true 2>&1 | grep -E 'WARNING|DNS spoofing|Host key verification failed' | sed -E 's/^@+ ?//; s/ ?@+$//'",
+       "output": "   WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\nHost key verification failed.\r"
+      },
+      {
+       "cmd": "ssh-keygen -R '[127.0.0.1]:2222' -f known_hosts 2>&1 | head -n 2 | sed 's/ line [0-9]*//'",
+       "output": "# Host [127.0.0.1]:2222 found:\nknown_hosts updated."
+      },
+      {
+       "cmd": "ssh -p 2222 -i userkey -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/lab/ssh/known_hosts -o StrictHostKeyChecking=accept-new opc@127.0.0.1 'echo works again' 2>&1 | tail -n 1",
+       "output": "works again"
+      }
+     ],
+     "under": "Never type `yes` or delete the entry blindly. First ask: was the server rebuilt? Compare the fingerprint (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server, over a trusted channel). Large organisations distribute host keys with SSH certificates or DNS SSHFP records."
+    },
+    {
+     "title": "What the server logged",
+     "text": "With `LogLevel VERBOSE`, sshd logs the key fingerprint used for each login, which is the audit trail of who connected with which key.",
+     "run": [
+      {
+       "cmd": "grep -E 'Accepted publickey' sshd.log | sed -E 's/^.*sshd\\[[0-9]+\\]: //; s/port [0-9]+/port N/; s/SHA256:[A-Za-z0-9+\\/]+/SHA256:<fp>/' | head -n 2",
+       "output": "Accepted publickey for opc from 127.0.0.1 port N ssh2: ED25519 SHA256:<fp>\r\nAccepted publickey for opc from 127.0.0.1 port N ssh2: ED25519 SHA256:<fp>\r"
+      },
+      {
+       "cmd": "kill $(cat /tmp/lab/ssh/sshd.pid); sleep 0.3; echo 'sshd stopped'",
+       "output": "sshd stopped"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which file on the server lists the public keys allowed to log in?",
+     "options": [
+      "known_hosts",
+      "authorized_keys",
+      "id_ed25519",
+      "sshd_config"
+     ],
+     "answer": 1,
+     "explain": "~/.ssh/authorized_keys."
+    },
+    {
+     "q": "What does `known_hosts` store?",
+     "options": [
+      "Your private keys",
+      "The public host keys of servers you have connected to",
+      "Passwords",
+      "Allowed users"
+     ],
+     "answer": 1,
+     "explain": "It lets you detect a changed or fake server."
+    },
+    {
+     "q": "Why does ssh refuse a private key with mode 644?",
+     "options": [
+      "Bug",
+      "Others could read it; it must be accessible only by you",
+      "The file is too big",
+      "Wrong type"
+     ],
+     "answer": 1,
+     "explain": "Private keys must be 600 (or 400)."
+    },
+    {
+     "q": "You see `REMOTE HOST IDENTIFICATION HAS CHANGED`. What do you do first?",
+     "options": [
+      "Delete known_hosts",
+      "Find out why the host key changed before trusting it again",
+      "Use -o StrictHostKeyChecking=no",
+      "Reboot"
+     ],
+     "answer": 1,
+     "explain": "It may be a reinstall or an attack."
+    }
+   ],
+   "check": {
+    "scenario": "You must give a colleague access to a server. How do they send you their key, and what do you put in authorized_keys?",
+    "answer": "They send the **public** key (`~/.ssh/id_ed25519.pub`, one line); it is not secret. You append the line to `~/.ssh/authorized_keys` of the target account (mode 600, directory 700), ideally with restrictions such as `from=\"10.0.0.0/8\"`, and verify the fingerprint with them (`ssh-keygen -lf`). Never ask for their private key."
+   }
+  },
+  {
+   "id": "ssh-config-agent",
+   "title": "~/.ssh/config, the agent and restricted keys",
+   "level": "intermediate",
+   "goal": "Shorten connections with a config file, keep a passphrase-protected key usable with `ssh-agent`, and restrict what a key may do.\n\nWhy it matters: a good config file saves typing and mistakes, an agent lets you use passphrases without typing them all day, and restricted keys limit the damage of a stolen key.",
+   "setup": {
+    "note": "These steps run a private `sshd` on 127.0.0.1 as your own user (port 2222), so there is a real server to log in to without touching the system's sshd. It can only log in as you. All files live in /tmp/lab/ssh. Absolute paths matter: sshd re-executes itself and changes directory.",
+    "commands": [
+     "mkdir -p /tmp/lab/ssh && cd /tmp/lab/ssh && chmod 700 /tmp/lab/ssh",
+     "if [ -f /tmp/lab/ssh/sshd.pid ]; then kill $(cat /tmp/lab/ssh/sshd.pid); fi; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Start the lab server",
+     "text": "Keys and the server are created as in the previous lesson.",
+     "run": [
+      {
+       "cmd": "cat > sshd_config <<'EOF'\nPort 2222\nListenAddress 127.0.0.1\nHostKey /tmp/lab/ssh/hostkey\nAuthorizedKeysFile /tmp/lab/ssh/authorized_keys\nPidFile /tmp/lab/ssh/sshd.pid\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\nPerSourcePenalties no\nLogLevel VERBOSE\nEOF",
+       "output": ""
+      },
+      {
+       "cmd": "cd /tmp/lab/ssh && ssh-keygen -q -t ed25519 -N '' -C lab-host -f hostkey && ssh-keygen -q -t ed25519 -N '' -C lab-user -f userkey && cp userkey.pub authorized_keys && chmod 600 authorized_keys userkey",
+       "output": ""
+      },
+      {
+       "cmd": "/usr/sbin/sshd -f /tmp/lab/ssh/sshd_config -E /tmp/lab/ssh/sshd.log; sleep 1; ss -ltn 'sport = :2222' | awk 'NR>1 {print \"sshd listening on\", $4}'",
+       "output": "sshd listening on 127.0.0.1:2222"
+      }
+     ]
+    },
+    {
+     "title": "A config file",
+     "text": "`~/.ssh/config` holds per-host settings. `Host NAME` blocks match by name or wildcard; the **first** value found for an option wins, so put specific hosts first and `Host *` defaults last. `-F FILE` uses another file (the default is `~/.ssh/config`).",
+     "code": {
+      "file": "config",
+      "lang": "sh",
+      "src": "Host labhost\n    HostName 127.0.0.1\n    Port 2222\n    User opc\n    IdentityFile /tmp/lab/ssh/userkey\n    IdentitiesOnly yes\n\nHost *\n    UserKnownHostsFile /tmp/lab/ssh/known_hosts\n    StrictHostKeyChecking accept-new\n    LogLevel ERROR\n    ServerAliveInterval 30\n"
+     },
+     "run": [
+      {
+       "cmd": "ssh -F config labhost 'echo via the alias; id -un'",
+       "output": "via the alias\nopc"
+      }
+     ]
+    },
+    {
+     "title": "See the effective settings",
+     "text": "`ssh -G HOST` prints the final configuration ssh would use, after all `Host` blocks are applied. Use it to debug a config.",
+     "run": [
+      {
+       "cmd": "ssh -G -F config labhost | grep -E '^(hostname|port|user|identityfile|identitiesonly|serveraliveinterval) '",
+       "output": "user opc\nhostname 127.0.0.1\nport 2222\nidentitiesonly yes\nserveraliveinterval 30\nidentityfile /tmp/lab/ssh/userkey"
+      }
+     ]
+    },
+    {
+     "title": "A key with a passphrase",
+     "text": "A passphrase encrypts the private key file, so a stolen file is useless. But then every login asks for it. We create such a key, authorise it, and try a non-interactive login (`BatchMode` forbids prompts).",
+     "run": [
+      {
+       "cmd": "ssh-keygen -q -t ed25519 -N 'lab-pass' -C lab-pass-key -f pkey; cp pkey.pub authorized_keys; chmod 600 authorized_keys",
+       "output": ""
+      },
+      {
+       "cmd": "ssh -F config -o BatchMode=yes -i pkey labhost true 2>&1",
+       "output": "opc@127.0.0.1: Permission denied (publickey).\r"
+      }
+     ]
+    },
+    {
+     "title": "ssh-agent holds the decrypted key",
+     "text": "`ssh-agent` is a small process that keeps decrypted keys **in memory** and signs login challenges for ssh. You type the passphrase once with `ssh-add`. (A tiny helper script feeds the passphrase here; normally you type it.)",
+     "run": [
+      {
+       "cmd": "eval \"$(ssh-agent -s)\" > /dev/null; ssh-add -l 2>&1",
+       "output": "The agent has no identities."
+      },
+      {
+       "cmd": "printf '#!/bin/sh\\necho lab-pass\\n' > askpass.sh; chmod +x askpass.sh; SSH_ASKPASS=./askpass.sh SSH_ASKPASS_REQUIRE=force ssh-add pkey < /dev/null 2>&1",
+       "output": "Identity added: pkey (lab-pass-key)"
+      },
+      {
+       "cmd": "ssh-add -l | awk '{print $1, $NF}'",
+       "output": "256 (ED25519)"
+      },
+      {
+       "cmd": "ssh -F config -o BatchMode=yes -i pkey labhost 'id -un'",
+       "output": "opc"
+      }
+     ],
+     "under": "The agent listens on a Unix socket named in `$SSH_AUTH_SOCK`. ssh sends it the data to sign; the private key never leaves the agent. **Agent forwarding** (`ssh -A`) makes that socket available on the remote host so you can hop onward. A root user on that host could use your agent while you are connected: prefer `ProxyJump` (next lesson) to forwarding."
+    },
+    {
+     "title": "Forwarding the agent, and stopping it",
+     "text": "With `-A` the remote side gets a socket path in `SSH_AUTH_SOCK`. `ssh-agent -k` stops the agent.",
+     "run": [
+      {
+       "cmd": "ssh -F config -A -i pkey labhost 'echo $SSH_AUTH_SOCK | cut -c1-9'",
+       "output": "/tmp/ssh-"
+      },
+      {
+       "cmd": "ssh-agent -k | head -n 1",
+       "output": "unset SSH_AUTH_SOCK;"
+      }
+     ]
+    },
+    {
+     "title": "Restrict what a key can do",
+     "text": "Options before the key in `authorized_keys` restrict it: `command=\"...\"` forces one command whatever the client asks for, `from=\"...\"` limits source addresses, `no-pty`, `no-port-forwarding`, `restrict` (all of them off). This is how backup or deployment keys are limited.",
+     "run": [
+      {
+       "cmd": "printf 'command=\"echo restricted; id -un\",no-pty,no-port-forwarding ' > authorized_keys; cat userkey.pub >> authorized_keys; chmod 600 authorized_keys",
+       "output": ""
+      },
+      {
+       "cmd": "ssh -F config labhost 'cat /etc/shadow'",
+       "output": "restricted\nopc"
+      },
+      {
+       "cmd": "kill $(cat /tmp/lab/ssh/sshd.pid); sleep 0.3; echo 'sshd stopped'",
+       "output": "sshd stopped"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "In an ssh config, which value wins when two `Host` blocks set the same option?",
+     "options": [
+      "The last one",
+      "The first one found",
+      "The longest",
+      "Random"
+     ],
+     "answer": 1,
+     "explain": "The first obtained value is used."
+    },
+    {
+     "q": "What does `ssh -G host` do?",
+     "options": [
+      "Generates a key",
+      "Prints the effective configuration for host",
+      "Starts an agent",
+      "Connects with debug"
+     ],
+     "answer": 1,
+     "explain": "It resolves all Host blocks."
+    },
+    {
+     "q": "Where does the agent keep the decrypted private key?",
+     "options": [
+      "In ~/.ssh",
+      "In its own memory",
+      "In /etc",
+      "On the server"
+     ],
+     "answer": 1,
+     "explain": "It never leaves the agent process."
+    },
+    {
+     "q": "A key with `command=\"backup.sh\"` is used with `ssh host rm -rf /`. What runs?",
+     "options": [
+      "rm -rf /",
+      "backup.sh",
+      "Nothing",
+      "A shell"
+     ],
+     "answer": 1,
+     "explain": "The forced command replaces what the client asked for."
+    }
+   ],
+   "check": {
+    "scenario": "You must let a CI job push to one server with a key stored in the CI system. How do you limit the damage if the key leaks?",
+    "answer": "Use a dedicated key, authorised only for the deployment account with `restrict,command=\"/usr/local/bin/deploy\",from=\"CI_IP\"` (and `no-agent-forwarding` etc. via `restrict`), no passphrase only if the CI secret store is trusted, short rotation, and log fingerprints (LogLevel VERBOSE) so use of the key is auditable."
+   }
+  },
+  {
+   "id": "ssh-tunnels-jump",
+   "title": "Port forwarding, SOCKS proxies and jump hosts",
+   "level": "advanced",
+   "goal": "Use SSH as a secure tunnel: forward a local port to a remote service, expose a local service on the remote side, build a SOCKS proxy, and reach a server through a jump host.\n\nWhy it matters: tunnels let you reach internal services (databases, dashboards) without opening them to the internet, and jump hosts are how most production networks are entered.",
+   "setup": {
+    "note": "These steps run a private `sshd` on 127.0.0.1 as your own user (port 2222), so there is a real server to log in to without touching the system's sshd. It can only log in as you. All files live in /tmp/lab/ssh. Absolute paths matter: sshd re-executes itself and changes directory.",
+    "commands": [
+     "mkdir -p /tmp/lab/ssh && cd /tmp/lab/ssh && chmod 700 /tmp/lab/ssh",
+     "if [ -f /tmp/lab/ssh/sshd.pid ]; then kill $(cat /tmp/lab/ssh/sshd.pid); fi; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Two servers: a bastion and a target",
+     "text": "We start two `sshd` instances on different ports (2222 = bastion, 2223 = target) and a small web server on 127.0.0.1:8081 that stands for an internal service.",
+     "run": [
+      {
+       "cmd": "cat > sshd_config <<'EOF'\nPort 2222\nListenAddress 127.0.0.1\nHostKey /tmp/lab/ssh/hostkey\nAuthorizedKeysFile /tmp/lab/ssh/authorized_keys\nPidFile /tmp/lab/ssh/sshd.pid\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\nPerSourcePenalties no\nLogLevel VERBOSE\nEOF",
+       "output": ""
+      },
+      {
+       "cmd": "cd /tmp/lab/ssh && ssh-keygen -q -t ed25519 -N '' -C lab-host -f hostkey && ssh-keygen -q -t ed25519 -N '' -C lab-user -f userkey && cp userkey.pub authorized_keys && chmod 600 authorized_keys userkey",
+       "output": ""
+      },
+      {
+       "cmd": "sed 's/Port 2222/Port 2223/; s#sshd.pid#sshd2.pid#' sshd_config > sshd_config2",
+       "output": ""
+      },
+      {
+       "cmd": "/usr/sbin/sshd -f /tmp/lab/ssh/sshd_config -E /tmp/lab/ssh/sshd.log; /usr/sbin/sshd -f /tmp/lab/ssh/sshd_config2 -E /tmp/lab/ssh/sshd2.log; sleep 1; ss -ltn | awk '$4 ~ /:222[23]$/ {print \"listening:\", $4}' | sort",
+       "output": "listening: 127.0.0.1:2222\nlistening: 127.0.0.1:2223"
+      },
+      {
+       "cmd": "python3 -m http.server 8081 --bind 127.0.0.1 > /dev/null 2>&1 & echo $! > web.pid; sleep 1; curl -s -o /dev/null -w 'internal service: http=%{http_code}\\n' http://127.0.0.1:8081/",
+       "output": "[1] 3483077\ninternal service: http=200"
+      }
+     ]
+    },
+    {
+     "title": "The config",
+     "text": "`ProxyJump bastion` tells ssh to connect to the target **through** the bastion. The first `Host *` block holds the shared settings.",
+     "code": {
+      "file": "config",
+      "lang": "sh",
+      "src": "Host bastion\n    HostName 127.0.0.1\n    Port 2222\n\nHost target\n    HostName 127.0.0.1\n    Port 2223\n    ProxyJump bastion\n\nHost *\n    User opc\n    IdentityFile /tmp/lab/ssh/userkey\n    IdentitiesOnly yes\n    UserKnownHostsFile /tmp/lab/ssh/known_hosts\n    StrictHostKeyChecking accept-new\n    LogLevel ERROR\n"
+     },
+     "run": [
+      {
+       "cmd": "cat config | sed -n '5,8p'",
+       "output": "Host target\n    HostName 127.0.0.1\n    Port 2223\n    ProxyJump bastion"
+      }
+     ]
+    },
+    {
+     "title": "Local forward (-L): bring a remote service to me",
+     "text": "`-L 9081:127.0.0.1:8081` opens port 9081 on **my** machine; connections to it travel through the SSH connection and come out on the server side, which connects to 127.0.0.1:8081 **from there**. `-f -N` run in the background without a command; `-M -S` make a control socket so we can close it cleanly.",
+     "run": [
+      {
+       "cmd": "ssh -F config -f -N -M -S ctl-l -L 9081:127.0.0.1:8081 bastion; sleep 0.5; curl -s -o /dev/null -w 'through the tunnel: http=%{http_code}\\n' http://127.0.0.1:9081/",
+       "output": "through the tunnel: http=200"
+      },
+      {
+       "cmd": "ssh -F config -S ctl-l -O check bastion 2>&1 | sed -E 's/pid=[0-9]+/pid=N/'",
+       "output": "Master running (pid=N)\r"
+      },
+      {
+       "cmd": "ssh -F config -S ctl-l -O exit bastion 2>&1",
+       "output": "Exit request sent.\r"
+      }
+     ]
+    },
+    {
+     "title": "Remote forward (-R): expose my service on the server",
+     "text": "`-R 9082:127.0.0.1:8081` opens port 9082 on the **server** side; connections there are carried back to my 127.0.0.1:8081. Useful to let a remote host reach a service behind your NAT. `ss` shows the new listener (owned by the sshd session).",
+     "run": [
+      {
+       "cmd": "ssh -F config -f -N -M -S ctl-r -R 9082:127.0.0.1:8081 bastion; sleep 0.5; ss -ltn 'sport = :9082' | awk 'NR>1 {print \"listener:\", $4}'; curl -s -o /dev/null -w 'via remote forward: http=%{http_code}\\n' http://127.0.0.1:9082/",
+       "output": "listener: 127.0.0.1:9082\nlistener: [::1]:9082\nvia remote forward: http=200"
+      },
+      {
+       "cmd": "ssh -F config -S ctl-r -O exit bastion 2>&1",
+       "output": "Exit request sent.\r"
+      }
+     ]
+    },
+    {
+     "title": "Dynamic forward (-D): a SOCKS proxy",
+     "text": "`-D 1080` turns the SSH connection into a SOCKS5 proxy on 127.0.0.1:1080. Programs that speak SOCKS (browsers, `curl --socks5-hostname`) can reach **any** host the server can reach, with name resolution done on the far side.",
+     "run": [
+      {
+       "cmd": "ssh -F config -f -N -M -S ctl-d -D 1080 bastion; sleep 0.5; curl -s -o /dev/null -w 'through the SOCKS proxy: http=%{http_code}\\n' --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:8081/",
+       "output": "through the SOCKS proxy: http=200"
+      },
+      {
+       "cmd": "ssh -F config -S ctl-d -O exit bastion 2>&1",
+       "output": "Exit request sent.\r"
+      }
+     ]
+    },
+    {
+     "title": "Jump host (ProxyJump)",
+     "text": "`ssh target` connects to the bastion first, asks it to open a TCP connection to the target's sshd, and runs a second, **end-to-end encrypted** SSH session inside the first. The bastion only relays bytes and cannot read your session. The server logs show both logins.",
+     "run": [
+      {
+       "cmd": "ssh -F config target 'echo reached the target through the bastion; id -un'",
+       "output": "reached the target through the bastion\nopc"
+      },
+      {
+       "cmd": "ssh -F config -J bastion -p 2223 opc@127.0.0.1 'echo same with -J on the command line' 2>&1",
+       "output": "same with -J on the command line"
+      },
+      {
+       "cmd": "echo \"bastion logins: $(grep -c 'Accepted publickey' sshd.log), target logins: $(grep -c 'Accepted publickey' sshd2.log)\"",
+       "output": "bastion logins: 5, target logins: 2"
+      }
+     ],
+     "under": "A port forward is an SSH **channel**: one TCP connection multiplexed inside the encrypted SSH connection. `ProxyJump` uses a `direct-tcpip` channel to reach the next hop. Compare with agent forwarding: `ProxyJump` needs no trust in the bastion with your keys. Forwarding and tunnels can be disabled per key or per server (`AllowTcpForwarding no`), which is how locked-down hosts are protected."
+    },
+    {
+     "title": "Clean up",
+     "text": "Stop both servers and the web server.",
+     "run": [
+      {
+       "cmd": "kill $(cat web.pid) 2>/dev/null; kill $(cat sshd.pid) $(cat sshd2.pid); sleep 0.3; echo cleaned",
+       "output": "cleaned"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `ssh -L 9081:127.0.0.1:8081 server` do?",
+     "options": [
+      "Opens port 8081 on the server",
+      "Opens local port 9081 whose traffic is sent through the server to 127.0.0.1:8081 there",
+      "Logs in as user 9081",
+      "Starts a web server"
+     ],
+     "answer": 1,
+     "explain": "A local forward."
+    },
+    {
+     "q": "Which option builds a SOCKS proxy?",
+     "options": [
+      "-L",
+      "-R",
+      "-D",
+      "-J"
+     ],
+     "answer": 2,
+     "explain": "-D PORT."
+    },
+    {
+     "q": "What is the safer way to reach a target through a bastion?",
+     "options": [
+      "Agent forwarding to the bastion",
+      "ProxyJump (-J)",
+      "Copy the private key to the bastion",
+      "Open the target to the internet"
+     ],
+     "answer": 1,
+     "explain": "ProxyJump keeps the session end-to-end encrypted without exposing your agent."
+    },
+    {
+     "q": "What does `-R 9082:127.0.0.1:8081` expose?",
+     "options": [
+      "A port on the server that leads back to your local service",
+      "A local port to the server",
+      "A SOCKS proxy",
+      "A jump host"
+     ],
+     "answer": 0,
+     "explain": "A remote forward."
+    }
+   ],
+   "check": {
+    "scenario": "A developer needs to use the production database (reachable only from the app servers) from their laptop for one hour. What do you give them and how do you keep it safe?",
+    "answer": "A tunnel through the existing bastion: `ssh -J bastion -L 5432:db.internal:5432 app-server -N` (or the same in their config), with a personal key limited by `permitopen=\"db.internal:5432\"` in authorized_keys, short expiry (an SSH certificate valid for one hour), and logging of the session. No database port is opened to the network."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "How does SSH key authentication work?",
+   "a": "The server has your public key in authorized_keys. At login it sends a challenge; your client signs it with the private key (possibly via ssh-agent); the server verifies the signature. The private key never leaves your machine. See [the lesson](#/lesson/33/ssh-keys-hostkeys).",
+   "level": "beginner"
+  },
+  {
+   "q": "What is known_hosts for?",
+   "a": "It stores the host keys of servers you connected to, so ssh can detect a changed (possibly fake) server. See [the lesson](#/lesson/33/ssh-keys-hostkeys).",
+   "level": "beginner"
+  },
+  {
+   "q": "What does ssh-agent do and what is the risk of agent forwarding?",
+   "a": "It keeps decrypted keys in memory and signs challenges. Forwarding exposes the agent socket on the remote host; root there can use your keys while you are connected. Prefer ProxyJump. See [the lesson](#/lesson/33/ssh-config-agent).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Explain -L, -R and -D.",
+   "a": "-L: a local port that forwards through the server to a destination. -R: a port on the server that forwards back to you. -D: a local SOCKS proxy. See [the lesson](#/lesson/33/ssh-tunnels-jump).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you reach a host behind a bastion in one command?",
+   "a": "`ssh -J bastion target` or `ProxyJump bastion` in ~/.ssh/config.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you harden sshd?",
+   "a": "Keys only (PasswordAuthentication no), PermitRootLogin no, AllowUsers/AllowGroups, modern algorithms, fail2ban or rate limits, restrict forwarding, keep the package updated, audit with LogLevel VERBOSE. See the hardening module.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Host key",
+   "def": "The server's key pair that identifies it to clients; stored in known_hosts.",
+   "lesson": "33/ssh-keys-hostkeys"
+  },
+  {
+   "term": "authorized_keys",
+   "def": "The file listing the public keys allowed to log in to an account.",
+   "lesson": "33/ssh-keys-hostkeys"
+  },
+  {
+   "term": "known_hosts",
+   "def": "The client's record of servers' host keys.",
+   "lesson": "33/ssh-keys-hostkeys"
+  },
+  {
+   "term": "ssh-agent",
+   "def": "A process that holds decrypted private keys and signs for ssh.",
+   "lesson": "33/ssh-config-agent"
+  },
+  {
+   "term": "Port forwarding",
+   "def": "Carrying a TCP connection through an SSH connection (-L, -R, -D).",
+   "lesson": "33/ssh-tunnels-jump"
+  },
+  {
+   "term": "ProxyJump",
+   "def": "Reach a host by tunnelling through a jump host (bastion).",
+   "lesson": "33/ssh-tunnels-jump"
+  },
+  {
+   "term": "Bastion",
+   "def": "A hardened host that is the entry point to a private network.",
+   "lesson": "33/ssh-tunnels-jump"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ssh-keygen -t ed25519 -C comment",
+   "desc": "Create a key pair.",
+   "topic": "SSH",
+   "lesson": "33/ssh-keys-hostkeys"
+  },
+  {
+   "cmd": "ssh-copy-id user@host",
+   "desc": "Install your public key on a server.",
+   "topic": "SSH",
+   "lesson": "33/ssh-keys-hostkeys"
+  },
+  {
+   "cmd": "ssh-keygen -lf KEY.pub",
+   "desc": "Show a key's fingerprint.",
+   "topic": "SSH",
+   "lesson": "33/ssh-keys-hostkeys"
+  },
+  {
+   "cmd": "ssh-keygen -R host",
+   "desc": "Remove a host from known_hosts.",
+   "topic": "SSH",
+   "lesson": "33/ssh-keys-hostkeys"
+  },
+  {
+   "cmd": "ssh -G host",
+   "desc": "Show the effective ssh configuration for host.",
+   "topic": "SSH",
+   "lesson": "33/ssh-config-agent"
+  },
+  {
+   "cmd": "eval \"$(ssh-agent -s)\"; ssh-add KEY",
+   "desc": "Start an agent and load a key.",
+   "topic": "SSH",
+   "lesson": "33/ssh-config-agent"
+  },
+  {
+   "cmd": "ssh -L 8080:localhost:80 host",
+   "desc": "Forward local port 8080 to port 80 on host's side.",
+   "topic": "SSH",
+   "lesson": "33/ssh-tunnels-jump"
+  },
+  {
+   "cmd": "ssh -R 9000:localhost:3000 host",
+   "desc": "Expose local port 3000 as port 9000 on host.",
+   "topic": "SSH",
+   "lesson": "33/ssh-tunnels-jump"
+  },
+  {
+   "cmd": "ssh -D 1080 host",
+   "desc": "Start a SOCKS5 proxy through host.",
+   "topic": "SSH",
+   "lesson": "33/ssh-tunnels-jump"
+  },
+  {
+   "cmd": "ssh -J bastion target",
+   "desc": "Connect through a jump host.",
+   "topic": "SSH",
+   "lesson": "33/ssh-tunnels-jump"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

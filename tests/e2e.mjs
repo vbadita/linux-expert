@@ -27,7 +27,9 @@ const shot = async (page, name) => { if (SHOTS) { fs.mkdirSync(SHOTS, { recursiv
   await page.goto(BASE);
   await page.waitForSelector('.node');
   ok((await page.locator('.node').count()) === 49, 'learning path shows all 49 modules');
-  ok((await page.locator('.node.soon').count()) === 46, '46 modules are "coming soon"');
+  const idx = await page.evaluate(() => fetch('content/index.json').then((r) => r.json()));
+  const soon = idx.modules.filter((m) => m.status === 'soon').length;
+  ok((await page.locator('.node.soon').count()) === soon, `${soon} modules are "coming soon"`);
   const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
   ok(bg === 'rgb(247, 247, 245)', 'light mode background ' + bg);
   await shot(page, 'home-light');
@@ -77,6 +79,9 @@ const shot = async (page, name) => { if (SHOTS) { fs.mkdirSync(SHOTS, { recursiv
   await page.click('button:has-text("Show answer")');
   ok(await page.locator('.answer').isVisible(), 'Show answer reveals it');
   await page.click('button:has-text("Finish lesson")');
+  await page.waitForSelector('.goal');   // finishing moves on to the next lesson of the module
+  ok(true, 'Finish lesson opens the next lesson');
+  await page.goto(BASE + '#/module/1');
   await page.waitForSelector('h1:has-text("1. The shell")');
   ok((await page.textContent('main')).includes('✓'), 'lesson marked done');
   ok((await page.textContent('main')).includes('Quiz: 4/5'), 'quiz score saved');
@@ -102,13 +107,16 @@ const shot = async (page, name) => { if (SHOTS) { fs.mkdirSync(SHOTS, { recursiv
   await page.goto(BASE + '#/glossary');
   await page.waitForSelector('dl.gl dt');
   ok((await page.locator('dl.gl dt').count()) >= 8, 'glossary lists terms');
+  await page.fill('#app input[type=search]', 'argv');
+  ok((await page.locator('dl.gl dt').count()) >= 1, 'glossary filter works');
+  await page.fill('#app input[type=search]', '');
   await page.click('dd a >> nth=0');
   await page.waitForSelector('.goal');
-  ok(page.url().includes('#/lesson/1/how-bash-runs-a-command'), 'glossary term links to its lesson');
+  ok(/#\/lesson\/\d+\/[\w-]+/.test(page.url()), 'glossary term links to its lesson');
 
   await page.goto(BASE + '#/cheat');
   await page.waitForSelector('.cmdrow');
-  await page.fill('#app input[type=search]', 'only stderr');
+  await page.fill('#app input[type=search]', 'cmd 2> err.txt');
   ok((await page.locator('.cmdrow').count()) === 1, 'cheat sheet filter');
   await page.locator('.cmdrow button').click();
   ok((await page.evaluate(() => navigator.clipboard.readText())) === 'cmd 2> err.txt', 'cheat sheet copy button');
@@ -118,7 +126,8 @@ const shot = async (page, name) => { if (SHOTS) { fs.mkdirSync(SHOTS, { recursiv
   const all = await page.locator('details.qa').count();
   await page.selectOption('select[aria-label=Level]', 'beginner');
   await page.waitForFunction((n) => document.querySelectorAll('details.qa').length < n, all);
-  ok((await page.locator('details.qa').count()) === 3, 'interview filter by level: ' + (await page.locator('details.qa').count()) + ' beginner of ' + all);
+  const nb = await page.locator('details.qa').count();
+  ok(nb > 0 && nb < all, `interview filter by level: ${nb} beginner of ${all}`);
   await page.click('details.qa summary >> nth=0');
   ok(await page.locator('details.qa[open]').count() === 1, 'interview answer opens');
 
@@ -155,8 +164,14 @@ const shot = async (page, name) => { if (SHOTS) { fs.mkdirSync(SHOTS, { recursiv
   await page.waitForSelector('h1:has-text("1. The shell")');
   ok(!(await page.textContent('main')).includes('Quiz: 4/5'), 'reset progress clears everything');
 
+  const soonMod = idx.modules.find((m) => m.status === 'soon');
+  if (soonMod) {
+    await page.goto(BASE + '#/module/' + soonMod.num);
+    ok((await page.textContent('main')).includes('not written yet'), 'coming-soon module page');
+  }
   await page.goto(BASE + '#/module/8');
-  ok((await page.textContent('main')).includes('not written yet'), 'coming-soon module page');
+  await page.waitForSelector('h1:has-text("8. System calls")');
+  ok(await page.locator('.card h3 a').count() >= 3, 'module 8 lists its lessons');
   await page.goto(BASE + '#/nonsense');
   ok((await page.textContent('main')).includes('Not found'), '404 route');
   ok(problems.length === 0, 'no console errors / CSP violations (desktop light)' + (problems.length ? ': ' + problems.join(' | ') : ''));

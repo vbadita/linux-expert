@@ -1,0 +1,560 @@
+{
+ "title": "Memory",
+ "lessons": [
+  {
+   "id": "virtual-memory",
+   "title": "Virtual memory: VSZ, RSS and demand paging",
+   "level": "beginner",
+   "goal": "Learn that each process sees its own virtual address space, that the kernel gives RAM only when a page is first used, and what the numbers VSZ and RSS mean.\n\nWhy it matters: a process can \"use\" 20 GB of address space and only 200 MB of RAM. Reading memory numbers correctly decides whether you have a leak or a false alarm.",
+   "setup": {
+    "note": "Programs are small C files. The OOM step uses sudo and a systemd scope with a memory limit, so only that program is affected. Use a scratch directory.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Two different numbers",
+     "text": "**VSZ** (virtual size, `VmSize`) is the size of the address space a process has reserved. **RSS** (resident set size, `VmRSS`) is the part that is really in RAM now. The program below maps 200 MB, then touches half, then all of it, and prints both numbers each time.",
+     "code": {
+      "file": "mem1.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <string.h>\n#include <sys/mman.h>\n\nstatic void show(const char *when) {\n    FILE *f = fopen(\"/proc/self/status\", \"r\");\n    char line[128];\n    printf(\"%-24s\", when);\n    while (fgets(line, sizeof line, f)) {\n        if (!strncmp(line, \"VmSize:\", 7) || !strncmp(line, \"VmRSS:\", 6)) {\n            char name[16];\n            long kb;\n            sscanf(line, \"%15s %ld\", name, &kb);\n            printf(\" %s %4ld MB\", name, kb / 1024);\n        }\n    }\n    printf(\"\\n\");\n    fclose(f);\n}\n\nint main(void) {\n    size_t size = 200UL << 20;\n    show(\"at start:\");\n    char *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n    show(\"mapped 200 MB:\");\n    memset(p, 1, size / 2);\n    show(\"touched 100 MB:\");\n    memset(p, 1, size);\n    show(\"touched all 200 MB:\");\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o mem1 mem1.c",
+       "output": ""
+      },
+      {
+       "cmd": "./mem1",
+       "output": "at start:                VmSize:    2 MB VmRSS:    1 MB\nmapped 200 MB:           VmSize:  202 MB VmRSS:    1 MB\ntouched 100 MB:          VmSize:  202 MB VmRSS:  101 MB\ntouched all 200 MB:      VmSize:  202 MB VmRSS:  201 MB"
+      }
+     ],
+     "after": "`mmap` raised VSZ by 200 MB at once and RSS not at all. RSS grew only as the program **wrote** to pages."
+    },
+    {
+     "title": "Demand paging",
+     "text": "The kernel does not give RAM at `mmap`/`malloc`. It only records that the range is valid. When the program first touches a page, the CPU raises a **page fault**, and the kernel then picks a free page of RAM, zeroes it and maps it. Untouched pages cost nothing.",
+     "run": [
+      {
+       "cmd": "grep -E '^(VmSize|VmRSS|VmData|VmStk)' /proc/$$/status",
+       "output": "VmSize:\t  222152 kB\nVmRSS:\t   11276 kB\nVmData:\t     296 kB\nVmStk:\t     132 kB"
+      }
+     ],
+     "under": "Each process has its own **page table** that maps virtual page numbers to physical page frames. The CPU's MMU walks it on every access (and caches results in the TLB). A page that is not mapped, or mapped read-only for a write, triggers a fault into the kernel. That one mechanism implements demand paging, copy-on-write, swapping and memory-mapped files."
+    },
+    {
+     "title": "System memory with free",
+     "text": "`free` shows RAM and swap. `available` is the number to watch: an estimate of how much memory new programs can get without swapping, counting reclaimable cache.",
+     "run": [
+      {
+       "cmd": "free -m",
+       "output": "               total        used        free      shared  buff/cache   available\nMem:            5642        3393        1432          20        1012        2248\nSwap:           4095        1523        2572"
+      }
+     ]
+    },
+    {
+     "title": "ps shows both",
+     "text": "`ps -o vsz,rss` prints both in kilobytes.",
+     "run": [
+      {
+       "cmd": "ps -o pid,vsz,rss,comm -p $$",
+       "output": "    PID    VSZ   RSS COMMAND\n3467224 222152 11276 bash"
+      }
+     ]
+    },
+    {
+     "title": "Overcommit",
+     "text": "Linux can promise more address space than there is RAM (**overcommit**). The policy is `vm.overcommit_memory`: 0 = heuristic, 1 = always allow, 2 = strict accounting. Promises can fail later, when the memory is really touched: that is when the OOM killer acts.",
+     "run": [
+      {
+       "cmd": "sysctl vm.overcommit_memory vm.overcommit_ratio",
+       "output": "vm.overcommit_memory = 1\nvm.overcommit_ratio = 50"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "A process has VSZ 8 GB and RSS 100 MB. How much RAM does it hold now?",
+     "options": [
+      "8 GB",
+      "About 100 MB",
+      "Nothing",
+      "Unknown"
+     ],
+     "answer": 1,
+     "explain": "RSS is what is resident in RAM."
+    },
+    {
+     "q": "When does the kernel assign RAM to a freshly mapped page?",
+     "options": [
+      "At mmap",
+      "At the first access (page fault)",
+      "At exit",
+      "At fork"
+     ],
+     "answer": 1,
+     "explain": "Demand paging."
+    },
+    {
+     "q": "Which column of `free` estimates memory available to new programs?",
+     "options": [
+      "free",
+      "shared",
+      "available",
+      "used"
+     ],
+     "answer": 2,
+     "explain": "`available` includes reclaimable cache."
+    },
+    {
+     "q": "What does a page fault on a valid, not yet mapped page cause?",
+     "options": [
+      "A crash",
+      "The kernel allocates and maps a page",
+      "A signal always",
+      "Swap"
+     ],
+     "answer": 1,
+     "explain": "The fault handler maps a zeroed page."
+    }
+   ],
+   "check": {
+    "scenario": "Monitoring shows a Java process at VSZ 12 GB and an alert says \"memory leak\". RSS is stable at 2 GB. Is there a problem?",
+    "answer": "Probably not. Large VSZ comes from reserved heap/stack/thread/mmap ranges that were never touched. Watch **RSS** (and PSS/`Anonymous` in smaps) over time. A leak shows as steadily growing RSS."
+   }
+  },
+  {
+   "id": "page-cache-dirty-swap",
+   "title": "Page cache, dirty pages and swap",
+   "level": "intermediate",
+   "goal": "Learn why Linux seems to use all your RAM, how file data is cached, how writes become \"dirty\" pages that are flushed later, and what swap is for.\n\nWhy it matters: \"free memory is nearly zero\" is normal and good. Knowing the cache lets you tell healthy use from real memory pressure.",
+   "setup": {
+    "note": "Programs are small C files. The OOM step uses sudo and a systemd scope with a memory limit, so only that program is affected. Use a scratch directory.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The page cache",
+     "text": "Reading a file puts its pages in the **page cache** in RAM. The next read is served from RAM. `fincore` shows how much of a file is cached. We create a 200 MB file, empty the cache, and read it twice.",
+     "run": [
+      {
+       "cmd": "dd if=/dev/zero of=big.bin bs=1M count=200 status=none; sync; echo 1 | sudo tee /proc/sys/vm/drop_caches > /dev/null; fincore big.bin",
+       "output": "RES PAGES  SIZE FILE\n 0B     0  200M big.bin"
+      },
+      {
+       "cmd": "dd if=big.bin of=/dev/null bs=1M 2>&1 | tail -n 1 | awk '{print \"first read: \" $(NF-1), $NF}'",
+       "output": "first read: 45.1 MB/s"
+      },
+      {
+       "cmd": "fincore big.bin",
+       "output": "  RES PAGES  SIZE FILE\n 200M 51200  200M big.bin"
+      },
+      {
+       "cmd": "dd if=big.bin of=/dev/null bs=1M 2>&1 | tail -n 1 | awk '{print \"second read: \" $(NF-1), $NF}'",
+       "output": "second read: 3.0 GB/s"
+      }
+     ],
+     "after": "After the first read the file is fully cached (`RES` = size). The second read is much faster because it never touches the disk. The exact speeds depend on your storage."
+    },
+    {
+     "title": "Cache is not lost memory",
+     "text": "The kernel keeps cache as long as RAM is free and drops it instantly when programs need memory. In `free`, `buff/cache` counts it and `available` adds the reclaimable part back.",
+     "run": [
+      {
+       "cmd": "free -m",
+       "output": "               total        used        free      shared  buff/cache   available\nMem:            5642        3348        1575          20         914        2294\nSwap:           4095        1523        2572"
+      }
+     ]
+    },
+    {
+     "title": "Writes become dirty pages",
+     "text": "A `write()` copies data into the page cache and returns at once. The page is marked **dirty**. The kernel flushes dirty pages to disk later (after about 30 seconds, or sooner when too many accumulate). `sync` forces it.",
+     "run": [
+      {
+       "cmd": "dd if=/dev/zero of=w.bin bs=1M count=100 status=none; grep -E '^Dirty:' /proc/meminfo",
+       "output": "Dirty:            102524 kB"
+      },
+      {
+       "cmd": "sync; grep -E '^Dirty:' /proc/meminfo",
+       "output": "Dirty:                60 kB"
+      },
+      {
+       "cmd": "sysctl vm.dirty_background_ratio vm.dirty_ratio vm.dirty_expire_centisecs",
+       "output": "vm.dirty_background_ratio = 10\nvm.dirty_ratio = 20\nvm.dirty_expire_centisecs = 3000"
+      }
+     ],
+     "under": "Background flushing starts above `dirty_background_ratio` percent of available memory. If dirty data reaches `dirty_ratio` percent, **writers are blocked** until the disk catches up. That is why a slow disk can freeze a fast writer. A power loss before the flush loses the data: `fsync()` and journaling exist to control this."
+    },
+    {
+     "title": "Swap",
+     "text": "**Swap** is disk space used to hold anonymous pages (heap, stack) that are not used right now, so RAM can be used for cache or active programs. `vm.swappiness` is the kernel's preference between swapping anonymous pages and dropping file cache.",
+     "run": [
+      {
+       "cmd": "swapon --show",
+       "output": "NAME       TYPE SIZE USED PRIO\n/.swapfile file   4G 1.5G   -2"
+      },
+      {
+       "cmd": "sysctl vm.swappiness",
+       "output": "vm.swappiness = 60"
+      },
+      {
+       "cmd": "grep -E '^(SwapTotal|SwapFree|SwapCached):' /proc/meminfo",
+       "output": "SwapCached:       266332 kB\nSwapTotal:       4194300 kB\nSwapFree:        2634492 kB"
+      }
+     ]
+    },
+    {
+     "title": "Swap in use is not always bad",
+     "text": "Some swap use is fine: rarely used pages left RAM. A problem is a high rate of **swapping in and out**. `vmstat` columns `si` and `so` show it.",
+     "run": [
+      {
+       "cmd": "vmstat 1 2 | tail -n 2 | awk '{print \"swap in:\", $7, \"swap out:\", $8}'",
+       "output": "swap in: 34 swap out: 32\nswap in: 0 swap out: 0"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does the page cache hold?",
+     "options": [
+      "Only program code",
+      "Copies of file data in RAM",
+      "Swapped pages",
+      "Kernel logs"
+     ],
+     "answer": 1,
+     "explain": "Pages of files that were read or written."
+    },
+    {
+     "q": "What is a dirty page?",
+     "options": [
+      "A corrupt page",
+      "A cached page changed in RAM but not yet written to disk",
+      "A page in swap",
+      "A zeroed page"
+     ],
+     "answer": 1,
+     "explain": "Written later by the flusher."
+    },
+    {
+     "q": "`free` shows only 100 MB `free` but 6 GB `available`. What does it mean?",
+     "options": [
+      "Out of memory",
+      "Most RAM is reclaimable cache",
+      "A leak",
+      "Swap is full"
+     ],
+     "answer": 1,
+     "explain": "Available includes reclaimable cache."
+    },
+    {
+     "q": "Which vmstat columns show swapping activity?",
+     "options": [
+      "bi bo",
+      "si so",
+      "us sy",
+      "in cs"
+     ],
+     "answer": 1,
+     "explain": "Swap in and swap out."
+    }
+   ],
+   "check": {
+    "scenario": "A database server shows 95% memory used in a dashboard and the on-call engineer wants to add RAM. What do you check first?",
+    "answer": "`free -m` and `/proc/meminfo`: how much is **available** and how much is page cache. If `available` is large and swap I/O (`vmstat si/so`) is near zero, nothing is wrong. Real pressure shows as low `available`, steady swapping, and OOM messages in `dmesg`."
+   }
+  },
+  {
+   "id": "mmap-and-oom",
+   "title": "mmap, the OOM killer and oom_score",
+   "level": "advanced",
+   "goal": "Learn how files are mapped into memory, and what happens when a memory limit is hit: the out-of-memory (OOM) killer.\n\nWhy it matters: \"killed\" processes with exit code 137 and `Out of memory` in `dmesg` are a classic production incident. You should know how the victim is chosen and how to protect important processes.",
+   "setup": {
+    "note": "Programs are small C files. The OOM step uses sudo and a systemd scope with a memory limit, so only that program is affected. Use a scratch directory.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "mmap maps a file into the address space",
+     "text": "With `mmap` the file's pages are the process's memory. Page faults load them from the page cache. This program maps the 200 MB file from the last lesson, reads one byte per page and prints its mapping and memory use.",
+     "code": {
+      "file": "mapfile.c",
+      "lang": "c",
+      "src": "#include <fcntl.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <sys/mman.h>\n#include <sys/stat.h>\n#include <unistd.h>\n\nint main(void) {\n    int fd = open(\"big.bin\", O_RDONLY);\n    struct stat st;\n    fstat(fd, &st);\n    char *p = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);\n    long sum = 0;\n    for (off_t i = 0; i < st.st_size; i += 4096)    /* touch one byte per page */\n        sum += p[i];\n    char cmd[200];\n    snprintf(cmd, sizeof cmd,\n             \"grep big.bin /proc/%d/maps | cut -c1-70; grep -E '^(Rss|Private_Clean|Private_Dirty)' /proc/%d/smaps_rollup\",\n             getpid(), getpid());\n    system(cmd);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "dd if=/dev/zero of=big.bin bs=1M count=200 status=none; sync",
+       "output": ""
+      },
+      {
+       "cmd": "gcc -o mapfile mapfile.c",
+       "output": ""
+      },
+      {
+       "cmd": "./mapfile",
+       "output": "ffff8ba00000-ffff98200000 r--s 00000000 fc:00 39000915                \nRss:              206024 kB\nPrivate_Clean:    204800 kB\nPrivate_Dirty:        96 kB"
+      }
+     ],
+     "after": "The mapping is `r--s`: read-only and shared. `Rss` counts the 200 MB, but they are **clean file pages** (`Private_Clean`; `Private_Dirty` is almost nothing). They live in the page cache, not in private anonymous memory, and the kernel can drop them at any time and reload them from the file."
+    },
+    {
+     "title": "Each process has an OOM score",
+     "text": "When memory runs out and nothing can be reclaimed, the kernel picks a victim. `oom_score` is based mostly on how much memory the process uses (0 to 1000). `oom_score_adj` (-1000 to 1000) is added so you can protect or sacrifice a process.",
+     "run": [
+      {
+       "cmd": "cat /proc/$$/oom_score /proc/$$/oom_score_adj",
+       "output": "800\n200"
+      },
+      {
+       "cmd": "echo 300 > /proc/$$/oom_score_adj; cat /proc/$$/oom_score_adj",
+       "output": "300"
+      }
+     ],
+     "under": "`oom_score_adj` of -1000 makes a process unkillable by the OOM killer (used for `sshd`, `systemd`). Raising your own value is allowed for everyone; lowering it needs `CAP_SYS_RESOURCE`. Children inherit the value."
+    },
+    {
+     "title": "A program that eats memory",
+     "text": "`eat.c` allocates and uses 10 MB every 50 ms and never frees.",
+     "code": {
+      "file": "eat.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n\nint main(void) {\n    for (int i = 1;; i++) {\n        char *p = malloc(10 << 20);\n        if (!p) {\n            puts(\"malloc failed\");\n            return 1;\n        }\n        memset(p, 1, 10 << 20);                 /* really use the memory */\n        printf(\"holding %d MB\\n\", i * 10);\n        fflush(stdout);\n        usleep(50000);\n    }\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o eat eat.c",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "Run it under a memory limit",
+     "text": "We run it in a systemd **scope** whose cgroup has `MemoryMax=60M` and no swap. When the program reaches the limit, the kernel's OOM killer acts **inside that cgroup** only. The rest of the machine is not affected.",
+     "run": [
+      {
+       "cmd": "sudo systemd-run --scope -q -p MemoryMax=60M -p MemorySwapMax=0 ./eat; echo \"exit status: $?\"",
+       "output": "holding 10 MB\nholding 20 MB\nholding 30 MB\nholding 40 MB\nholding 50 MB\nexit status: 137"
+      }
+     ],
+     "after": "The program printed its progress until the limit was reached near 60 MB. The exit status is 137 = 128 + 9: the process was killed by SIGKILL, sent by the kernel."
+    },
+    {
+     "title": "The kernel logs it",
+     "text": "The OOM killer writes the reason to the kernel log. `dmesg` needs root on this system.",
+     "run": [
+      {
+       "cmd": "sudo dmesg | grep -E 'Memory cgroup out of memory' | tail -n 1 | sed -E 's/^\\[[^]]*\\] //'",
+       "output": "Memory cgroup out of memory: Killed process 3467347 (eat) total-vm:63680kB, anon-rss:61156kB, file-rss:1212kB, shmem-rss:0kB, UID:0 pgtables:160kB oom_score_adj:300"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is `oom_score_adj` for?",
+     "options": [
+      "Counting OOM events",
+      "Adjusting how likely a process is chosen by the OOM killer",
+      "Setting swap",
+      "Limiting memory"
+     ],
+     "answer": 1,
+     "explain": "-1000 protects, +1000 sacrifices."
+    },
+    {
+     "q": "A process in a cgroup with MemoryMax is killed. What exit status does the shell show?",
+     "options": [
+      "1",
+      "137",
+      "0",
+      "255"
+     ],
+     "answer": 1,
+     "explain": "128 + 9."
+    },
+    {
+     "q": "Pages of an mmap'ed file that was only read are...",
+     "options": [
+      "Private anonymous memory",
+      "File pages that can be dropped and reloaded",
+      "Swap pages",
+      "Dirty"
+     ],
+     "answer": 1,
+     "explain": "They are clean cache pages."
+    },
+    {
+     "q": "Where do you find the reason a process was OOM-killed?",
+     "options": [
+      "/var/log/oom",
+      "The kernel log (dmesg/journalctl -k)",
+      "ps",
+      "/proc/meminfo"
+     ],
+     "answer": 1,
+     "explain": "The kernel logs the OOM event with the victim's name and memory use."
+    }
+   ],
+   "check": {
+    "scenario": "A service was killed with exit code 137 in a container with a 512 MB limit, but the host has plenty of free RAM. What happened and what are your options?",
+    "answer": "The cgroup limit was reached, so the **cgroup OOM killer** killed it. `dmesg`/`journalctl -k` shows `Memory cgroup out of memory`. Options: raise the limit, reduce the application's memory (heap size, caches, number of workers), find a leak, or add swap/`memory.high` throttling. Check `memory.events` (`oom_kill` counter) of the cgroup."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "Explain VSZ and RSS.",
+   "a": "VSZ is the virtual address space a process has mapped. RSS is the part currently resident in RAM. A large VSZ is normal. See [the lesson](#/lesson/15/virtual-memory).",
+   "level": "beginner"
+  },
+  {
+   "q": "What is demand paging?",
+   "a": "RAM is assigned only when a page is first accessed; a page fault makes the kernel map a page. Untouched memory costs nothing.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why is free memory close to zero on a healthy Linux server?",
+   "a": "The kernel uses spare RAM for the page cache and releases it when needed. Look at `available`, not `free`. See [the lesson](#/lesson/15/page-cache-dirty-swap).",
+   "level": "beginner"
+  },
+  {
+   "q": "What is a dirty page and what controls flushing?",
+   "a": "A cached page modified in RAM but not yet on disk. The kernel flushes after `dirty_expire_centisecs` or when `dirty_background_ratio` is exceeded; writers block at `dirty_ratio`. `fsync` forces durability.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How does the OOM killer choose a victim and how do you protect a process?",
+   "a": "It computes `oom_score` mostly from memory use, adjusted by `oom_score_adj`. Set `oom_score_adj=-1000` (or `OOMScoreAdjust=` in a systemd unit) to protect. See [the lesson](#/lesson/15/mmap-and-oom).",
+   "level": "advanced"
+  },
+  {
+   "q": "Swap is in use but the system is fast. Is that a problem?",
+   "a": "Not by itself: idle pages were moved out to make room for cache. A problem is sustained swap-in/out activity (vmstat si/so) and slow response.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Virtual memory",
+   "def": "Each process's private view of memory, translated to physical RAM by page tables.",
+   "lesson": "15/virtual-memory"
+  },
+  {
+   "term": "VSZ",
+   "def": "Virtual size: the address space reserved by a process.",
+   "lesson": "15/virtual-memory"
+  },
+  {
+   "term": "RSS",
+   "def": "Resident set size: the part of a process's memory currently in RAM.",
+   "lesson": "15/virtual-memory"
+  },
+  {
+   "term": "Page fault",
+   "def": "A CPU exception on access to a page the page table does not allow; the kernel resolves it.",
+   "lesson": "15/virtual-memory"
+  },
+  {
+   "term": "Page cache",
+   "def": "RAM used by the kernel to cache file data.",
+   "lesson": "15/page-cache-dirty-swap"
+  },
+  {
+   "term": "Dirty page",
+   "def": "A cached page modified in memory and not yet written back to disk.",
+   "lesson": "15/page-cache-dirty-swap"
+  },
+  {
+   "term": "Swap",
+   "def": "Disk space used to hold memory pages that are not in RAM.",
+   "lesson": "15/page-cache-dirty-swap"
+  },
+  {
+   "term": "mmap",
+   "def": "System call that maps a file or anonymous memory into the address space.",
+   "lesson": "15/mmap-and-oom"
+  },
+  {
+   "term": "OOM killer",
+   "def": "The kernel mechanism that kills a process when memory cannot be reclaimed.",
+   "lesson": "15/mmap-and-oom"
+  },
+  {
+   "term": "Overcommit",
+   "def": "Allowing more virtual memory to be promised than physically exists.",
+   "lesson": "15/virtual-memory"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "free -m",
+   "desc": "Show memory and swap in MB.",
+   "topic": "Memory",
+   "lesson": "15/virtual-memory"
+  },
+  {
+   "cmd": "ps -o pid,vsz,rss,comm -p PID",
+   "desc": "Show virtual and resident size.",
+   "topic": "Memory",
+   "lesson": "15/virtual-memory"
+  },
+  {
+   "cmd": "grep -E '^Vm' /proc/PID/status",
+   "desc": "Show memory fields of a process.",
+   "topic": "Memory",
+   "lesson": "15/virtual-memory"
+  },
+  {
+   "cmd": "fincore FILE",
+   "desc": "Show how much of a file is in the page cache.",
+   "topic": "Memory",
+   "lesson": "15/page-cache-dirty-swap"
+  },
+  {
+   "cmd": "sync",
+   "desc": "Flush dirty pages to disk.",
+   "topic": "Memory",
+   "lesson": "15/page-cache-dirty-swap"
+  },
+  {
+   "cmd": "swapon --show",
+   "desc": "List swap areas.",
+   "topic": "Memory",
+   "lesson": "15/page-cache-dirty-swap"
+  },
+  {
+   "cmd": "sysctl vm.swappiness",
+   "desc": "Show the swapping preference.",
+   "topic": "Memory",
+   "lesson": "15/page-cache-dirty-swap"
+  },
+  {
+   "cmd": "cat /proc/PID/oom_score",
+   "desc": "Show a process's OOM score.",
+   "topic": "Memory",
+   "lesson": "15/mmap-and-oom"
+  },
+  {
+   "cmd": "sudo dmesg | grep -i 'out of memory'",
+   "desc": "Find OOM kills.",
+   "topic": "Memory",
+   "lesson": "15/mmap-and-oom"
+  },
+  {
+   "cmd": "systemd-run --scope -p MemoryMax=100M CMD",
+   "desc": "Run CMD with a memory limit.",
+   "topic": "Memory",
+   "lesson": "15/mmap-and-oom"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

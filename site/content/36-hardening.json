@@ -1,0 +1,563 @@
+{
+ "title": "Hardening",
+ "lessons": [
+  {
+   "id": "ssh-hardening",
+   "title": "Hardening SSH: effective configuration and a test server",
+   "level": "intermediate",
+   "goal": "Read the **effective** configuration of an sshd, write a hardened one, validate it before use, and see the effect of `AllowUsers` on a real server.\n\nWhy it matters: SSH is the door of almost every Linux server, and it is attacked constantly. The right settings are few, simple and testable.",
+   "setup": {
+    "note": "Steps run a private sshd on 127.0.0.1:2222 as your own user (all files in /tmp/lab/ssh, absolute paths required), and read the real sshd configuration of this machine without changing it.",
+    "commands": [
+     "mkdir -p /tmp/lab/ssh && cd /tmp/lab/ssh && chmod 700 /tmp/lab/ssh",
+     "if [ -f /tmp/lab/ssh/sshd.pid ]; then kill $(cat /tmp/lab/ssh/sshd.pid); fi; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "What this machine's sshd does",
+     "text": "`sshd -T` prints the **effective** configuration after defaults and includes are applied. That is what you audit, not just the file.",
+     "run": [
+      {
+       "cmd": "sudo sshd -T | grep -E '^(permitrootlogin|passwordauthentication|pubkeyauthentication|x11forwarding|maxauthtries|allowtcpforwarding|permitemptypasswords|logingracetime) ' | sort",
+       "output": "allowtcpforwarding yes\nlogingracetime 120\nmaxauthtries 6\npasswordauthentication no\npermitemptypasswords no\npermitrootlogin without-password\npubkeyauthentication yes\nx11forwarding yes"
+      }
+     ]
+    },
+    {
+     "title": "The most important settings",
+     "text": "- `PasswordAuthentication no`, `KbdInteractiveAuthentication no`: keys only, so password guessing cannot work.\n- `PermitRootLogin no` (or `prohibit-password`): log in as a person, then `sudo`.\n- `AllowUsers` / `AllowGroups`: only named accounts may log in at all.\n- `MaxAuthTries`, `LoginGraceTime`: limit guessing per connection.\n- `X11Forwarding no`, `AllowTcpForwarding no` (where not needed): fewer ways to tunnel around the network.\n- `LogLevel VERBOSE`: record key fingerprints."
+    },
+    {
+     "title": "Validate before you reload",
+     "text": "`sshd -t` checks a configuration file for errors without starting anything. **Always** run it before reloading the real sshd: a broken file means you lose remote access. A typo is caught:",
+     "run": [
+      {
+       "cmd": "printf 'Port 2222\\nPasswrdAuthentication no\\n' > bad.conf; sshd -t -f /tmp/lab/ssh/bad.conf 2>&1 | sed 's#/tmp/lab/ssh/##'; echo \"exit code: ${PIPESTATUS[0]}\"",
+       "output": "bad.conf: line 2: Bad configuration option: PasswrdAuthentication\r\nbad.conf: terminating, 1 bad configuration options\r\nexit code: 255"
+      }
+     ]
+    },
+    {
+     "title": "A hardened configuration for our test server",
+     "text": "These are the lines we use. Save as `sshd_config` and check them with `sshd -T -f`.",
+     "code": {
+      "file": "sshd_config",
+      "lang": "sh",
+      "src": "Port 2222\nListenAddress 127.0.0.1\nHostKey /tmp/lab/ssh/hostkey\nAuthorizedKeysFile /tmp/lab/ssh/authorized_keys\nPidFile /tmp/lab/ssh/sshd.pid\nUsePAM no\nStrictModes no\nPerSourcePenalties no\nLogLevel VERBOSE\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nX11Forwarding no\nAllowTcpForwarding no\nMaxAuthTries 3\nLoginGraceTime 20\n"
+     },
+     "run": [
+      {
+       "cmd": "ssh-keygen -q -t ed25519 -N '' -C lab-host -f hostkey; ssh-keygen -q -t ed25519 -N '' -C lab-user -f userkey; cp userkey.pub authorized_keys; chmod 600 authorized_keys userkey",
+       "output": ""
+      },
+      {
+       "cmd": "sshd -T -f /tmp/lab/ssh/sshd_config | grep -E '^(permitrootlogin|x11forwarding|allowtcpforwarding|maxauthtries|logingracetime|passwordauthentication) ' | sort",
+       "output": "allowtcpforwarding no\nlogingracetime 20\nmaxauthtries 3\npasswordauthentication no\npermitrootlogin no\nx11forwarding no"
+      }
+     ]
+    },
+    {
+     "title": "It works for the allowed user",
+     "text": "We start the server and log in.",
+     "run": [
+      {
+       "cmd": "/usr/sbin/sshd -f /tmp/lab/ssh/sshd_config -E /tmp/lab/ssh/sshd.log; sleep 1; ssh -p 2222 -i userkey -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/lab/ssh/known_hosts -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR opc@127.0.0.1 'echo logged in as $(id -un)'",
+       "output": "logged in as opc"
+      }
+     ]
+    },
+    {
+     "title": "AllowUsers: a user not on the list is refused",
+     "text": "We add `AllowUsers nobody` and restart. Our key is valid and the account exists, but the server refuses before it even looks at the key.",
+     "run": [
+      {
+       "cmd": "kill $(cat sshd.pid); echo 'AllowUsers nobody' >> sshd_config; /usr/sbin/sshd -f /tmp/lab/ssh/sshd_config -E /tmp/lab/ssh/sshd.log; sleep 1",
+       "output": ""
+      },
+      {
+       "cmd": "ssh -p 2222 -i userkey -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/lab/ssh/known_hosts -o BatchMode=yes -o LogLevel=ERROR opc@127.0.0.1 true 2>&1; echo \"exit code: $?\"",
+       "output": "opc@127.0.0.1: Permission denied (publickey).\r\nexit code: 255"
+      },
+      {
+       "cmd": "grep -E 'not allowed' sshd.log | tail -n 1 | sed -E 's/^.*sshd\\[[0-9]+\\]: //; s/ port [0-9]+//'",
+       "output": "User opc from 127.0.0.1 not allowed because not listed in AllowUsers\r"
+      }
+     ],
+     "after": "The client only sees `Permission denied`. The reason is in the **server log**: `User opc ... not allowed because not listed in AllowUsers`. This is also why denied logins are hard to debug from the client side."
+    },
+    {
+     "title": "Clean up",
+     "text": "Stop the test server.",
+     "run": [
+      {
+       "cmd": "kill $(cat sshd.pid); sleep 0.3; echo 'sshd stopped'",
+       "output": "sshd stopped"
+      }
+     ],
+     "under": "Beyond the file: keep OpenSSH updated, use only keys protected by passphrases or hardware tokens, put an SSH CA in place for large fleets, restrict the source addresses in the firewall, rate-limit with `PerSourcePenalties`/`MaxStartups` or fail2ban, and move the port only as noise reduction (not as security)."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which command checks an sshd configuration for errors without starting the server?",
+     "options": [
+      "sshd -t",
+      "sshd -d",
+      "ssh -t",
+      "systemctl check sshd"
+     ],
+     "answer": 0,
+     "explain": "`sshd -t -f FILE`."
+    },
+    {
+     "q": "What does `AllowUsers` do?",
+     "options": [
+      "Allows port forwarding",
+      "Only listed users may log in",
+      "Creates users",
+      "Sets passwords"
+     ],
+     "answer": 1,
+     "explain": "Everyone else is refused."
+    },
+    {
+     "q": "Why is `PasswordAuthentication no` a major improvement?",
+     "options": [
+      "Faster login",
+      "Password guessing attacks cannot succeed",
+      "Needs no keys",
+      "Disables root"
+     ],
+     "answer": 1,
+     "explain": "Only keys are accepted."
+    },
+    {
+     "q": "Where do you find the reason why a login was refused?",
+     "options": [
+      "In the client output",
+      "In the server's log (journal or auth log)",
+      "In known_hosts",
+      "In ~/.ssh/config"
+     ],
+     "answer": 1,
+     "explain": "The client only sees a generic denial."
+    }
+   ],
+   "check": {
+    "scenario": "You must harden SSH on 200 servers without locking anyone out. Describe a safe rollout.",
+    "answer": "Write the new config as a **drop-in** (`/etc/ssh/sshd_config.d/50-hardening.conf`), validate with `sshd -t` and `sshd -T` on every host, deploy with your config management in batches, `systemctl reload sshd` (not restart), keep an existing session open while you test a **new** one, and keep console/out-of-band access. Roll back by removing the drop-in. Check that admins have keys and sudo before turning passwords off."
+   }
+  },
+  {
+   "id": "updates-and-auditd",
+   "title": "Updates and the audit framework",
+   "level": "intermediate",
+   "goal": "Check for security updates, find out whether a reboot is needed, and use the kernel audit system to record who touches a sensitive file.\n\nWhy it matters: most compromises use known, fixed vulnerabilities. Patching is the biggest single control. Auditing tells you afterwards who did what.",
+   "setup": {
+    "note": "Steps with sudo add and remove one temporary audit watch rule.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo auditctl -D > /dev/null 2>&1; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Security updates",
+     "text": "`dnf updateinfo` reads the advisories (errata) of the repositories. `--security` filters to security fixes. `-C` uses the cached metadata (fast).",
+     "run": [
+      {
+       "cmd": "dnf -C -q updateinfo summary 2>&1 | grep -E 'Security|Bugfix' | tr -s ' ' ' ' | head -n 3",
+       "output": " 79 Security notice(s)\n 2 Critical Security notice(s)\n 58 Important Security notice(s)"
+      },
+      {
+       "cmd": "dnf -C -q check-update --security > /dev/null 2>&1; echo \"exit code: $? (100 = updates available, 0 = none)\"",
+       "output": "exit code: 100 (100 = updates available, 0 = none)"
+      }
+     ]
+    },
+    {
+     "title": "Does it need a reboot?",
+     "text": "Libraries and the kernel are loaded in memory. After an update, running processes may still use the old code. `needs-restarting -r` tells whether a **reboot** is required (kernel, glibc, systemd), and `needs-restarting -s` lists services to restart.",
+     "run": [
+      {
+       "cmd": "sudo needs-restarting -r 2>&1 | head -n 2; echo \"exit code: $?\"",
+       "output": "No core libraries or services have been updated since boot-up.\nReboot should not be necessary.\nexit code: 0"
+      },
+      {
+       "cmd": "uname -r | cut -d- -f1-2",
+       "output": "6.12.0-206.104.4.4.el9uek.aarch64"
+      }
+     ],
+     "after": "Exit code 1 means a reboot is recommended. Automatic updates (`dnf-automatic`) keep a system current; live kernel patching (Ksplice, kpatch) reduces reboots."
+    },
+    {
+     "title": "The audit framework",
+     "text": "The kernel can **audit** events: system calls, file access, logins. `auditd` writes them to `/var/log/audit/audit.log`. `auditctl` manages rules at run time. This shows the state:",
+     "run": [
+      {
+       "cmd": "sudo auditctl -s | head -n 4 | tr -s ' ' ' '",
+       "output": "enabled 1\nfailure 1\npid 1448\nrate_limit 0"
+      },
+      {
+       "cmd": "systemctl is-active auditd",
+       "output": "active"
+      }
+     ]
+    },
+    {
+     "title": "Watch a file",
+     "text": "A **watch** rule logs every write (`w`) and attribute change (`a`) of a file. `-k` adds a key to search for. We watch a file, change it, and search the audit log.",
+     "run": [
+      {
+       "cmd": "mkdir -p /tmp/lab/watched && echo secret > /tmp/lab/watched/secret.txt",
+       "output": ""
+      },
+      {
+       "cmd": "sudo auditctl -w /tmp/lab/watched/secret.txt -p wa -k labwatch 2>&1 | grep -v 'Old style'; sudo auditctl -l",
+       "output": "-w /tmp/lab/watched/secret.txt -p wa -k labwatch"
+      },
+      {
+       "cmd": "echo changed >> /tmp/lab/watched/secret.txt; sleep 3; sudo ausearch --input-logs -k labwatch -i 2>/dev/null | grep -E '^type=SYSCALL.*syscall=openat' | head -n 1 | grep -oE 'syscall=[a-z0-9]+|success=[a-z]+|auid=[a-z0-9]+|comm=\"[^\"]+\"|exe=\"[^\"]+\"' | tr '\\n' ' '; echo",
+       "output": "syscall=openat success=yes auid=opc "
+      }
+     ],
+     "after": "The record says **which system call** (`openat` with write flags), whether it succeeded, **who** (`auid` is the login user, kept even after `sudo`), and which program (`bash`)."
+    },
+    {
+     "title": "Remove the rule",
+     "text": "Rules added with `auditctl` are temporary. Permanent rules go into `/etc/audit/rules.d/*.rules` and are loaded at boot (`augenrules --load`). Typical watches: `/etc/passwd`, `/etc/shadow`, `/etc/sudoers`, `/etc/ssh/sshd_config`.",
+     "run": [
+      {
+       "cmd": "sudo auditctl -W /tmp/lab/watched/secret.txt -p wa -k labwatch 2>&1 | grep -v 'Old style'; sudo auditctl -l",
+       "output": "No rules"
+      }
+     ],
+     "under": "Audit rules live in the kernel. When a watched inode is touched the kernel builds a record and sends it over a netlink socket to `auditd`, which appends it to the log. The `auid` (audit user ID) is set at login and inherited by every process, even after `su`/`sudo`, which makes it the right field to answer \"who really did this?\". If the audit log cannot be written (disk full) auditd can be configured to suspend or halt the system."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which command tells you if a reboot is needed after updates?",
+     "options": [
+      "needs-restarting -r",
+      "dnf reboot",
+      "uptime",
+      "systemctl reboot-needed"
+     ],
+     "answer": 0,
+     "explain": "`needs-restarting -r`."
+    },
+    {
+     "q": "What does the audit field `auid` represent?",
+     "options": [
+      "The effective user",
+      "The original login user, preserved across su/sudo",
+      "The group",
+      "The process id"
+     ],
+     "answer": 1,
+     "explain": "Audit user ID."
+    },
+    {
+     "q": "A watch rule `-w FILE -p wa` logs...",
+     "options": [
+      "Reads",
+      "Writes and attribute changes",
+      "Executes",
+      "Deletes only"
+     ],
+     "answer": 1,
+     "explain": "w = write, a = attribute."
+    },
+    {
+     "q": "Where do you put audit rules that must survive a reboot?",
+     "options": [
+      "auditctl only",
+      "/etc/audit/rules.d/*.rules",
+      "/proc/audit",
+      "/var/log/audit"
+     ],
+     "answer": 1,
+     "explain": "Then `augenrules --load`."
+    }
+   ],
+   "check": {
+    "scenario": "An auditor asks: \"who modified /etc/sudoers last week?\". How do you answer, and what must have been in place?",
+    "answer": "A permanent rule `-w /etc/sudoers -p wa -k sudoers` (and `/etc/sudoers.d/`) must have been active. Then `ausearch -k sudoers -i --start 11/01/2026` shows each change with `auid` (login user), command and time. Without a rule you can only guess from file times and shell history. Ship the logs to a central server so an intruder cannot erase them."
+   }
+  },
+  {
+   "id": "file-integrity-aide",
+   "title": "File integrity checking with AIDE and checksums",
+   "level": "advanced",
+   "goal": "Create a baseline of file hashes and permissions, change things, and let a tool report exactly what changed.\n\nWhy it matters: attackers modify binaries and configuration. A trustworthy baseline turns \"something feels wrong\" into a list of changed files. Package managers (`rpm -V`) cover installed packages; AIDE covers everything you choose.",
+   "setup": {
+    "note": "The AIDE steps use a small test directory. The last step temporarily modifies the `tree` package file and restores it with a reinstall.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The idea",
+     "text": "An **integrity checker** records for each file its hash, size, owner, permissions and times, **while the system is known good**. Later it recomputes them and reports differences. The baseline database must be stored where an attacker cannot change it (read-only media, another host).",
+     "run": [
+      {
+       "cmd": "rpm -V coreutils; echo \"rpm -V coreutils exit code: $?\"",
+       "output": "rpm -V coreutils exit code: 0"
+      }
+     ]
+    },
+    {
+     "title": "A tiny baseline with sha256sum",
+     "text": "The simplest checker: hashes of files in a directory.",
+     "run": [
+      {
+       "cmd": "mkdir -p watched && cd watched && echo one > a.txt && echo two > b.txt && cd ..",
+       "output": ""
+      },
+      {
+       "cmd": "sha256sum watched/* > baseline.sha256; wc -l < baseline.sha256 | awk '{print $1, \"files recorded\"}'",
+       "output": "2 files recorded"
+      },
+      {
+       "cmd": "sha256sum -c baseline.sha256 2>&1 | sed 's/: OK/: OK/'",
+       "output": "watched/a.txt: OK\nwatched/b.txt: OK"
+      },
+      {
+       "cmd": "echo tampered >> watched/a.txt; echo new > watched/c.txt; sha256sum -c baseline.sha256 2>&1 | grep -v ': OK'; echo \"exit code: ${PIPESTATUS[0]}\"",
+       "output": "watched/a.txt: FAILED\nsha256sum: WARNING: 1 computed checksum did NOT match\nexit code: 1"
+      }
+     ],
+     "after": "`sha256sum -c` catches **changed** files but knows nothing about **new** files (`c.txt`), changed permissions or owners, and the baseline itself could be edited."
+    },
+    {
+     "title": "AIDE: a real checker",
+     "text": "AIDE (Advanced Intrusion Detection Environment) records the attributes you select. Its configuration lists what to watch and with which rules. Ours watches one directory (a real system watches `/etc`, `/usr/bin`, `/boot`, ...).",
+     "code": {
+      "file": "aide.conf",
+      "lang": "sh",
+      "src": "database_in=file:/tmp/lab/aide.db\ndatabase_out=file:/tmp/lab/aide.db.new\ndatabase_new=file:/tmp/lab/aide.db.new\nreport_url=stdout\nFull = p+u+g+s+sha256\n/tmp/lab/watched Full\n"
+     },
+     "run": [
+      {
+       "cmd": "cat aide.conf",
+       "output": "database_in=file:/tmp/lab/aide.db\ndatabase_out=file:/tmp/lab/aide.db.new\ndatabase_new=file:/tmp/lab/aide.db.new\nreport_url=stdout\nFull = p+u+g+s+sha256\n/tmp/lab/watched Full"
+      }
+     ]
+    },
+    {
+     "title": "Create the baseline and check",
+     "text": "`--init` builds the database. We move it into place as the trusted baseline, then check right away: no differences.",
+     "run": [
+      {
+       "cmd": "rm -f watched/c.txt; echo one > watched/a.txt; aide -c aide.conf --init 2>&1 | grep -E 'Number of entries' | tr -s ' ' ' '",
+       "output": "Number of entries:\t3"
+      },
+      {
+       "cmd": "mv aide.db.new aide.db; aide -c aide.conf --check 2>&1 | grep -E 'found no differences|Total number of entries' | sed 's/!!//'",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "Tamper with the files",
+     "text": "We change a file, add a file and change a permission. AIDE reports all three and says **what** attribute changed.",
+     "run": [
+      {
+       "cmd": "echo evil >> watched/a.txt; echo new > watched/c.txt; chmod 777 watched/b.txt",
+       "output": ""
+      },
+      {
+       "cmd": "aide -c aide.conf --check 2>&1 | sed -n '/^Summary:/,/^Detailed information/p' | grep -vE '^(-+|)$' | sed -n '1,14p'",
+       "output": "Summary:\n  Total number of entries:\t4\n  Added entries:\t\t1\n  Removed entries:\t\t0\n  Changed entries:\t\t3\nAdded entries:\nf+++++++++++++++++: /tmp/lab/watched/c.txt\nChanged entries:\nd > ...           : /tmp/lab/watched\nf > ...     H     : /tmp/lab/watched/a.txt\nf = p..     .     : /tmp/lab/watched/b.txt\nDetailed information about changes:"
+      }
+     ],
+     "under": "AIDE compares the **database** with the file system. Differences are classified: added (`f++++`), removed, changed (a letter per attribute: `p` permissions, `u` user, `g` group, `s` size, `H` hash). A real deployment runs the check daily from cron or a systemd timer, ships the report to a central place, and **updates the baseline only after approving legitimate changes** (`aide --update`)."
+    },
+    {
+     "title": "Also compare against packages",
+     "text": "For software installed from packages, the package database is a baseline that the vendor signs. `rpm -Va` verifies all packages; with the `--nomtime` and config filters you can run it daily.",
+     "run": [
+      {
+       "cmd": "sudo sh -c 'echo x >> /usr/bin/tree'; rpm -V tree | cut -c1-12; sudo dnf -q -y reinstall tree > /dev/null 2>&1; rpm -V tree; echo \"after reinstall, exit code: $?\"",
+       "output": "S.5....T.   \nafter reinstall, exit code: 0"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What can `sha256sum -c` NOT detect?",
+     "options": [
+      "A modified file",
+      "A new file that is not in the list",
+      "A deleted file",
+      "A corrupt file"
+     ],
+     "answer": 1,
+     "explain": "It only checks files in the baseline list."
+    },
+    {
+     "q": "Where should the baseline database be kept?",
+     "options": [
+      "Next to the files",
+      "Where an intruder cannot modify it (read-only or another host)",
+      "In /tmp",
+      "In the repository"
+     ],
+     "answer": 1,
+     "explain": "Otherwise they can update it to hide changes."
+    },
+    {
+     "q": "What does `rpm -V PKG` compare?",
+     "options": [
+      "Version numbers",
+      "Installed files against the package database (size, hash, mode, owner)",
+      "Dependencies",
+      "Disk space"
+     ],
+     "answer": 1,
+     "explain": "Verification of installed files."
+    },
+    {
+     "q": "When should you run `aide --update`?",
+     "options": [
+      "After every check",
+      "After you reviewed and approved legitimate changes",
+      "Never",
+      "Before an attack"
+     ],
+     "answer": 1,
+     "explain": "Otherwise the report becomes noise or hides changes."
+    }
+   ],
+   "check": {
+    "scenario": "A server was compromised through a web application. How do you use integrity checking to decide what to trust, and what are the limits?",
+    "answer": "Compare against the baseline (`aide --check`, `rpm -Va`) to list changed system files and new files in unexpected places. Limits: if the attacker had root they could also alter the checker or its database; the baseline is only as good as when it was made; data files change legitimately. After a root compromise the safe answer is to rebuild from known-good media and restore data, not to clean up."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "Name five SSH hardening measures.",
+   "a": "Keys only, no root login, AllowUsers/AllowGroups, limited auth tries and grace time, no unneeded forwarding, updated OpenSSH, firewall/rate limiting, VERBOSE logging. See [the lesson](#/lesson/36/ssh-hardening).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you safely change sshd_config on a remote server?",
+   "a": "Validate with `sshd -t`, reload (not restart), keep the old session open and test a new one, and keep out-of-band access.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you find out about security updates and whether to reboot?",
+   "a": "`dnf updateinfo --security`, `dnf check-update --security`, `needs-restarting -r`. See [the lesson](#/lesson/36/updates-and-auditd).",
+   "level": "beginner"
+  },
+  {
+   "q": "What is auditd and what is auid?",
+   "a": "The userspace daemon of the kernel audit framework that logs syscalls and file access per rules. auid is the login user, preserved through su/sudo. See [the lesson](#/lesson/36/updates-and-auditd).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How does a file integrity checker work and what is its main weakness?",
+   "a": "It stores hashes and attributes of known-good files and reports differences. Weakness: the baseline and the tool must be protected, and legitimate change creates noise. See [the lesson](#/lesson/36/file-integrity-aide).",
+   "level": "advanced"
+  },
+  {
+   "q": "A compromised root server: clean up or rebuild?",
+   "a": "Rebuild from trusted media and restore data after review. You cannot fully trust a system an attacker had root on.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Hardening",
+   "def": "Reducing a system's attack surface and tightening its configuration.",
+   "lesson": "36/ssh-hardening"
+  },
+  {
+   "term": "sshd -T",
+   "def": "Prints the effective sshd configuration after defaults and includes.",
+   "lesson": "36/ssh-hardening"
+  },
+  {
+   "term": "auditd",
+   "def": "The daemon that writes kernel audit records to the audit log.",
+   "lesson": "36/updates-and-auditd"
+  },
+  {
+   "term": "auid",
+   "def": "Audit user ID: the original login user, kept across su and sudo.",
+   "lesson": "36/updates-and-auditd"
+  },
+  {
+   "term": "AIDE",
+   "def": "A file integrity checker that compares files with a stored baseline.",
+   "lesson": "36/file-integrity-aide"
+  },
+  {
+   "term": "Baseline",
+   "def": "A trusted record of file hashes and attributes to compare against.",
+   "lesson": "36/file-integrity-aide"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "sudo sshd -T",
+   "desc": "Show the effective sshd configuration.",
+   "topic": "Hardening",
+   "lesson": "36/ssh-hardening"
+  },
+  {
+   "cmd": "sshd -t -f FILE",
+   "desc": "Test an sshd configuration file.",
+   "topic": "Hardening",
+   "lesson": "36/ssh-hardening"
+  },
+  {
+   "cmd": "dnf updateinfo list --security",
+   "desc": "List security advisories with updates.",
+   "topic": "Hardening",
+   "lesson": "36/updates-and-auditd"
+  },
+  {
+   "cmd": "sudo needs-restarting -r",
+   "desc": "Tell whether a reboot is required.",
+   "topic": "Hardening",
+   "lesson": "36/updates-and-auditd"
+  },
+  {
+   "cmd": "sudo auditctl -w FILE -p wa -k KEY",
+   "desc": "Watch a file for writes.",
+   "topic": "Hardening",
+   "lesson": "36/updates-and-auditd"
+  },
+  {
+   "cmd": "sudo ausearch --input-logs -k KEY -i",
+   "desc": "Search audit records by key.",
+   "topic": "Hardening",
+   "lesson": "36/updates-and-auditd"
+  },
+  {
+   "cmd": "aide -c aide.conf --init",
+   "desc": "Build the integrity baseline.",
+   "topic": "Hardening",
+   "lesson": "36/file-integrity-aide"
+  },
+  {
+   "cmd": "aide -c aide.conf --check",
+   "desc": "Compare files with the baseline.",
+   "topic": "Hardening",
+   "lesson": "36/file-integrity-aide"
+  },
+  {
+   "cmd": "rpm -Va",
+   "desc": "Verify all installed packages.",
+   "topic": "Hardening",
+   "lesson": "36/file-integrity-aide"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

@@ -1,0 +1,471 @@
+{
+ "title": "Network basics in Linux",
+ "lessons": [
+  {
+   "id": "interfaces-addresses-routes",
+   "title": "Interfaces, addresses, routes and ARP",
+   "level": "beginner",
+   "goal": "Learn the four things every network connection needs: an interface, an address, a route and (on Ethernet) a neighbour entry, and read each with the `ip` command.\n\nWhy it matters: \"the network is down\" breaks into these questions. `ip addr`, `ip route` and `ip neigh` answer them in seconds.",
+   "setup": {
+    "note": "These steps build three network namespaces joined by virtual cables (veth pairs): lab-a (10.200.1.1) <-> lab-b, the router (10.200.1.2 and 10.200.2.1) <-> lab-c (10.200.2.2). They use sudo, do not touch your real network, and are removed at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "for n in lab-a lab-b lab-c; do sudo ip netns del $n 2>/dev/null; done; true",
+     "for n in lab-a lab-b lab-c; do sudo ip netns add $n; sudo ip -n $n link set lo up; done",
+     "sudo ip link add va type veth peer name vb1; sudo ip link set va netns lab-a; sudo ip link set vb1 netns lab-b",
+     "sudo ip link add vb2 type veth peer name vc; sudo ip link set vb2 netns lab-b; sudo ip link set vc netns lab-c",
+     "sudo ip -n lab-a addr add 10.200.1.1/24 dev va; sudo ip -n lab-b addr add 10.200.1.2/24 dev vb1; sudo ip -n lab-b addr add 10.200.2.1/24 dev vb2; sudo ip -n lab-c addr add 10.200.2.2/24 dev vc",
+     "sudo ip -n lab-a link set va up; sudo ip -n lab-b link set vb1 up; sudo ip -n lab-b link set vb2 up; sudo ip -n lab-c link set vc up",
+     "sudo ip netns exec lab-b sysctl -qw net.ipv4.ip_forward=1",
+     "sudo ip -n lab-a route add 10.200.2.0/24 via 10.200.1.2; sudo ip -n lab-c route add 10.200.1.0/24 via 10.200.2.1"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The loopback interface",
+     "text": "Every machine has `lo`, a virtual interface for talking to itself. Its address is `127.0.0.1` (IPv4) and `::1` (IPv6). `ip -br` prints a compact table: name, state, addresses.",
+     "run": [
+      {
+       "cmd": "ip -br link show lo | awk '{print $1, $2, $3}'",
+       "output": "lo UNKNOWN 00:00:00:00:00:00"
+      },
+      {
+       "cmd": "ip -br addr show lo",
+       "output": "lo               UNKNOWN        127.0.0.1/8 ::1/128 "
+      }
+     ]
+    },
+    {
+     "title": "A lab network",
+     "text": "To show real routing without touching your real network we use three **network namespaces**: each is a private copy of the network stack (own interfaces, addresses, routes). They are connected by virtual cables (`veth` pairs). `lab-b` is a router between `lab-a` and `lab-c`.\n\n`lab-a` 10.200.1.1 --- 10.200.1.2 `lab-b` 10.200.2.1 --- 10.200.2.2 `lab-c`",
+     "run": [
+      {
+       "cmd": "ip netns list | awk '{print $1}' | sort | tr '\\n' ' '; echo",
+       "output": "lab-a lab-b lab-c "
+      },
+      {
+       "cmd": "sudo ip -n lab-b -4 -br addr | sed -E 's/@if[0-9]+//'",
+       "output": "lo               UNKNOWN        127.0.0.1/8 \nvb1        UP             10.200.1.2/24 \nvb2        UP             10.200.2.1/24 "
+      }
+     ]
+    },
+    {
+     "title": "Addresses",
+     "text": "`ip addr` shows the addresses on each interface. `10.200.1.1/24` means: this host is 10.200.1.1 on a network of 256 addresses (the `/24` is the **prefix length**; the netmask is 255.255.255.0).",
+     "run": [
+      {
+       "cmd": "sudo ip -n lab-a -4 -br addr | sed -E 's/@if[0-9]+//'",
+       "output": "lo               UNKNOWN        127.0.0.1/8 \nva         UP             10.200.1.1/24 "
+      },
+      {
+       "cmd": "sudo ip -n lab-a -4 -o addr show dev va | awk '{print $4, $5, $6}'",
+       "output": "10.200.1.1/24 scope global"
+      }
+     ]
+    },
+    {
+     "title": "Routes",
+     "text": "The **routing table** tells the kernel where to send a packet for each destination. The **connected** route (`proto kernel scope link`) was added automatically when the address was assigned. We added a second route by hand: to reach 10.200.2.0/24 go **via** the router 10.200.1.2. `ip route get` shows the decision for one destination.",
+     "run": [
+      {
+       "cmd": "sudo ip -n lab-a route",
+       "output": "10.200.1.0/24 dev va proto kernel scope link src 10.200.1.1 \n10.200.2.0/24 via 10.200.1.2 dev va "
+      },
+      {
+       "cmd": "sudo ip -n lab-a route get 10.200.2.2 | sed -E 's/ uid .*//'",
+       "output": "10.200.2.2 via 10.200.1.2 dev va src 10.200.1.1\n    cache "
+      }
+     ],
+     "under": "For each outgoing packet the kernel does a **longest-prefix match** in the routing table and picks the most specific route. `default via X` (0.0.0.0/0) matches anything not matched by a longer prefix. The route also fixes the outgoing interface and the source address."
+    },
+    {
+     "title": "Reach across the router",
+     "text": "`ping` sends ICMP echo requests. The packets cross `lab-b` because forwarding is on. `traceroute -n` shows each hop by sending packets with increasing TTL.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-a ping -c 2 -W 1 10.200.2.2 | grep -E 'transmitted|rtt' | sed -E 's/, time [0-9]+ms//; s/rtt.*= /rtt min\\/avg\\/max\\/mdev = /; s/[0-9.]+\\/[0-9.]+\\/[0-9.]+\\/[0-9.]+ ms/(numbers vary)/'",
+       "output": "2 packets transmitted, 2 received, 0% packet loss\nrtt min/avg/max/mdev = (numbers vary)"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a traceroute -n -q1 -w1 10.200.2.2 | awk 'NR>1 {print $1, $2}'",
+       "output": "1 10.200.1.2\n2 10.200.2.2"
+      }
+     ]
+    },
+    {
+     "title": "ARP: from IP address to MAC address",
+     "text": "On Ethernet a packet goes to a **MAC address**. The **neighbour table** (ARP for IPv4) maps the next hop's IP to its MAC. The kernel asks `who has 10.200.1.2?` and remembers the answer for a while. The next hop of `lab-a` is the router, even for traffic to `lab-c`.",
+     "run": [
+      {
+       "cmd": "sudo ip -n lab-a neigh | sed -E 's/lladdr [0-9a-f:]+/lladdr <mac>/'",
+       "output": "10.200.1.2 dev va lladdr <mac> REACHABLE "
+      }
+     ]
+    },
+    {
+     "title": "Forwarding makes a router",
+     "text": "A Linux host forwards packets between interfaces only when `net.ipv4.ip_forward` is 1. Switch it off in `lab-b` and the ping fails; switch it on again and it works.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-b sysctl -w net.ipv4.ip_forward=0",
+       "output": "net.ipv4.ip_forward = 0"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a ping -c 1 -W 1 10.200.2.2 | grep -E 'transmitted' | sed -E 's/, time [0-9]+ms//'",
+       "output": "1 packets transmitted, 0 received, 100% packet loss"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-b sysctl -w net.ipv4.ip_forward=1; sudo ip netns exec lab-a ping -c 1 -W 1 10.200.2.2 | grep -E 'transmitted' | sed -E 's/, time [0-9]+ms//'",
+       "output": "net.ipv4.ip_forward = 1\n1 packets transmitted, 1 received, 0% packet loss"
+      }
+     ]
+    },
+    {
+     "title": "Clean up",
+     "text": "Deleting a namespace removes its interfaces.",
+     "run": [
+      {
+       "cmd": "for n in lab-a lab-b lab-c; do sudo ip netns del $n; done; ip netns list | wc -l | awk '{print $1, \"namespaces left\"}'",
+       "output": "0 namespaces left"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `10.200.1.1/24` mean?",
+     "options": [
+      "Port 24",
+      "Address 10.200.1.1 on a network with a 24-bit prefix (256 addresses)",
+      "24 hops",
+      "A subnet mask of 24.0.0.0"
+     ],
+     "answer": 1,
+     "explain": "The /24 is the prefix length."
+    },
+    {
+     "q": "Which command shows which route and source address the kernel picks for a destination?",
+     "options": [
+      "ip route get DEST",
+      "ip addr",
+      "arp",
+      "ss"
+     ],
+     "answer": 0,
+     "explain": "`ip route get`."
+    },
+    {
+     "q": "What happens when `net.ipv4.ip_forward` is 0 on a router?",
+     "options": [
+      "Nothing",
+      "It does not forward packets between interfaces",
+      "It forwards only ICMP",
+      "It reboots"
+     ],
+     "answer": 1,
+     "explain": "Forwarding is off by default; hosts are not routers."
+    },
+    {
+     "q": "What does the neighbour (ARP) table map?",
+     "options": [
+      "Names to IPs",
+      "Next-hop IP addresses to MAC addresses",
+      "Ports to processes",
+      "Routes to metrics"
+     ],
+     "answer": 1,
+     "explain": "IPv4 to Ethernet address."
+    }
+   ],
+   "check": {
+    "scenario": "From a server you can ping a host on your own subnet but not one in another subnet. What do you check on the server, in order?",
+    "answer": "`ip addr` (correct address and prefix), `ip route` (is there a route or default gateway for the other subnet? `ip route get DEST`), `ip neigh` (can it resolve the gateway's MAC), then ping the gateway itself, then the far side. If the gateway answers but the far host does not, the problem is on the router (forwarding, its routes or a firewall)."
+   }
+  },
+  {
+   "id": "networkmanager",
+   "title": "NetworkManager and persistent network configuration",
+   "level": "intermediate",
+   "goal": "Learn why `ip addr add` is temporary, and how NetworkManager stores connections that survive a reboot, using `nmcli` on a harmless dummy interface.\n\nWhy it matters: on Red Hat family systems (and many desktops) NetworkManager owns the network configuration. Changes made with `ip` are lost at reboot or overwritten when NM reconfigures an interface.",
+   "setup": {
+    "note": "Steps here create and delete a dummy network connection with NetworkManager.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo nmcli connection delete lab0 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Runtime versus persistent",
+     "text": "The `ip` command changes the **running kernel**. Nothing is written to disk. A **network manager** (NetworkManager, systemd-networkd, netplan, ifupdown) stores configuration in files and applies it at boot and when links change.",
+     "run": [
+      {
+       "cmd": "systemctl is-active NetworkManager",
+       "output": "active"
+      },
+      {
+       "cmd": "nmcli -f DEVICE,TYPE,STATE device status | head -n 2",
+       "output": "DEVICE           TYPE      STATE                  \nenp0s6           ethernet  connected              "
+      }
+     ]
+    },
+    {
+     "title": "Devices and connections",
+     "text": "NM distinguishes **devices** (the interfaces) from **connections** (saved profiles). A connection is applied to a device. `nmcli connection show` lists profiles.",
+     "run": [
+      {
+       "cmd": "nmcli -t -f TYPE connection show | sort | uniq -c | sort -rn | head -n 3",
+       "output": "      2 bridge\n      2 802-3-ethernet\n      1 loopback"
+      }
+     ]
+    },
+    {
+     "title": "Create a connection on a dummy interface",
+     "text": "A **dummy** interface is a virtual interface that goes nowhere: safe for tests. This command creates the profile, the interface and applies a fixed address.",
+     "run": [
+      {
+       "cmd": "sudo nmcli connection add type dummy ifname lab0 con-name lab0 ipv4.method manual ipv4.addresses 10.200.9.1/24 2>&1 | sed -E 's/ \\([^)]*\\)//'",
+       "output": "Connection 'lab0' successfully added."
+      },
+      {
+       "cmd": "sleep 1; ip -4 -br addr show lab0",
+       "output": "lab0             UNKNOWN        10.200.9.1/24 "
+      }
+     ]
+    },
+    {
+     "title": "Modify and re-apply",
+     "text": "`nmcli connection modify` changes the stored profile. `connection up` applies it to the device again. The `+` prefix adds a value instead of replacing.",
+     "run": [
+      {
+       "cmd": "sudo nmcli connection modify lab0 +ipv4.addresses 10.200.9.2/24 && sudo nmcli connection up lab0 > /dev/null; ip -4 -br addr show lab0",
+       "output": "lab0             UNKNOWN        10.200.9.1/24 10.200.9.2/24 "
+      },
+      {
+       "cmd": "nmcli -g ipv4.addresses connection show lab0",
+       "output": "10.200.9.1/24, 10.200.9.2/24"
+      }
+     ]
+    },
+    {
+     "title": "It is stored in a file",
+     "text": "NM writes each profile to `/etc/NetworkManager/system-connections/NAME.nmconnection` in an INI-like format. That is what survives a reboot.",
+     "run": [
+      {
+       "cmd": "sudo grep -vE '^(uuid|$)' /etc/NetworkManager/system-connections/lab0.nmconnection",
+       "output": "[connection]\nid=lab0\ntype=dummy\ninterface-name=lab0\ntimestamp=1794138062\n[dummy]\n[ipv4]\naddress1=10.200.9.1/24\naddress2=10.200.9.2/24\nmethod=manual\n[ipv6]\naddr-gen-mode=default\nmethod=disabled\n[proxy]"
+      }
+     ],
+     "under": "NetworkManager talks to the kernel with **netlink** sockets (the same interface `ip` uses), watches link and address events, and reapplies its profiles. If you change an address with `ip` NM may leave it alone, but it can also remove it the next time it re-activates the connection. Always change the profile."
+    },
+    {
+     "title": "Remove it",
+     "text": "Deleting the profile removes the file and the dummy interface.",
+     "run": [
+      {
+       "cmd": "sudo nmcli connection delete lab0 2>&1 | sed -E 's/ \\([^)]*\\)//'",
+       "output": "Connection 'lab0' successfully deleted."
+      },
+      {
+       "cmd": "ip -br link show lab0 2>&1 | sed 's/.*: //'",
+       "output": "Device \"lab0\" does not exist."
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Why is an address added with `ip addr add` lost after a reboot?",
+     "options": [
+      "It is stored in RAM only",
+      "ip is broken",
+      "DHCP removes it",
+      "NM deletes the kernel"
+     ],
+     "answer": 0,
+     "explain": "`ip` changes the running kernel only."
+    },
+    {
+     "q": "What is the difference between a NetworkManager device and a connection?",
+     "options": [
+      "None",
+      "A device is an interface; a connection is a saved profile applied to a device",
+      "A device is a profile",
+      "A connection is hardware"
+     ],
+     "answer": 1,
+     "explain": "Profiles are applied to devices."
+    },
+    {
+     "q": "Which command re-applies a modified profile?",
+     "options": [
+      "nmcli connection up NAME",
+      "ip link reload",
+      "systemctl restart network-ip",
+      "nmcli device kill"
+     ],
+     "answer": 0,
+     "explain": "`connection up` activates the profile again."
+    },
+    {
+     "q": "Where does NM store profiles?",
+     "options": [
+      "/etc/NetworkManager/system-connections/",
+      "/var/log/nm",
+      "/proc/net",
+      "/etc/resolv.conf"
+     ],
+     "answer": 0,
+     "explain": ".nmconnection files."
+    }
+   ],
+   "check": {
+    "scenario": "After a reboot a static IP you set with `ip addr add` is gone. Show the right way to set it so it persists, with NetworkManager.",
+    "answer": "`nmcli connection modify \"System eth0\" ipv4.method manual ipv4.addresses 192.0.2.10/24 ipv4.gateway 192.0.2.1 ipv4.dns 192.0.2.53` then `nmcli connection up \"System eth0\"`. Verify with `nmcli -f ipv4 connection show \"System eth0\"` and `ip -br addr`."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What does an IP address with /24 mean?",
+   "a": "A network prefix of 24 bits: the first 24 bits identify the network, the last 8 the host (256 addresses, 254 usable). See [the lesson](#/lesson/28/interfaces-addresses-routes).",
+   "level": "beginner"
+  },
+  {
+   "q": "How does Linux choose a route?",
+   "a": "Longest-prefix match in the routing table; `default` is the fallback. `ip route get DEST` shows the choice. See [the lesson](#/lesson/28/interfaces-addresses-routes).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is ARP?",
+   "a": "The protocol that resolves a next-hop IPv4 address to a MAC address on the local link; results live in the neighbour table (`ip neigh`).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What makes a Linux host a router?",
+   "a": "`net.ipv4.ip_forward=1` (and routes, plus firewall rules that allow forwarding).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why are `ip` changes not permanent and how do you make them so?",
+   "a": "`ip` changes the running kernel. Persist with the network manager: `nmcli connection modify` (NetworkManager), netplan, or systemd-networkd files. See [NetworkManager](#/lesson/28/networkmanager).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is a network namespace?",
+   "a": "A separate copy of the network stack (interfaces, addresses, routes, firewall rules, sockets). Containers use them; `ip netns` manages them.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Interface",
+   "def": "A network attachment point of the kernel, such as eth0, lo or a veth.",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "term": "Prefix length",
+   "def": "The number of leading bits that identify the network in an address (/24).",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "term": "Routing table",
+   "def": "The kernel's list of destinations and where to send packets for them.",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "term": "Default gateway",
+   "def": "The router used for destinations not matched by a more specific route.",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "term": "ARP",
+   "def": "Address Resolution Protocol: maps IPv4 addresses to MAC addresses on a link.",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "term": "veth",
+   "def": "A virtual Ethernet cable: two interfaces connected back to back, often in different namespaces.",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "term": "NetworkManager",
+   "def": "The service that manages network connections and persistent profiles.",
+   "lesson": "28/networkmanager"
+  },
+  {
+   "term": "Network namespace",
+   "def": "An isolated copy of the network stack.",
+   "lesson": "28/interfaces-addresses-routes"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ip -br addr",
+   "desc": "Show addresses in a compact table.",
+   "topic": "Networking",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "cmd": "ip -br link",
+   "desc": "Show interfaces and their state.",
+   "topic": "Networking",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "cmd": "ip route",
+   "desc": "Show the routing table.",
+   "topic": "Networking",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "cmd": "ip route get DEST",
+   "desc": "Show which route will be used for DEST.",
+   "topic": "Networking",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "cmd": "ip neigh",
+   "desc": "Show the ARP / neighbour table.",
+   "topic": "Networking",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "cmd": "sudo ip addr add 10.0.0.5/24 dev eth0",
+   "desc": "Add an address (until reboot).",
+   "topic": "Networking",
+   "lesson": "28/networkmanager"
+  },
+  {
+   "cmd": "sudo ip netns add NAME",
+   "desc": "Create a network namespace.",
+   "topic": "Networking",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "cmd": "sudo ip -n NS addr",
+   "desc": "Run ip inside a namespace.",
+   "topic": "Networking",
+   "lesson": "28/interfaces-addresses-routes"
+  },
+  {
+   "cmd": "nmcli device status",
+   "desc": "List devices and their state.",
+   "topic": "Networking",
+   "lesson": "28/networkmanager"
+  },
+  {
+   "cmd": "nmcli connection modify NAME ipv4.addresses A/24",
+   "desc": "Change a stored profile.",
+   "topic": "Networking",
+   "lesson": "28/networkmanager"
+  },
+  {
+   "cmd": "nmcli connection up NAME",
+   "desc": "Apply a connection profile.",
+   "topic": "Networking",
+   "lesson": "28/networkmanager"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

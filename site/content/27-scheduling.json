@@ -1,0 +1,437 @@
+{
+ "title": "Scheduling",
+ "lessons": [
+  {
+   "id": "cron",
+   "title": "cron: running jobs on a schedule",
+   "level": "beginner",
+   "goal": "Learn the five time fields of a crontab, install a job, see it run, and learn the traps of cron's minimal environment.\n\nWhy it matters: cron has been the standard scheduler for decades. You will read and write crontabs on almost every server.",
+   "setup": {
+    "note": "Steps here wait up to a minute (cron and at work in whole minutes). They add and remove a test crontab entry, one `at` job and a few `lab-*` timers.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "crontab -r 2>/dev/null; sudo systemctl stop lab-tick.timer lab-tick.service lab-later.timer 2>/dev/null; sudo rm -f /etc/systemd/system/lab-tick.*; sudo systemctl daemon-reload; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The five fields",
+     "text": "A crontab line is `minute hour day-of-month month day-of-week command`.\n\n- `*` any value, `*/5` every 5, `1,15` a list, `9-17` a range.\n- `0 3 * * *` every day at 03:00. `*/10 * * * *` every ten minutes. `30 2 * * 1` Mondays at 02:30.\n- Shortcuts: `@reboot`, `@hourly`, `@daily`, `@weekly`.",
+     "run": [
+      {
+       "cmd": "systemctl is-active crond",
+       "output": "active"
+      },
+      {
+       "cmd": "crontab -l 2>&1",
+       "output": "no crontab for opc"
+      }
+     ]
+    },
+    {
+     "title": "Install a job",
+     "text": "`crontab -` installs the lines it reads as your crontab. Our job runs **every minute**, writes the time and the `PATH` it saw into a file, and nothing else.",
+     "run": [
+      {
+       "cmd": "echo '* * * * * echo \"ran at second $(date +\\%S) with PATH=$PATH\" >> /tmp/lab/cron.out' | crontab -",
+       "output": ""
+      },
+      {
+       "cmd": "crontab -l",
+       "output": "* * * * * echo \"ran at second $(date +\\%S) with PATH=$PATH\" >> /tmp/lab/cron.out"
+      }
+     ],
+     "after": "In a crontab `%` has a special meaning (newline), so it must be written `\\%`."
+    },
+    {
+     "title": "Wait for it",
+     "text": "cron checks once per minute. We wait for the next minute boundary plus a few seconds.",
+     "run": [
+      {
+       "cmd": "sleep $((65 - $(date +%S))); cat /tmp/lab/cron.out",
+       "output": "ran at second 01 with PATH=/usr/bin:/bin"
+      }
+     ],
+     "after": "The job ran, and its `PATH` is short: `/usr/bin:/bin`. Cron does **not** load your `.bashrc` or profile."
+    },
+    {
+     "title": "The environment trap",
+     "text": "A job that works in your terminal and fails in cron is almost always an environment difference: the short `PATH`, no `HOME` variables from your profile, a different working directory (your home), and `/bin/sh` instead of bash. Use full paths and set what you need at the top of the crontab (`PATH=...`, `MAILTO=...`).",
+     "run": [
+      {
+       "cmd": "echo \"$PATH\"",
+       "output": "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin"
+      },
+      {
+       "cmd": "grep -E '^(SHELL|PATH|MAILTO)=' /etc/crontab",
+       "output": "SHELL=/bin/bash\nPATH=/sbin:/bin:/usr/sbin:/usr/bin\nMAILTO=root"
+      }
+     ]
+    },
+    {
+     "title": "Where the system's jobs live and what cron logs",
+     "text": "System jobs go in `/etc/cron.d/*` (with an extra user field), or scripts in `/etc/cron.hourly`, `cron.daily`, ... run by `run-parts`. cron logs each start in the journal.",
+     "run": [
+      {
+       "cmd": "ls /etc/cron.d | head -n 3 | tr '\\n' ' '; echo",
+       "output": "0hourly "
+      },
+      {
+       "cmd": "sudo grep 'CMD (echo' /var/log/cron | tail -n 1 | sed -E 's/^.*(\\(opc\\) CMD)/\\1/' | cut -c1-60",
+       "output": "(opc) CMD (echo \"ran at second $(date +%S) with PATH=$PATH\" "
+      }
+     ],
+     "under": "`crond` reads all crontabs into memory and sleeps until the next minute where a job is due. For each due job it `fork`s, switches to the job's user, sets a minimal environment, and `exec`s `/bin/sh -c COMMAND`. Output is mailed to the user (if a mail system exists) unless redirected, which is why jobs should log to a file or `logger`."
+    },
+    {
+     "title": "Remove the job",
+     "text": "`crontab -r` removes your whole crontab (no confirmation). `crontab -e` edits it in `$EDITOR`.",
+     "run": [
+      {
+       "cmd": "crontab -r; crontab -l 2>&1",
+       "output": "no crontab for opc"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `*/15 * * * *` mean?",
+     "options": [
+      "Every 15 hours",
+      "Every 15 minutes",
+      "At minute 15 only",
+      "Every 15 days"
+     ],
+     "answer": 1,
+     "explain": "Step value on the minute field."
+    },
+    {
+     "q": "A script works by hand but fails in cron with `command not found`. Most likely cause?",
+     "options": [
+      "cron is broken",
+      "A different, shorter PATH in cron",
+      "The time is wrong",
+      "Locked file"
+     ],
+     "answer": 1,
+     "explain": "Use absolute paths or set PATH."
+    },
+    {
+     "q": "How do you write `%` in a crontab command?",
+     "options": [
+      "%",
+      "\\%",
+      "%%",
+      "'%'"
+     ],
+     "answer": 1,
+     "explain": "An unescaped % means newline."
+    },
+    {
+     "q": "Where do packages put their system cron jobs?",
+     "options": [
+      "/etc/cron.d and /etc/cron.daily",
+      "/var/spool/cron only",
+      "/usr/cron",
+      "/home"
+     ],
+     "answer": 0,
+     "explain": "System-wide places."
+    }
+   ],
+   "check": {
+    "scenario": "A nightly backup in cron silently stopped working three weeks ago. How do you find out why and make it visible in future?",
+    "answer": "`journalctl -u crond --since ...` / `/var/log/cron` shows whether it ran; the job's own output is mailed or lost, so redirect it: `... >> /var/log/backup.log 2>&1` or use `logger`. Check exit codes, add monitoring (a dead-man's switch such as a healthcheck ping at the end of the job), and consider a systemd timer for logging and alerting."
+   }
+  },
+  {
+   "id": "at-and-timers",
+   "title": "at and systemd timers",
+   "level": "intermediate",
+   "goal": "Learn one-time jobs with `at`, and systemd timers: transient timers, calendar expressions and a repeating timer.\n\nWhy it matters: timers give you logging, dependencies and \"run it if the machine was off\" behaviour that cron cannot. You will meet both.",
+   "setup": {
+    "note": "Steps here wait up to a minute (cron and at work in whole minutes). They add and remove a test crontab entry, one `at` job and a few `lab-*` timers.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "crontab -r 2>/dev/null; sudo systemctl stop lab-tick.timer lab-tick.service lab-later.timer 2>/dev/null; sudo rm -f /etc/systemd/system/lab-tick.*; sudo systemctl daemon-reload; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "at: run once, later",
+     "text": "`at TIME` reads commands from stdin and runs them once at that time. `atq` lists the queue. The `atd` service executes the jobs.",
+     "run": [
+      {
+       "cmd": "systemctl is-active atd",
+       "output": "active"
+      },
+      {
+       "cmd": "echo 'echo \"at job ran\" > /tmp/lab/at.out' | at now + 1 minute 2>&1 | sed -E 's/ at .*//' ",
+       "output": "warning: commands will be executed using /bin/sh\njob 2"
+      },
+      {
+       "cmd": "atq | awk '{print \"queued job\", $1}'",
+       "output": "queued job 2"
+      }
+     ]
+    },
+    {
+     "title": "Wait and look",
+     "text": "`at` runs on minute boundaries too.",
+     "run": [
+      {
+       "cmd": "sleep 75; cat /tmp/lab/at.out; atq | wc -l",
+       "output": "at job ran\n0"
+      }
+     ]
+    },
+    {
+     "title": "A one-shot timer with systemd-run",
+     "text": "`systemd-run --on-active=3s CMD` creates a **transient** timer and service. No unit files are needed.",
+     "run": [
+      {
+       "cmd": "sudo systemd-run --on-active=3s --unit=lab-later --collect sh -c 'echo ran-later > /tmp/lab/later.out' 2>&1 | sed 's/^Running timer as unit: /timer: /; s/^Will run service as unit: /service: /'",
+       "output": "timer: lab-later.timer\nservice: lab-later.service"
+      },
+      {
+       "cmd": "systemctl list-timers lab-later.timer --no-pager --no-legend | wc -l",
+       "output": "1"
+      },
+      {
+       "cmd": "sleep 5; cat /tmp/lab/later.out",
+       "output": "ran-later"
+      }
+     ]
+    },
+    {
+     "title": "Calendar expressions",
+     "text": "`OnCalendar=` uses a readable syntax: `DayOfWeek Year-Month-Day Hour:Minute:Second`. `systemd-analyze calendar` shows the **normalized** form and the next runs, so you can test before deploying.",
+     "run": [
+      {
+       "cmd": "systemd-analyze calendar 'Mon..Fri *-*-* 09:00' --iterations=2 | grep -E 'Normalized|Next elapse|Iteration' | sed -E 's/\\(.*\\)//; s/ +/ /g'",
+       "output": "Normalized form: Mon..Fri *-*-* 09:00:00\n Next elapse: Mon 2026-11-09 09:00:00 GMT"
+      },
+      {
+       "cmd": "systemd-analyze calendar daily | grep Normalized | sed 's/ +/ /g'",
+       "output": "Normalized form: *-*-* 00:00:00"
+      },
+      {
+       "cmd": "systemd-analyze calendar '*:0/15' | grep Normalized | sed 's/ +/ /g'",
+       "output": "Normalized form: *-*-* *:00/15:00"
+      }
+     ]
+    },
+    {
+     "title": "A repeating timer: two unit files",
+     "text": "A timer unit triggers a service unit with the same name. This one runs `lab-tick.service` one second after activation and then **every 2 seconds**. The job is `Type=oneshot`.",
+     "code": {
+      "file": "lab-tick.timer",
+      "lang": "ini",
+      "src": "[Unit]\nDescription=Lab tick timer\n\n[Timer]\nOnActiveSec=1s\nOnUnitActiveSec=2s\nAccuracySec=100ms\n\n[Install]\nWantedBy=timers.target\n"
+     },
+     "run": [
+      {
+       "cmd": "cat lab-tick.timer | sed -n '4,6p'",
+       "output": "[Timer]\nOnActiveSec=1s\nOnUnitActiveSec=2s"
+      }
+     ],
+     "after": "`OnActiveSec` counts from the moment the timer is started; `OnUnitActiveSec` counts from the last time the service was activated. Save the second file, shown next, as `lab-tick.service`: it is the job the timer starts."
+    },
+    {
+     "title": "The service unit, run, and the log",
+     "text": "Install both, start the timer for 7 seconds, and count the runs. Each run is a normal service run, so its status is in the journal.",
+     "code": {
+      "file": "lab-tick.service",
+      "lang": "ini",
+      "src": "[Unit]\nDescription=Lab tick job\n\n[Service]\nType=oneshot\nExecStart=/bin/sh -c 'echo \"tick at $(date +%S)\" >> /tmp/lab/tick.log'\n"
+     },
+     "run": [
+      {
+       "cmd": "sudo cp lab-tick.timer lab-tick.service /etc/systemd/system/; sudo systemctl daemon-reload",
+       "output": ""
+      },
+      {
+       "cmd": "sudo systemctl start lab-tick.timer; sleep 7; sudo systemctl stop lab-tick.timer; wc -l < /tmp/lab/tick.log | awk '{print $1, \"ticks in about 7 seconds\"}'",
+       "output": "3 ticks in about 7 seconds"
+      },
+      {
+       "cmd": "journalctl -u lab-tick.service -o cat --no-pager | grep -c 'Finished'",
+       "output": "3"
+      },
+      {
+       "cmd": "sudo rm /etc/systemd/system/lab-tick.timer /etc/systemd/system/lab-tick.service; sudo systemctl daemon-reload; echo cleaned",
+       "output": "cleaned"
+      }
+     ],
+     "under": "A timer can be **monotonic** (`OnBootSec=`, `OnActiveSec=`, `OnUnitActiveSec=`: relative to an event) or **realtime** (`OnCalendar=`: wall clock). `Persistent=true` runs a missed calendar job at the next boot. `RandomizedDelaySec=` spreads load. `systemctl list-timers` shows the next and last run of every timer."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What starts a command once at a future time?",
+     "options": [
+      "cron",
+      "at",
+      "anacron",
+      "nohup"
+     ],
+     "answer": 1,
+     "explain": "`at`."
+    },
+    {
+     "q": "Which timer setting runs a missed calendar job after the machine was off?",
+     "options": [
+      "Persistent=true",
+      "RandomizedDelaySec=",
+      "AccuracySec=",
+      "OnBootSec="
+     ],
+     "answer": 0,
+     "explain": "Persistent=true stores the last run time."
+    },
+    {
+     "q": "What does `systemd-analyze calendar EXPR` do?",
+     "options": [
+      "Runs the job",
+      "Shows the normalized form and the next elapse times",
+      "Sets the date",
+      "Lists timers"
+     ],
+     "answer": 1,
+     "explain": "It lets you test an OnCalendar expression."
+    },
+    {
+     "q": "A timer unit `X.timer` starts which unit by default?",
+     "options": [
+      "X.service",
+      "X.target",
+      "cron",
+      "Nothing"
+     ],
+     "answer": 0,
+     "explain": "The service with the same name."
+    }
+   ],
+   "check": {
+    "scenario": "Compare cron and systemd timers for a nightly report, and say when you would pick each.",
+    "answer": "Timers: journal logging and exit status per run, dependencies and sandboxing from the service unit, `Persistent=` for missed runs, randomized delay, no mail surprises, `systemctl list-timers`. Cron: simple, universal, one line, works on any Unix. Pick timers on systemd hosts for anything important or long-running; cron for quick personal jobs and portability."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "Write a crontab line for 02:30 every Monday.",
+   "a": "`30 2 * * 1 /path/to/command`. Fields: minute hour day-of-month month day-of-week. See [the lesson](#/lesson/27/cron).",
+   "level": "beginner"
+  },
+  {
+   "q": "Why does a job work in the shell but not in cron?",
+   "a": "Cron's environment is minimal (short PATH, no profile, different shell and working directory). Use absolute paths and set variables in the crontab.",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you run a command once, in two hours?",
+   "a": "`echo 'cmd' | at now + 2 hours` (check with `atq`, remove with `atrm`), or `systemd-run --on-active=2h cmd`.",
+   "level": "beginner"
+  },
+  {
+   "q": "What are the advantages of systemd timers over cron?",
+   "a": "Logging through the journal, per-run status, dependencies, resource limits and sandboxing, Persistent= for missed runs, randomized delay, easy manual start. See [the lesson](#/lesson/27/at-and-timers).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you test an OnCalendar expression?",
+   "a": "`systemd-analyze calendar 'EXPR' --iterations=5` prints the normalized form and the next run times.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is anacron for?",
+   "a": "Running daily/weekly/monthly jobs on machines that are not always on: it runs missed jobs after boot, using timestamps. systemd's Persistent=true does the same.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "cron",
+   "def": "The traditional scheduler that runs commands at times defined in crontabs.",
+   "lesson": "27/cron"
+  },
+  {
+   "term": "crontab",
+   "def": "A file with schedule lines for cron, one per user or in /etc/cron.d.",
+   "lesson": "27/cron"
+  },
+  {
+   "term": "at",
+   "def": "Runs a command once at a given time.",
+   "lesson": "27/at-and-timers"
+  },
+  {
+   "term": "Timer unit",
+   "def": "A systemd unit that starts a service on a schedule or after an event.",
+   "lesson": "27/at-and-timers"
+  },
+  {
+   "term": "OnCalendar",
+   "def": "Timer setting with a wall-clock schedule expression.",
+   "lesson": "27/at-and-timers"
+  },
+  {
+   "term": "Transient unit",
+   "def": "A unit created at run time by systemd-run, without a unit file.",
+   "lesson": "27/at-and-timers"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "crontab -l",
+   "desc": "List your crontab.",
+   "topic": "Scheduling",
+   "lesson": "27/cron"
+  },
+  {
+   "cmd": "crontab -e",
+   "desc": "Edit your crontab.",
+   "topic": "Scheduling",
+   "lesson": "27/cron"
+  },
+  {
+   "cmd": "crontab -r",
+   "desc": "Remove your crontab.",
+   "topic": "Scheduling",
+   "lesson": "27/cron"
+  },
+  {
+   "cmd": "echo 'cmd' | at now + 5 minutes",
+   "desc": "Run cmd once later.",
+   "topic": "Scheduling",
+   "lesson": "27/at-and-timers"
+  },
+  {
+   "cmd": "atq",
+   "desc": "List queued at jobs.",
+   "topic": "Scheduling",
+   "lesson": "27/at-and-timers"
+  },
+  {
+   "cmd": "systemctl list-timers",
+   "desc": "Show systemd timers and their next run.",
+   "topic": "Scheduling",
+   "lesson": "27/at-and-timers"
+  },
+  {
+   "cmd": "systemd-run --on-active=30s CMD",
+   "desc": "Run CMD once in 30 seconds.",
+   "topic": "Scheduling",
+   "lesson": "27/at-and-timers"
+  },
+  {
+   "cmd": "systemd-analyze calendar 'EXPR'",
+   "desc": "Test a calendar expression.",
+   "topic": "Scheduling",
+   "lesson": "27/at-and-timers"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

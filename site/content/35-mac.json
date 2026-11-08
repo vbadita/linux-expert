@@ -1,0 +1,542 @@
+{
+ "title": "SELinux and AppArmor",
+ "lessons": [
+  {
+   "id": "selinux-basics",
+   "title": "SELinux basics: modes, contexts and types",
+   "level": "beginner",
+   "goal": "Learn what SELinux adds to normal permissions, how to read the label on a file or process, and the three modes.\n\nWhy it matters: on Red Hat family systems SELinux is on by default, and \"permission denied although the mode is right\" is very often an SELinux denial. Switching it off is the wrong reaction; reading the label is the right one.",
+   "setup": {
+    "note": "Steps with sudo create a test web directory `/srv/lab` and a copy of `cat` labelled as a web server binary, then remove both. Needs SELinux in enforcing mode (the default on Oracle Linux and Red Hat).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rm -rf /srv/lab /usr/local/bin/lab-cat; sudo semanage fcontext -d '/srv/lab(/.*)?' 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "What SELinux is",
+     "text": "SELinux is a **mandatory access control** system. Every process and every file has a **security context** (label). A **policy** written by the distribution lists exactly which process types may do what to which object types. Normal permissions (owner, mode) are checked first; SELinux is a second, independent check that even root cannot bypass.",
+     "run": [
+      {
+       "cmd": "getenforce",
+       "output": "Enforcing"
+      },
+      {
+       "cmd": "sestatus | grep -E '^(SELinux status|Current mode|Loaded policy name)' | tr -s ' ' ' '",
+       "output": "SELinux status: enabled\nLoaded policy name: targeted\nCurrent mode: enforcing"
+      }
+     ]
+    },
+    {
+     "title": "Modes",
+     "text": "**Enforcing**: the policy is applied and violations are blocked and logged. **Permissive**: violations are only logged (for debugging). **Disabled**: off (needs a reboot to change). `setenforce 0` switches to permissive until reboot; it is a diagnostic tool, not a fix.",
+     "run": [
+      {
+       "cmd": "cat /sys/fs/selinux/enforce; echo",
+       "output": "1"
+      },
+      {
+       "cmd": "grep -E '^SELINUX=' /etc/selinux/config",
+       "output": "SELINUX=enforcing"
+      }
+     ]
+    },
+    {
+     "title": "A label has four fields",
+     "text": "`user:role:type:level`. The part that matters for daily work is the **type**: names ending in `_t` for processes (`sshd_t`) and objects (`etc_t`, `httpd_sys_content_t`). Policy rules say \"type A may read type B\". Your own shell:",
+     "run": [
+      {
+       "cmd": "id -Z",
+       "output": "unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023"
+      }
+     ]
+    },
+    {
+     "title": "Labels on files",
+     "text": "`ls -Z` shows the context of files. The binary `/usr/sbin/sshd` has type `sshd_exec_t`: when it is executed from a service, the process type changes to `sshd_t` (a **domain transition**).",
+     "run": [
+      {
+       "cmd": "ls -Z /usr/sbin/sshd /etc/passwd /etc/shadow /var/log/messages | awk '{print $1, $2}' | sed 's/^[^:]*:[^:]*://' | sed 's/:s0 / /'",
+       "output": "passwd_file_t /etc/passwd\nshadow_t /etc/shadow\nsshd_exec_t /usr/sbin/sshd\nvar_log_t /var/log/messages"
+      }
+     ]
+    },
+    {
+     "title": "Labels on processes",
+     "text": "`ps -Z` (or `ps -eZ`) shows the domain of each process. Daemons run in their own confined domains; your interactive session is `unconfined_t`, which the policy allows almost everything.",
+     "run": [
+      {
+       "cmd": "ps -eZ | awk '$NF ~ /^(sshd|crond|chronyd|auditd)$/ {print $1, $NF}' | sed -E 's/^[^:]*:[^:]*://; s/:s0.*( [a-z]+)$/\\1/' | sort -u",
+       "output": "auditd_t auditd\nchronyd_t chronyd\ncrond_t crond\nsshd_t sshd"
+      }
+     ],
+     "under": "Labels are stored in the **extended attributes** of files (`security.selinux`), in the kernel's process table for processes, and in the packet/port tables for network objects (`semanage port -l`). The SELinux **access vector cache** answers most checks without asking the policy again."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which SELinux mode only logs violations?",
+     "options": [
+      "Enforcing",
+      "Permissive",
+      "Disabled",
+      "Strict"
+     ],
+     "answer": 1,
+     "explain": "Permissive."
+    },
+    {
+     "q": "Which part of the context do you usually have to care about?",
+     "options": [
+      "user",
+      "role",
+      "type",
+      "level"
+     ],
+     "answer": 2,
+     "explain": "Type enforcement: `httpd_t`, `var_t`, ..."
+    },
+    {
+     "q": "Where is a file's SELinux label stored?",
+     "options": [
+      "In /etc/selinux",
+      "In its extended attributes",
+      "In the directory name",
+      "In /proc"
+     ],
+     "answer": 1,
+     "explain": "security.selinux xattr."
+    },
+    {
+     "q": "Is `setenforce 0` a fix for a denial?",
+     "options": [
+      "Yes",
+      "No: it is for diagnosis; fix the label, boolean or policy",
+      "Only for root",
+      "Only for web servers"
+     ],
+     "answer": 1,
+     "explain": "Keep enforcing and fix the cause."
+    }
+   ],
+   "check": {
+    "scenario": "A colleague says: \"the web server cannot read the new site directory, I will disable SELinux.\" What do you advise?",
+    "answer": "Do not disable it. Check the denial (`ausearch -m avc -ts recent` / `journalctl -t setroubleshoot`), compare labels (`ls -Z`), and relabel the content with the web content type (`semanage fcontext -a -t httpd_sys_content_t '/srv/site(/.*)?'` then `restorecon -Rv /srv/site`). Use `setenforce 0` only briefly to confirm that SELinux is the cause."
+   }
+  },
+  {
+   "id": "selinux-labels-booleans-denials",
+   "title": "Labels, booleans and reading denials",
+   "level": "intermediate",
+   "goal": "Reproduce the most common SELinux problem (a wrongly labelled file), see the denial in the audit log, fix it permanently, and use a boolean.\n\nWhy it matters: this is the routine workflow: read the denial, decide whether it is a label, a boolean or genuinely new behaviour, and fix the smallest thing.",
+   "setup": {
+    "note": "Steps with sudo create a test web directory `/srv/lab` and a copy of `cat` labelled as a web server binary, then remove both. Needs SELinux in enforcing mode (the default on Oracle Linux and Red Hat).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rm -rf /srv/lab /usr/local/bin/lab-cat; sudo semanage fcontext -d '/srv/lab(/.*)?' 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A confined program and a file",
+     "text": "We copy `cat` and label the copy `httpd_exec_t`, the type of the web server binary. When systemd starts it, the process runs in the `httpd_t` domain, exactly like a real web server. The web content directory has the default label `var_t`.",
+     "run": [
+      {
+       "cmd": "sudo mkdir -p /srv/lab && echo 'hello web' | sudo tee /srv/lab/index.html > /dev/null; ls -Z /srv/lab/index.html | awk '{print $1}' | cut -d: -f3",
+       "output": "var_t"
+      },
+      {
+       "cmd": "sudo cp /usr/bin/cat /usr/local/bin/lab-cat && sudo chcon -t httpd_exec_t /usr/local/bin/lab-cat; ls -Z /usr/local/bin/lab-cat | awk '{print $1}' | cut -d: -f3",
+       "output": "httpd_exec_t"
+      }
+     ]
+    },
+    {
+     "title": "The denial",
+     "text": "Run the \"web server\" as a service as **root** and ask it to read the file. Root passes the normal permission check, but the policy does not allow `httpd_t` to read `var_t`.",
+     "run": [
+      {
+       "cmd": "sudo systemd-run --pipe --wait --collect -q /usr/local/bin/lab-cat /srv/lab/index.html; echo \"exit code: $?\"",
+       "output": "/usr/local/bin/lab-cat: /srv/lab/index.html: Permission denied\nexit code: 1"
+      }
+     ],
+     "after": "Root got `Permission denied`. Normal permissions are fine: SELinux said no."
+    },
+    {
+     "title": "Find it in the audit log",
+     "text": "Denials are logged as **AVC** records. `ausearch -m avc` finds them; `-i` translates numbers to names. The key fields: the **source** context (who), the **target** context (what), the class and the permission.",
+     "run": [
+      {
+       "cmd": "sleep 1; sudo ausearch --input-logs -m avc -ts recent -c lab-cat -i 2>/dev/null | grep -o 'denied  { [a-z_ ]* } for .*' | sed -E 's/pid=[0-9]+ //; s/ino=[0-9]+ //; s/dev=\"[^\"]*\" //; s/ permissive=[01]//; s/system_u:system_r://; s/unconfined_u:object_r://; s/:s0//g' | tail -n 1 | cut -c1-200",
+       "output": "denied  { read } for  comm=lab-cat name=index.html scontext=httpd_t tcontext=var_t tclass=file "
+      }
+     ]
+    },
+    {
+     "title": "audit2why explains it",
+     "text": "`audit2why` translates a denial into a reason: here a missing allow rule, that is, the label is not one the policy lets this domain use.",
+     "run": [
+      {
+       "cmd": "sudo ausearch --input-logs -m avc -ts recent -c lab-cat 2>/dev/null | audit2why 2>&1 | grep -E 'Was caused by|Missing' | sed 's/^[[:space:]]*//'",
+       "output": "Was caused by:\nMissing type enforcement (TE) allow rule.\nWas caused by:\nMissing type enforcement (TE) allow rule."
+      }
+     ]
+    },
+    {
+     "title": "Fix 1: relabel (temporary)",
+     "text": "`chcon` changes a label immediately, but it is **lost** at the next relabel or `restorecon`. It is good for testing.",
+     "run": [
+      {
+       "cmd": "sudo chcon -R -t httpd_sys_content_t /srv/lab; ls -Z /srv/lab/index.html | awk '{print $1}' | cut -d: -f3",
+       "output": "httpd_sys_content_t"
+      },
+      {
+       "cmd": "sudo systemd-run --pipe --wait --collect -q /usr/local/bin/lab-cat /srv/lab/index.html; echo \"exit code: $?\"",
+       "output": "hello web\nexit code: 0"
+      }
+     ]
+    },
+    {
+     "title": "Fix 2: record the rule (permanent)",
+     "text": "`semanage fcontext` stores a **file-context rule** in the policy store; `restorecon` applies the rules to the files. This survives relabeling. First we show that `restorecon` undoes a temporary `chcon`, then we add the rule.",
+     "run": [
+      {
+       "cmd": "sudo restorecon -Rv /srv/lab | sed -E 's/ from .* to .*:([a-z_]+):s0$/ -> \\1/' | cut -c1-90",
+       "output": "Relabeled /srv/lab -> var_t\nRelabeled /srv/lab/index.html -> var_t"
+      },
+      {
+       "cmd": "sudo semanage fcontext -a -t httpd_sys_content_t '/srv/lab(/.*)?'; sudo restorecon -Rv /srv/lab | sed -E 's/ from .* to .*:([a-z_]+):s0$/ -> \\1/' | cut -c1-90",
+       "output": "Relabeled /srv/lab -> httpd_sys_content_t\nRelabeled /srv/lab/index.html -> httpd_sys_content_t"
+      },
+      {
+       "cmd": "sudo restorecon -Rv /srv/lab | wc -l | awk '{print $1, \"changes needed on the next run\"}'",
+       "output": "0 changes needed on the next run"
+      }
+     ]
+    },
+    {
+     "title": "Booleans: switches in the policy",
+     "text": "Some behaviour is too site-specific to hard-code, so the policy has **booleans**. For example `httpd_can_network_connect` lets web server processes make outgoing network connections (to a database or an API). `setsebool` changes the runtime value (add `-P` to make it permanent).",
+     "run": [
+      {
+       "cmd": "getsebool httpd_can_network_connect",
+       "output": "httpd_can_network_connect --> off"
+      },
+      {
+       "cmd": "sudo setsebool httpd_can_network_connect on; getsebool httpd_can_network_connect; sudo setsebool httpd_can_network_connect off; getsebool httpd_can_network_connect",
+       "output": "httpd_can_network_connect --> on\nhttpd_can_network_connect --> off"
+      },
+      {
+       "cmd": "sudo semanage boolean -l | grep -E '^httpd_can_network_connect ' | tr -s ' ' ' ' | cut -c1-90",
+       "output": "httpd_can_network_connect (off , off) Allow httpd to can network connect"
+      }
+     ]
+    },
+    {
+     "title": "Clean up",
+     "text": "Remove the rule, the test directory and the program.",
+     "run": [
+      {
+       "cmd": "sudo semanage fcontext -d '/srv/lab(/.*)?'; sudo rm -rf /srv/lab /usr/local/bin/lab-cat; echo cleaned",
+       "output": "cleaned"
+      }
+     ],
+     "under": "The order of fixing: (1) a **boolean** if one exists for the behaviour, (2) a **file context** if the label is wrong, (3) a **port label** (`semanage port -a -t http_port_t -p tcp 8888`) for a non-standard port, and only last (4) a **local policy module** (`audit2allow -M mypolicy`), reviewed carefully, because it widens what the domain may do."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "A confined service gets Permission denied on a file; the mode is right. Where do you look next?",
+     "options": [
+      "dmesg",
+      "The AVC denial in the audit log (ausearch -m avc)",
+      "/etc/passwd",
+      "ulimit"
+     ],
+     "answer": 1,
+     "explain": "SELinux logs the exact source, target and permission."
+    },
+    {
+     "q": "What is the difference between `chcon` and `semanage fcontext`+`restorecon`?",
+     "options": [
+      "None",
+      "chcon is temporary; the semanage rule survives relabeling",
+      "chcon is permanent",
+      "semanage only reads"
+     ],
+     "answer": 1,
+     "explain": "restorecon undid the chcon."
+    },
+    {
+     "q": "Which is the preferred fix order?",
+     "options": [
+      "Disable SELinux",
+      "Boolean, file context, port label, then local policy",
+      "audit2allow first",
+      "setenforce 0"
+     ],
+     "answer": 1,
+     "explain": "Smallest change first."
+    },
+    {
+     "q": "What does `setsebool -P` do?",
+     "options": [
+      "Sets a boolean until reboot",
+      "Sets a boolean persistently",
+      "Shows booleans",
+      "Resets labels"
+     ],
+     "answer": 1,
+     "explain": "-P makes it permanent."
+    }
+   ],
+   "check": {
+    "scenario": "After moving a website to /data/www, Apache returns 403 although `chmod -R a+rX` was applied. Give the exact commands to fix it properly.",
+    "answer": "`sudo semanage fcontext -a -t httpd_sys_content_t '/data/www(/.*)?'` and `sudo restorecon -Rv /data/www`. For uploads the web server must write to, use `httpd_sys_rw_content_t`. Verify with `ls -Zd /data/www` and watch `ausearch -m avc -ts recent`. If Apache also needs to connect out (PHP calling an API), set `setsebool -P httpd_can_network_connect on`."
+   }
+  },
+  {
+   "id": "apparmor-and-mac",
+   "title": "AppArmor and other MAC systems, compared",
+   "level": "advanced",
+   "goal": "Learn how AppArmor differs from SELinux, and check what this kernel actually has.\n\nWhy it matters: Ubuntu and SUSE use AppArmor, Red Hat family systems use SELinux. You will meet both. The ideas (confine programs by policy) are the same; the model and tools differ.",
+   "setup": {
+    "note": "Steps with sudo create a test web directory `/srv/lab` and a copy of `cat` labelled as a web server binary, then remove both. Needs SELinux in enforcing mode (the default on Oracle Linux and Red Hat).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo rm -rf /srv/lab /usr/local/bin/lab-cat; sudo semanage fcontext -d '/srv/lab(/.*)?' 2>/dev/null; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Which MAC is active here",
+     "text": "The kernel can load several **Linux Security Modules**. This machine has SELinux. AppArmor is not part of this kernel, so its commands cannot run here.",
+     "run": [
+      {
+       "cmd": "cat /sys/kernel/security/lsm | tr ',' '\\n' | grep -E '^(selinux|apparmor|yama|bpf)$' | tr '\\n' ' '; echo",
+       "output": "yama selinux bpf "
+      },
+      {
+       "cmd": "[ -d /sys/kernel/security/apparmor ] && echo 'AppArmor is active' || echo 'AppArmor is not active in this kernel'",
+       "output": "AppArmor is not active in this kernel"
+      }
+     ]
+    },
+    {
+     "title": "The model difference",
+     "text": "- **SELinux** labels every object (files, processes, ports) with a context stored in the file system, and a policy relates types. It is powerful and uniform, but complex.\n- **AppArmor** is **path based**: a profile per program lists the paths it may read, write or execute, and the capabilities and network access it may use. Files have no label. It is simpler to write and read.\n\nBoth enforce **mandatory** rules that the confined program (even as root) cannot change."
+    },
+    {
+     "title": "What an AppArmor profile looks like",
+     "text": "This is a typical profile (it would live in `/etc/apparmor.d/`). It is shown as a file you could save; the commands to load it are marked as explanation only, because AppArmor is not available on this system.",
+     "code": {
+      "file": "usr.sbin.example-daemon",
+      "lang": "sh",
+      "src": "#include <tunables/global>\n\n/usr/sbin/example-daemon {\n  #include <abstractions/base>\n\n  capability net_bind_service,\n  network inet stream,\n\n  /etc/example/** r,\n  /var/log/example.log w,\n  /run/example.pid rw,\n  /usr/sbin/example-daemon mr,\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "sudo cp usr.sbin.example-daemon /etc/apparmor.d/ && sudo apparmor_parser -r /etc/apparmor.d/usr.sbin.example-daemon",
+       "explanationOnly": true,
+       "reason": "AppArmor is not part of this kernel; this is how you would load the profile on Ubuntu"
+      },
+      {
+       "cmd": "sudo aa-status",
+       "explanationOnly": true,
+       "reason": "needs an AppArmor kernel"
+      }
+     ],
+     "after": "Reading it: `/etc/example/** r,` the daemon may read everything under /etc/example; `/var/log/example.log w,` write one log file; `capability net_bind_service,` bind low ports; `network inet stream,` TCP over IPv4. Everything not listed is denied. Modes: **enforce** (block) and **complain** (log only), switched with `aa-enforce` and `aa-complain`."
+    },
+    {
+     "title": "Choosing and living with it",
+     "text": "Do not turn the system's MAC off because it is in the way. Learn its log: `ausearch -m avc` for SELinux, `dmesg | grep apparmor` or `journalctl -k | grep DENIED` for AppArmor. Use the tools that generate rules from observed behaviour (`audit2allow`, `aa-genprof`) only after you understand what is being allowed.",
+     "run": [
+      {
+       "cmd": "sestatus | grep -E 'Current mode' | tr -s ' ' ' '",
+       "output": "Current mode: enforcing"
+      }
+     ],
+     "under": "Both frameworks sit in the same place: the **LSM hooks** in the kernel (`security_file_open`, `security_socket_connect`, ...). They can be stacked in recent kernels. Other LSMs: **Yama** (ptrace scope), **Landlock** (unprivileged self-sandboxing), **BPF LSM** (policy written as eBPF programs), **IMA/EVM** (file integrity) and **lockdown**."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "How does AppArmor identify what a profile applies to?",
+     "options": [
+      "A label on files",
+      "The program's path",
+      "The user name",
+      "A port"
+     ],
+     "answer": 1,
+     "explain": "AppArmor is path based."
+    },
+    {
+     "q": "Which distributions use SELinux by default?",
+     "options": [
+      "Ubuntu",
+      "Red Hat family (RHEL, Oracle Linux, Fedora)",
+      "SUSE",
+      "Arch"
+     ],
+     "answer": 1,
+     "explain": "RHEL family."
+    },
+    {
+     "q": "What can a confined root process do to its own MAC policy?",
+     "options": [
+      "Change it freely",
+      "Nothing: policy changes need a privileged, unconfined admin domain",
+      "Disable it for itself",
+      "Edit it with vi"
+     ],
+     "answer": 1,
+     "explain": "Mandatory means the confined process cannot change it."
+    },
+    {
+     "q": "Which is the AppArmor equivalent of SELinux permissive mode?",
+     "options": [
+      "complain",
+      "audit",
+      "learn",
+      "off"
+     ],
+     "answer": 0,
+     "explain": "Complain mode logs only."
+    }
+   ],
+   "check": {
+    "scenario": "You must confine a new internal daemon on Ubuntu servers and on Oracle Linux servers. What do you do on each?",
+    "answer": "Ubuntu: write an AppArmor profile (`aa-genprof`), run in complain mode while testing, then enforce. Oracle Linux: run the service in its own domain, either with an existing policy or a new module (`sepolicy generate`, `audit2allow`), test in permissive for that domain only (`semanage permissive -a my_t`), then enforce. Also use systemd sandboxing on both for the common baseline."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is SELinux and how does it differ from normal permissions?",
+   "a": "A mandatory access control system: policy decides which process types may access which object types, regardless of owner or mode, and even root is bound by it. See [the lesson](#/lesson/35/selinux-basics).",
+   "level": "beginner"
+  },
+  {
+   "q": "A service gets Permission denied but the mode is correct. What do you do?",
+   "a": "Check for an SELinux denial: `ausearch -m avc -ts recent`, compare `ls -Z` with what the policy expects, fix the label with `semanage fcontext` + `restorecon`, or a boolean. See [the workflow](#/lesson/35/selinux-labels-booleans-denials).",
+   "level": "intermediate"
+  },
+  {
+   "q": "chcon versus restorecon?",
+   "a": "chcon sets a label directly and is lost when files are relabelled. restorecon applies the policy's file-context rules (which you extend with semanage fcontext) and is permanent.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What are SELinux booleans?",
+   "a": "Policy switches for common variations, such as httpd_can_network_connect. Query with getsebool, set with setsebool (-P for persistent).",
+   "level": "intermediate"
+  },
+  {
+   "q": "SELinux versus AppArmor?",
+   "a": "SELinux: label-based, system-wide policy, more expressive and complex. AppArmor: path-based profiles per program, easier to write. Both are LSMs enforcing mandatory rules. See [the comparison](#/lesson/35/apparmor-and-mac).",
+   "level": "advanced"
+  },
+  {
+   "q": "When is permissive mode appropriate?",
+   "a": "Briefly, to find out whether SELinux is the cause or to collect all denials of a new application. Prefer per-domain permissive (`semanage permissive -a TYPE`) to system-wide.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "SELinux",
+   "def": "Security-Enhanced Linux: label-based mandatory access control in the kernel.",
+   "lesson": "35/selinux-basics"
+  },
+  {
+   "term": "Security context",
+   "def": "The user:role:type:level label of a process or object.",
+   "lesson": "35/selinux-basics"
+  },
+  {
+   "term": "Type enforcement",
+   "def": "SELinux policy that allows access by type pairs (domain to object type).",
+   "lesson": "35/selinux-basics"
+  },
+  {
+   "term": "AVC denial",
+   "def": "An audit record of an SELinux access vector check that was denied.",
+   "lesson": "35/selinux-labels-booleans-denials"
+  },
+  {
+   "term": "Boolean (SELinux)",
+   "def": "A policy switch that enables or disables a behaviour.",
+   "lesson": "35/selinux-labels-booleans-denials"
+  },
+  {
+   "term": "restorecon",
+   "def": "Resets file labels to what the policy says they should be.",
+   "lesson": "35/selinux-labels-booleans-denials"
+  },
+  {
+   "term": "AppArmor",
+   "def": "Path-based mandatory access control used by Ubuntu and SUSE.",
+   "lesson": "35/apparmor-and-mac"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "getenforce",
+   "desc": "Show the SELinux mode.",
+   "topic": "SELinux",
+   "lesson": "35/selinux-basics"
+  },
+  {
+   "cmd": "sestatus",
+   "desc": "Show SELinux status and policy.",
+   "topic": "SELinux",
+   "lesson": "35/selinux-basics"
+  },
+  {
+   "cmd": "ls -Z FILE",
+   "desc": "Show a file's SELinux context.",
+   "topic": "SELinux",
+   "lesson": "35/selinux-basics"
+  },
+  {
+   "cmd": "ps -eZ",
+   "desc": "Show process contexts.",
+   "topic": "SELinux",
+   "lesson": "35/selinux-basics"
+  },
+  {
+   "cmd": "sudo ausearch --input-logs -m avc -ts recent",
+   "desc": "Find recent SELinux denials.",
+   "topic": "SELinux",
+   "lesson": "35/selinux-labels-booleans-denials"
+  },
+  {
+   "cmd": "sudo semanage fcontext -a -t TYPE 'PATH(/.*)?'",
+   "desc": "Add a persistent file-context rule.",
+   "topic": "SELinux",
+   "lesson": "35/selinux-labels-booleans-denials"
+  },
+  {
+   "cmd": "sudo restorecon -Rv PATH",
+   "desc": "Apply file-context rules to files.",
+   "topic": "SELinux",
+   "lesson": "35/selinux-labels-booleans-denials"
+  },
+  {
+   "cmd": "getsebool -a | grep httpd",
+   "desc": "List web-related booleans.",
+   "topic": "SELinux",
+   "lesson": "35/selinux-labels-booleans-denials"
+  },
+  {
+   "cmd": "sudo setsebool -P NAME on",
+   "desc": "Set a boolean permanently.",
+   "topic": "SELinux",
+   "lesson": "35/selinux-labels-booleans-denials"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

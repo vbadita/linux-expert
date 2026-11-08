@@ -1,0 +1,527 @@
+{
+ "title": "Processes",
+ "lessons": [
+  {
+   "id": "process-basics",
+   "title": "What a process is: PID, parent, /proc",
+   "level": "beginner",
+   "goal": "Learn what a process is, how to see its identity, and how processes form a tree.\n\nWhy it matters: every command, service and container is a process. Troubleshooting a slow or stuck system starts with knowing which process is which and who started it.",
+   "setup": {
+    "note": "Programs are small C files (gcc needed). Numbers such as PIDs will differ on your machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A program is a file, a process is a running instance",
+     "text": "`/bin/bash` is a **program**: bytes on disk. Each time it runs it becomes a **process** with a number, the **PID**. Your shell has one.",
+     "run": [
+      {
+       "cmd": "echo \"my shell PID is $$\"",
+       "output": "my shell PID is 3461556"
+      },
+      {
+       "cmd": "ls -l /proc/$$/exe | awk '{print $9, $10, $11}'",
+       "output": "/proc/3461556/exe -> /usr/bin/bash"
+      }
+     ]
+    },
+    {
+     "title": "Every process has a parent",
+     "text": "Each process records its parent's PID (**PPID**). `ps -o` selects the columns.",
+     "run": [
+      {
+       "cmd": "ps -o pid,ppid,comm -p $$",
+       "output": "    PID    PPID COMMAND\n3461556 3461434 bash"
+      },
+      {
+       "cmd": "ps -o pid,comm -p 1",
+       "output": "    PID COMMAND\n      1 systemd"
+      }
+     ]
+    },
+    {
+     "title": "The tree",
+     "text": "Processes form a tree. PID 1 is the first process the kernel starts (usually `systemd`). `pstree -p` draws a subtree. We start a subshell with two sleeping children.",
+     "run": [
+      {
+       "cmd": "bash -c 'sleep 5 & sleep 6 & pstree -p $$; wait'",
+       "output": "bash(3461568)-+-pstree(3461571)\n              |-sleep(3461569)\n              `-sleep(3461570)"
+      }
+     ]
+    },
+    {
+     "title": "A directory per process in /proc",
+     "text": "The kernel exposes each process as `/proc/PID`. `status` has the name, state, IDs and memory use. `cmdline` is the argument list, `cwd` and `exe` are links.",
+     "run": [
+      {
+       "cmd": "grep -E '^(Name|State|Pid|PPid|Uid)' /proc/$$/status",
+       "output": "Name:\tbash\nState:\tR (running)\nPid:\t3461556\nPPid:\t3461434\nUid:\t1000\t1000\t1000\t1000"
+      },
+      {
+       "cmd": "readlink /proc/$$/cwd",
+       "output": "/tmp/lab"
+      },
+      {
+       "cmd": "ls /proc/$$ | head -n 8 | tr '\\n' ' '; echo",
+       "output": "attr auxv cgroup clear_refs cmdline comm coredump_filter cpuset "
+      }
+     ],
+     "under": "In the kernel, a process is a `task_struct`: a structure with the PID, state, a pointer to its memory map, its table of open files, credentials and more. `/proc/PID` files are generated from that structure when you read them."
+    },
+    {
+     "title": "The first process",
+     "text": "PID 1 is special: orphaned processes are adopted by it, and the system stops if it dies.",
+     "run": [
+      {
+       "cmd": "cat /proc/1/comm",
+       "output": "systemd"
+      },
+      {
+       "cmd": "ps -o pid,ppid,comm --ppid 1 | head -n 4",
+       "output": "    PID    PPID COMMAND\n   1071       1 systemd-journal\n   1094       1 systemd-udevd\n   1446       1 rpcbind"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is the difference between a program and a process?",
+     "options": [
+      "None",
+      "A program is a file; a process is a running instance of it",
+      "A process is a file",
+      "A program has a PID"
+     ],
+     "answer": 1,
+     "explain": "The same program can run as many processes."
+    },
+    {
+     "q": "Which PID does the first user-space process have?",
+     "options": [
+      "0",
+      "1",
+      "100",
+      "It varies"
+     ],
+     "answer": 1,
+     "explain": "PID 1: systemd on most systems."
+    },
+    {
+     "q": "Where do you find a process's state and parent PID?",
+     "options": [
+      "/etc/ps",
+      "/proc/PID/status",
+      "/var/run/PID",
+      "/dev/PID"
+     ],
+     "answer": 1,
+     "explain": "/proc/PID/status."
+    },
+    {
+     "q": "What does `ps -o pid,ppid,comm -p $$` print?",
+     "options": [
+      "Info about your shell",
+      "All processes",
+      "The kernel version",
+      "Nothing"
+     ],
+     "answer": 0,
+     "explain": "`$$` is the PID of the shell."
+    }
+   ],
+   "check": {
+    "scenario": "You see a process `python app.py` using 100% CPU. Which two things do you check to learn who started it and what it is doing?",
+    "answer": "Its parent: `ps -o pid,ppid,cmd -p PID` and then the parent's command; and its details under `/proc/PID` (`cwd`, `exe`, `cmdline`, open files in `/proc/PID/fd`). `strace -p PID` shows its system calls."
+   }
+  },
+  {
+   "id": "fork-exec-wait",
+   "title": "fork, exec and wait",
+   "level": "intermediate",
+   "goal": "Learn the three calls that create and run every process on Linux, by writing a tiny shell yourself.\n\nWhy it matters: this is what bash does for every command. The pattern explains PIDs, exit codes, why a child cannot change its parent, and why `cd` is a builtin.",
+   "setup": {
+    "note": "Programs are small C files (gcc needed). Numbers such as PIDs will differ on your machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "fork creates a copy",
+     "text": "`fork()` creates a new process that is a copy of the caller. It returns **twice**: in the child it returns 0, in the parent it returns the child's PID. `waitpid` makes the parent wait for the child and collect its exit code.",
+     "code": {
+      "file": "fork_demo.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <sys/wait.h>\n#include <unistd.h>\n\nint main(void) {\n    printf(\"parent: pid=%d\\n\", getpid());\n    fflush(stdout);\n    pid_t pid = fork();\n    if (pid == 0) {\n        printf(\"child:  pid=%d parent=%d\\n\", getpid(), getppid());\n        return 7;\n    }\n    int status;\n    waitpid(pid, &status, 0);\n    printf(\"parent: child %d exited with code %d\\n\", pid, WEXITSTATUS(status));\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o fork_demo fork_demo.c",
+       "output": ""
+      },
+      {
+       "cmd": "./fork_demo",
+       "output": "parent: pid=3461604\nchild:  pid=3461605 parent=3461604\nparent: child 3461605 exited with code 7"
+      }
+     ]
+    },
+    {
+     "title": "exec replaces the program",
+     "text": "`exec` does not create a process. It **replaces** the running program in the same process with another one. The PID stays the same. If `exec` works, the old code never runs again.",
+     "code": {
+      "file": "exec_demo.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <unistd.h>\n\nint main(void) {\n    printf(\"before exec: pid=%d\\n\", getpid());\n    fflush(stdout);\n    execlp(\"sh\", \"sh\", \"-c\", \"echo after exec:  pid=$$\", (char *)NULL);\n    perror(\"exec failed\");\n    return 1;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o exec_demo exec_demo.c",
+       "output": ""
+      },
+      {
+       "cmd": "./exec_demo",
+       "output": "before exec: pid=3461613\nafter exec: pid=3461613"
+      }
+     ]
+    },
+    {
+     "title": "Together: a mini shell",
+     "text": "fork, then exec in the child, then wait in the parent. This is the whole mechanism of running a command. `execvp` searches `PATH` like a shell.",
+     "code": {
+      "file": "mysh.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <sys/wait.h>\n#include <unistd.h>\n\nint main(int argc, char *argv[]) {\n    if (argc < 2) {\n        fprintf(stderr, \"usage: %s command [args]\\n\", argv[0]);\n        return 2;\n    }\n    pid_t pid = fork();\n    if (pid < 0) {\n        perror(\"fork\");\n        return 1;\n    }\n    if (pid == 0) {\n        execvp(argv[1], &argv[1]);\n        perror(argv[1]);\n        _exit(127);\n    }\n    int status;\n    waitpid(pid, &status, 0);\n    if (WIFEXITED(status))\n        printf(\"[exit %d]\\n\", WEXITSTATUS(status));\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o mysh mysh.c",
+       "output": ""
+      },
+      {
+       "cmd": "./mysh echo hello",
+       "output": "hello\n[exit 0]"
+      },
+      {
+       "cmd": "./mysh false",
+       "output": "[exit 1]"
+      },
+      {
+       "cmd": "./mysh nosuchcommand",
+       "output": "nosuchcommand: No such file or directory\n[exit 127]"
+      }
+     ],
+     "after": "The exit code of the child comes back through `waitpid`. A command that cannot be found makes `execvp` fail, so the child exits with 127: the same code bash reports."
+    },
+    {
+     "title": "See it in strace",
+     "text": "We trace our mini shell. `clone` is the system call behind `fork`, `execve` loads the program, `wait4` collects the child.",
+     "run": [
+      {
+       "cmd": "strace -f -o /tmp/lab/mysh.trace -e trace=clone,execve,wait4,exit_group ./mysh true; grep -v 'resumed\\|SIGCHLD {' /tmp/lab/mysh.trace | cut -c1-100",
+       "output": "[exit 0]\n3461635 execve(\"./mysh\", [\"./mysh\", \"true\"], 0xffffd2c969b0 /* 55 vars */) = 0\n3461635 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=\n3461635 wait4(3461636,  <unfinished ...>\n3461636 execve(\"/usr/local/bin/true\", [\"true\"], 0xffffd5980cd0 /* 55 vars */) = -1 ENOENT (No such f\n3461636 execve(\"/usr/local/sbin/true\", [\"true\"], 0xffffd5980cd0 /* 55 vars */) = -1 ENOENT (No such \n3461636 execve(\"/usr/bin/true\", [\"true\"], 0xffffd5980cd0 /* 55 vars */) = 0\n3461636 exit_group(0)                   = ?\n3461636 +++ exited with 0 +++\n3461635 exit_group(0)                   = ?\n3461635 +++ exited with 0 +++"
+      }
+     ],
+     "under": "`fork` is cheap because the kernel does not copy memory: parent and child share the same physical pages, marked read-only. This is **copy-on-write** (next lesson). `exec` then discards that address space and builds a new one from the program file."
+    },
+    {
+     "title": "Why a child cannot change its parent",
+     "text": "After `fork`, parent and child have separate address spaces, separate working directories and separate variables. Changing one does not change the other. This is why `cd` and `export` must be builtins.",
+     "run": [
+      {
+       "cmd": "pwd",
+       "output": "/tmp/lab"
+      },
+      {
+       "cmd": "(cd /usr && pwd); pwd",
+       "output": "/usr\n/tmp/lab"
+      },
+      {
+       "cmd": "./mysh sh -c 'cd /usr && pwd'; pwd",
+       "output": "/usr\n[exit 0]\n/tmp/lab"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `fork()` return in the child?",
+     "options": [
+      "The parent's PID",
+      "0",
+      "-1",
+      "The child's PID"
+     ],
+     "answer": 1,
+     "explain": "0 in the child, the child's PID in the parent."
+    },
+    {
+     "q": "What happens to the PID when a process calls `exec`?",
+     "options": [
+      "It changes",
+      "It stays the same",
+      "It becomes 1",
+      "It becomes the parent's"
+     ],
+     "answer": 1,
+     "explain": "exec replaces the program, not the process."
+    },
+    {
+     "q": "Which call collects the child's exit code?",
+     "options": [
+      "fork",
+      "exec",
+      "waitpid",
+      "kill"
+     ],
+     "answer": 2,
+     "explain": "waitpid/wait4."
+    },
+    {
+     "q": "Why does `./mysh sh -c 'cd /usr'` not change your directory?",
+     "options": [
+      "cd is broken",
+      "The child process has its own working directory",
+      "mysh blocks cd",
+      "/usr is read-only"
+     ],
+     "answer": 1,
+     "explain": "A child cannot change its parent's state."
+    }
+   ],
+   "check": {
+    "scenario": "A script runs `cd /var/log` inside a `( ... )` group and then `pwd` outside it still shows the old directory. Explain using fork.",
+    "answer": "`( ... )` runs the commands in a **subshell**: bash forks a child, and the child does the `cd`. The child's working directory changes, the parent's does not. When the child exits, the change is gone."
+   }
+  },
+  {
+   "id": "copy-on-write",
+   "title": "Copy-on-write: why fork is cheap",
+   "level": "advanced",
+   "goal": "Measure copy-on-write: after `fork`, the child shares the parent's memory until one of them writes to a page.\n\nWhy it matters: it makes `fork` fast even for huge processes, and it explains memory numbers in `ps`, why a forked server may suddenly use more RAM, and how Redis or Postgres snapshots behave.",
+   "setup": {
+    "note": "Programs are small C files (gcc needed). Numbers such as PIDs will differ on your machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A test program",
+     "text": "The parent maps 64 MB and writes to every page, so all of it is really in RAM. Then it forks. The child either only **reads** one byte per page, or **writes** one byte per page. It reports how many **page faults** it took.\n\nA page fault happens when the CPU accesses a page the page table does not allow (here: a read-only shared page that is written).",
+     "code": {
+      "file": "cow.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <string.h>\n#include <sys/mman.h>\n#include <sys/resource.h>\n#include <sys/wait.h>\n#include <unistd.h>\n\n#define SIZE (64UL * 1024 * 1024)\n\nstatic long minor_faults(void) {\n    struct rusage r;\n    getrusage(RUSAGE_SELF, &r);\n    return r.ru_minflt;\n}\n\nint main(int argc, char **argv) {\n    int write_mode = argc > 1 && strcmp(argv[1], \"write\") == 0;\n    int hold = argc > 1 && strcmp(argv[1], \"hold\") == 0;\n    long page = sysconf(_SC_PAGESIZE);\n    char *buf = mmap(NULL, SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n    madvise(buf, SIZE, MADV_NOHUGEPAGE);   /* keep the numbers easy to read */\n    memset(buf, 1, SIZE);                  /* the parent touches every page */\n\n    pid_t pid = fork();\n    if (pid == 0) {\n        if (hold) {                        /* touch nothing, just wait so we can inspect */\n            sleep(3);\n            return 0;\n        }\n        long before = minor_faults();\n        volatile char sum = 0;\n        for (size_t i = 0; i < SIZE; i += page) {\n            if (write_mode) buf[i] = 2;\n            else sum += buf[i];\n        }\n        printf(\"child %s %lu pages: %ld page faults\\n\",\n               write_mode ? \"wrote\" : \"read\", SIZE / page, minor_faults() - before);\n        return 0;\n    }\n    waitpid(pid, NULL, 0);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "getconf PAGESIZE",
+       "output": "4096"
+      },
+      {
+       "cmd": "gcc -O1 -o cow cow.c",
+       "output": ""
+      }
+     ]
+    },
+    {
+     "title": "Reading does not copy",
+     "text": "Reading shared pages needs no copy and no fault: the child's page table already points to the parent's pages.",
+     "run": [
+      {
+       "cmd": "./cow",
+       "output": "child read 16384 pages: 0 page faults"
+      }
+     ]
+    },
+    {
+     "title": "Writing copies the page",
+     "text": "The first write to a shared page causes a fault. The kernel allocates a new page, copies 4 KB (one page) and maps the copy for the writer only. One fault per page.",
+     "run": [
+      {
+       "cmd": "./cow write",
+       "output": "child wrote 16384 pages: 16384 page faults"
+      }
+     ],
+     "under": "At `fork` the kernel copies the **page tables** of the parent but not the pages. It marks every writable page read-only in both processes and keeps a reference count on each physical page. A write raises a fault; the handler sees that the page is shared (count above 1), allocates a new page, copies the data and gives the writer a private writable mapping. When only one process still references a page, it is made writable again without copying."
+    },
+    {
+     "title": "Cost shows in memory accounting",
+     "text": "While parent and child share pages, each process's RSS counts them fully, so adding the numbers over-counts real memory. `Pss` (proportional set size) divides shared pages among the sharers. We start the program in `hold` mode: the child forks, touches nothing and waits 3 seconds. We read the **child's** memory summary.",
+     "run": [
+      {
+       "cmd": "./cow hold & sleep 1; child=$(pgrep -P $!); grep -E '^(Rss|Pss|Pss_Anon|Shared_Dirty|Private_Dirty)' /proc/$child/smaps_rollup; wait",
+       "output": "[1] 3461665\nRss:               65956 kB\nPss:               32836 kB\nPss_Dirty:         32832 kB\nPss_Anon:          32830 kB\nPss_File:              6 kB\nPss_Shmem:             0 kB\nShared_Dirty:      65608 kB\nPrivate_Dirty:        28 kB"
+      }
+     ],
+     "after": "The child has not written anything, yet its `Rss` includes the 64 MB it shares with the parent. `Shared_Dirty` is that shared part. `Pss_Anon` counts it **half** (two processes share it), so the real cost is about 32 MB per process, not 64 MB."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What happens right after fork to the parent's memory pages?",
+     "options": [
+      "They are copied",
+      "They are shared and marked read-only",
+      "They are freed",
+      "They move to swap"
+     ],
+     "answer": 1,
+     "explain": "Copy-on-write."
+    },
+    {
+     "q": "When is a page actually copied?",
+     "options": [
+      "At fork",
+      "When either process writes to it",
+      "When the child reads it",
+      "At exit"
+     ],
+     "answer": 1,
+     "explain": "A write fault triggers the copy."
+    },
+    {
+     "q": "The child only read the 64 MB. How many page faults did it take (step 2)?",
+     "options": [
+      "About 16000",
+      "Very few",
+      "Exactly 1",
+      "It crashed"
+     ],
+     "answer": 1,
+     "explain": "Reads share the parent's pages without faults."
+    },
+    {
+     "q": "What does PSS do?",
+     "options": [
+      "Counts only private pages",
+      "Divides shared pages among the processes sharing them",
+      "Counts swap",
+      "Shows page size"
+     ],
+     "answer": 1,
+     "explain": "Proportional set size."
+    }
+   ],
+   "check": {
+    "scenario": "A Redis server with 20 GB data forks to write a snapshot, and memory use grows during the snapshot even though the snapshot code does not allocate. Why?",
+    "answer": "The parent keeps serving writes. Each write to a page that the snapshot child still shares triggers copy-on-write, so the kernel allocates a private copy. With a write-heavy load many pages are copied and RAM use rises, up to nearly 2x in the worst case. Plan memory headroom and disable transparent huge pages (a write to one byte then copies 2 MB)."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is the difference between a process and a program?",
+   "a": "A program is an executable file. A process is a running instance with a PID, memory, open files and credentials. See [the lesson](#/lesson/9/process-basics).",
+   "level": "beginner"
+  },
+  {
+   "q": "How does a shell run a command?",
+   "a": "It calls `fork` to create a child, the child calls `exec` to load the program, and the shell calls `wait` to collect the exit status. See [fork, exec, wait](#/lesson/9/fork-exec-wait).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What does fork return?",
+   "a": "Twice: 0 in the child, the child's PID in the parent, -1 on failure.",
+   "level": "beginner"
+  },
+  {
+   "q": "Does exec create a new process?",
+   "a": "No. It replaces the program in the existing process. The PID is unchanged.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is copy-on-write?",
+   "a": "Parent and child share physical pages after fork, read-only. A write triggers a page fault and the kernel copies that page for the writer. See [copy-on-write](#/lesson/9/copy-on-write).",
+   "level": "advanced"
+  },
+  {
+   "q": "Why is fork fast even for a process with 50 GB of memory?",
+   "a": "It copies page tables, not pages. The cost is proportional to the mapped memory (page tables), not the data. Huge pages and vfork/posix_spawn make it cheaper still.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "PID",
+   "def": "Process ID: the number that identifies a process.",
+   "lesson": "9/process-basics"
+  },
+  {
+   "term": "PPID",
+   "def": "The PID of a process's parent.",
+   "lesson": "9/process-basics"
+  },
+  {
+   "term": "fork",
+   "def": "Creates a copy of the calling process. Implemented by the clone system call.",
+   "lesson": "9/fork-exec-wait"
+  },
+  {
+   "term": "exec",
+   "def": "Replaces the program running in a process with another program (execve).",
+   "lesson": "9/fork-exec-wait"
+  },
+  {
+   "term": "wait",
+   "def": "Collects the exit status of a child process.",
+   "lesson": "9/fork-exec-wait"
+  },
+  {
+   "term": "Copy-on-write",
+   "def": "Sharing pages after fork and copying one only when it is written.",
+   "lesson": "9/copy-on-write"
+  },
+  {
+   "term": "Page fault",
+   "def": "A CPU exception when a memory access is not allowed by the page table; the kernel handles it (loads, copies or kills).",
+   "lesson": "9/copy-on-write"
+  },
+  {
+   "term": "task_struct",
+   "def": "The kernel structure that represents a process or thread.",
+   "lesson": "9/process-basics"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ps -o pid,ppid,stat,comm -p PID",
+   "desc": "Show chosen columns for one process.",
+   "topic": "Processes",
+   "lesson": "9/process-basics"
+  },
+  {
+   "cmd": "pstree -p",
+   "desc": "Draw the process tree with PIDs.",
+   "topic": "Processes",
+   "lesson": "9/process-basics"
+  },
+  {
+   "cmd": "grep -E '^(Name|State|PPid)' /proc/PID/status",
+   "desc": "Show name, state and parent of a process.",
+   "topic": "Processes",
+   "lesson": "9/process-basics"
+  },
+  {
+   "cmd": "readlink /proc/PID/cwd",
+   "desc": "Show a process's working directory.",
+   "topic": "Processes",
+   "lesson": "9/process-basics"
+  },
+  {
+   "cmd": "strace -f -e trace=clone,execve,wait4 CMD",
+   "desc": "Watch fork, exec and wait.",
+   "topic": "Processes",
+   "lesson": "9/fork-exec-wait"
+  },
+  {
+   "cmd": "grep -E '^(Rss|Pss)' /proc/PID/smaps_rollup",
+   "desc": "Show resident and proportional memory.",
+   "topic": "Memory",
+   "lesson": "9/copy-on-write"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

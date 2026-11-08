@@ -81,7 +81,7 @@ button:disabled { opacity: .5; cursor: default; }
 /* lesson */
 .lesson-head { display: flex; flex-wrap: wrap; gap: .4rem .8rem; align-items: center; }
 .goal { background: var(--quote); border-left: 4px solid var(--accent); padding: .7rem 1rem; border-radius: .4rem; }
-.goal b { display: block; font-size: .75rem; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
+.goal > b { display: block; font-size: .75rem; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
 .step-title { margin: 0 0 .3rem; }
 .steps-nav { display: flex; justify-content: space-between; gap: .5rem; margin-top: 1.5rem; }
 .stepcount { color: var(--muted); font-size: .9rem; }
@@ -148,3 +148,8 @@ mark { background: var(--wait-bg); color: inherit; border-radius: .2rem; }
 .hero .btns { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: 1rem; }
 .stats { display: flex; flex-wrap: wrap; gap: 1.5rem; margin: 1rem 0; }
 .stats b { font-size: 1.5rem; display: block; }
+
+/* long inline commands and words must wrap on phones */
+main, details.qa, .card, .hit, .goal, .why, .under, .answer { overflow-wrap: anywhere; }
+code { overflow-wrap: anywhere; }
+.filters select, .filters input { max-width: 100%; min-width: 0; }

@@ -1,0 +1,507 @@
+{
+ "title": "Process states, ps, sessions, daemons, zombies",
+ "lessons": [
+  {
+   "id": "process-states",
+   "title": "Process states: R, S, D, T, Z",
+   "level": "beginner",
+   "goal": "Learn the states a process can be in, how `ps` shows them, and what each state tells you.\n\nWhy it matters: \"the server is slow\" often means many processes in `R` (CPU) or `D` (waiting for disk/network). The state is the first clue.",
+   "setup": {
+    "note": "Programs are small C files (gcc needed). PIDs differ on your machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The states",
+     "text": "`ps` shows the state in the `STAT` column.\n\n- **R** running or ready to run (on a CPU or in the run queue)\n- **S** sleeping, can be woken by a signal (waiting for input, a timer, a lock)\n- **D** uninterruptible sleep (waiting for I/O; cannot be killed until it returns)\n- **T** stopped (by a signal such as Ctrl-Z)\n- **Z** zombie (finished, waiting for the parent to collect its exit code)\n- **I** idle kernel thread",
+     "run": [
+      {
+       "cmd": "ps -o pid,stat,comm -p $$",
+       "output": "    PID STAT COMMAND\n3463175 S    bash"
+      }
+     ]
+    },
+    {
+     "title": "S: sleeping",
+     "text": "Most processes sleep most of the time. `sleep` waits for a timer. `wchan` shows the kernel function it waits in.",
+     "run": [
+      {
+       "cmd": "sleep 30 & ps -o pid,stat,wchan:22,comm -p $!; kill $!",
+       "output": "[1] 3463191\n    PID STAT WCHAN                  COMMAND\n3463191 S    hrtimer_nanosleep      sleep"
+      }
+     ]
+    },
+    {
+     "title": "R: running",
+     "text": "A busy loop never waits, so it stays `R`. We start one in the background, look at it, and stop it.",
+     "run": [
+      {
+       "cmd": "sh -c 'while :; do :; done' & echo $! > busy.pid; sleep 1; ps -o pid,stat,pcpu,comm -p $(cat busy.pid)",
+       "output": "[1] 3463194\n    PID STAT %CPU COMMAND\n3463194 R    54.9 sh"
+      }
+     ]
+    },
+    {
+     "title": "T: stopped",
+     "text": "`SIGSTOP` freezes a process. It keeps its memory but gets no CPU. `SIGCONT` resumes it.",
+     "run": [
+      {
+       "cmd": "kill -STOP $(cat busy.pid); sleep 0.5; ps -o stat,comm -p $(cat busy.pid)",
+       "output": "STAT COMMAND\nT    sh"
+      },
+      {
+       "cmd": "kill -CONT $(cat busy.pid); sleep 0.5; ps -o stat,comm -p $(cat busy.pid); kill $(cat busy.pid)",
+       "output": "STAT COMMAND\nR    sh"
+      }
+     ]
+    },
+    {
+     "title": "The state in /proc",
+     "text": "`ps` reads `/proc/PID/status`. The same information is there with the full name.",
+     "run": [
+      {
+       "cmd": "grep State /proc/$$/status",
+       "output": "State:\tR (running)"
+      }
+     ]
+    },
+    {
+     "title": "D: uninterruptible sleep",
+     "text": "A process in `D` waits for hardware or a network file system and **ignores all signals, even SIGKILL**, until the I/O finishes. It counts toward the load average without using CPU. Typical causes: a hung NFS server, a failing disk, a stuck storage driver.\n\nWe cannot safely create one here.",
+     "run": [
+      {
+       "cmd": "ps -eo pid,stat,wchan:30,comm | awk '$2 ~ /^D/'",
+       "explanationOnly": true,
+       "reason": "a D-state hang needs a failing disk or dead NFS server; not reproducible safely on this machine"
+      }
+     ],
+     "under": "A process in `S` can be woken by a signal and the kernel can abort the wait. In `D` the kernel code is in the middle of an operation that must complete (a disk transfer that writes into memory). Aborting it could corrupt data, so signals wait. Since Linux 2.6.25 some waits use `TASK_KILLABLE`, which fatal signals can interrupt."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which state counts toward load average but uses no CPU?",
+     "options": [
+      "S",
+      "D",
+      "T",
+      "Z"
+     ],
+     "answer": 1,
+     "explain": "Processes in uninterruptible sleep (D) are counted."
+    },
+    {
+     "q": "What does `T` mean?",
+     "options": [
+      "Terminated",
+      "Stopped by a signal",
+      "Threaded",
+      "Timer"
+     ],
+     "answer": 1,
+     "explain": "Stopped (SIGSTOP, Ctrl-Z)."
+    },
+    {
+     "q": "A process in state D ignores which signal?",
+     "options": [
+      "None",
+      "SIGKILL too, until the I/O completes",
+      "Only SIGTERM",
+      "Only SIGSTOP"
+     ],
+     "answer": 1,
+     "explain": "That is what makes D-state hangs painful."
+    },
+    {
+     "q": "A `sleep 30` is in which state?",
+     "options": [
+      "R",
+      "S",
+      "D",
+      "Z"
+     ],
+     "answer": 1,
+     "explain": "Waiting for a timer: interruptible sleep."
+    }
+   ],
+   "check": {
+    "scenario": "`top` shows load average 40 and the CPU is 95% idle. Which process state do you look for and with which command?",
+    "answer": "Many processes in `D` (waiting for I/O). `ps -eo pid,stat,wchan:30,comm | awk '$2 ~ /^D/'` lists them. The `wchan` tells which kernel function they wait in (often a filesystem or block layer function), which points to the stuck disk or NFS mount."
+   }
+  },
+  {
+   "id": "sessions-daemons",
+   "title": "Sessions, process groups and daemons",
+   "level": "intermediate",
+   "goal": "Learn how the kernel groups processes (process group, session), what a controlling terminal is, and how a classic daemon detaches from it.\n\nWhy it matters: this explains why background jobs die when you close a terminal, what `nohup` and `setsid` do, and what `systemd` does for you today.",
+   "setup": {
+    "note": "Programs are small C files (gcc needed). PIDs differ on your machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Process groups and sessions",
+     "text": "Commands in one pipeline form a **process group** (PGID). Here a subshell starts a two-command pipeline; the two `sleep` processes are its children and share one group. (`set -m` turns on job control, which an interactive shell already has: it puts each job in its own group.) Groups that belong to one login belong to a **session** (SID) with a **controlling terminal** (TTY). The terminal sends signals to the foreground group (Ctrl-C = SIGINT).",
+     "run": [
+      {
+       "cmd": "set -m; (sleep 40 | sleep 41) & sleep 0.5; ps -o pid,ppid,pgid,sid,tty,comm -p $!,$(pgrep -P $! -d,); kill $(pgrep -P $!); set +m",
+       "output": "[1] 3463216\n    PID    PPID    PGID     SID TT       COMMAND\n3463216 3463212 3463216 3463172 ?        bash\n3463217 3463216 3463216 3463172 ?        sleep\n3463219 3463216 3463216 3463172 ?        sleep\n\nTerminated"
+      }
+     ]
+    },
+    {
+     "title": "setsid: leave the session",
+     "text": "`setsid CMD` starts CMD in a **new session** with no controlling terminal. Its SID is its own PID and TTY shows `?`.",
+     "run": [
+      {
+       "cmd": "setsid sleep 42 & sleep 0.5; p=$(pgrep -n -x sleep); ps -o pid,ppid,pgid,sid,tty,comm -p $p; kill $p",
+       "output": "[1] 3463224\n    PID    PPID    PGID     SID TT       COMMAND\n3463224 3463212 3463224 3463224 ?        sleep"
+      }
+     ]
+    },
+    {
+     "title": "What happens when the terminal closes",
+     "text": "When a terminal closes, the kernel sends **SIGHUP** to the session leader's foreground group. Most programs die. `nohup` makes the command ignore SIGHUP. We check the signal mask: bit 1 of `SigIgn` is SIGHUP.",
+     "run": [
+      {
+       "cmd": "nohup sleep 43 > /dev/null 2>&1 & p1=$!; sleep 44 & p2=$!; sleep 0.5; grep SigIgn /proc/$p1/status /proc/$p2/status | sed 's#/proc/[0-9]*/status#process#'; kill $p1 $p2",
+       "output": "[1] 3463229\n[2] 3463230\nprocess:SigIgn:\t0000000000000007\nprocess:SigIgn:\t0000000000000006"
+      }
+     ],
+     "after": "`SigIgn` is a bit mask: the rightmost bit is SIGHUP (1), the next SIGINT (2), then SIGQUIT (3). The shell itself makes background jobs ignore SIGINT and SIGQUIT, so the plain process shows `6`. Only the nohup process also has the SIGHUP bit, so it shows `7`."
+    },
+    {
+     "title": "A classic daemon, written by hand",
+     "text": "A **daemon** is a background service without a terminal. The traditional recipe: fork and let the parent exit (so the child is adopted by PID 1), `setsid` to get a new session, fork again so it can never regain a terminal, change to `/`, and point stdin/out/err at `/dev/null`.",
+     "code": {
+      "file": "daemonize.c",
+      "lang": "c",
+      "src": "#include <fcntl.h>\n#include <stdlib.h>\n#include <unistd.h>\n\nint main(void) {\n    if (fork() > 0) _exit(0);      /* the original process exits; the child is adopted */\n    setsid();                      /* new session: no controlling terminal */\n    if (fork() > 0) _exit(0);      /* second fork: this process can never get a terminal again */\n    chdir(\"/\");                    /* do not keep a directory busy */\n    int fd = open(\"/dev/null\", O_RDWR);\n    dup2(fd, 0); dup2(fd, 1); dup2(fd, 2);   /* no terminal I/O */\n    for (;;) sleep(60);            /* the \"work\" */\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o daemonize daemonize.c",
+       "output": ""
+      },
+      {
+       "cmd": "./daemonize; sleep 0.5; ps -o pid,ppid,pgid,sid,tty,comm -C daemonize",
+       "output": "    PID    PPID    PGID     SID TT       COMMAND\n3463291 1373549 3463290 3463290 ?        daemonize"
+      }
+     ],
+     "after": "TTY is `?`: no controlling terminal. SID and PGID are the PID of the first child, which has already exited, so the daemon itself is **not** a session leader and can never open a controlling terminal. Its PPID is not our shell any more: it was adopted by an init-like process (PID 1, or a per-user `systemd --user` that acts as subreaper)."
+    },
+    {
+     "title": "Clean up and the modern way",
+     "text": "We stop the daemon. Today you do not write this code: you write a **systemd unit** and systemd starts the process in the background, gives it logging and restarts it (module 25).",
+     "run": [
+      {
+       "cmd": "pkill -x daemonize; sleep 0.5; pgrep -x daemonize || echo 'daemon stopped'",
+       "output": "daemon stopped"
+      }
+     ],
+     "under": "The double fork is not needed under systemd: the service manager already runs the process without a terminal in its own session and cgroup (`Type=simple`). Old-style daemons that fork need `Type=forking` so systemd can track the final PID."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `setsid` do?",
+     "options": [
+      "Sets the session ID to a number",
+      "Runs a command in a new session without a controlling terminal",
+      "Sets the system time",
+      "Shows sessions"
+     ],
+     "answer": 1,
+     "explain": "New session, new process group, no TTY."
+    },
+    {
+     "q": "Which signal does the kernel send to a session when its terminal closes?",
+     "options": [
+      "SIGKILL",
+      "SIGHUP",
+      "SIGSTOP",
+      "SIGUSR1"
+     ],
+     "answer": 1,
+     "explain": "SIGHUP (hangup)."
+    },
+    {
+     "q": "Why does a classic daemon fork twice?",
+     "options": [
+      "Speed",
+      "So it can never acquire a controlling terminal again",
+      "To have two copies",
+      "To log twice"
+     ],
+     "answer": 1,
+     "explain": "A session leader can open a terminal and get it as controlling terminal; the second child is not a session leader."
+    },
+    {
+     "q": "What does the TTY column show for a daemon?",
+     "options": [
+      "pts/0",
+      "?",
+      "tty1",
+      "console"
+     ],
+     "answer": 1,
+     "explain": "? means no controlling terminal."
+    }
+   ],
+   "check": {
+    "scenario": "You start a long job over SSH and the connection drops; the job is gone. List three ways to keep it alive.",
+    "answer": "`nohup CMD &` (ignores SIGHUP and logs to nohup.out), `setsid CMD &` (no controlling terminal, so no SIGHUP), or a terminal multiplexer such as `tmux` or `screen`. For services use a systemd unit or `systemd-run --user`."
+   }
+  },
+  {
+   "id": "zombies-orphans",
+   "title": "Zombies, orphans and reaping",
+   "level": "advanced",
+   "goal": "Create a zombie and an orphan on purpose, see them in `ps`, and learn who cleans them up.\n\nWhy it matters: zombie buildup means a parent forgets to `wait()`. It fills the process table, and `kill -9` cannot help. You must fix or kill the parent.",
+   "setup": {
+    "note": "Programs are small C files (gcc needed). PIDs differ on your machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A parent that never waits",
+     "text": "When a process ends, the kernel frees its memory but keeps a tiny entry with the exit status until the parent calls `wait`. That entry is a **zombie**. This parent creates a child that exits at once and then sleeps without calling `wait`.",
+     "code": {
+      "file": "zombie.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\n\nint main(void) {\n    pid_t pid = fork();\n    if (pid == 0)\n        _exit(0);                  /* the child ends at once */\n    printf(\"parent %d: child %d has exited, but I never call wait()\\n\", getpid(), pid);\n    fflush(stdout);\n    sleep(30);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o zombie zombie.c",
+       "output": ""
+      },
+      {
+       "cmd": "./zombie & sleep 1",
+       "output": "[1] 3463311\nparent 3463311: child 3463312 has exited, but I never call wait()"
+      }
+     ]
+    },
+    {
+     "title": "See the zombie",
+     "text": "`Z` in STAT and `<defunct>` in the command mark a zombie. It has no memory and no CPU use. It still has a PID.",
+     "run": [
+      {
+       "cmd": "ps -o pid,ppid,stat,comm --ppid $(pgrep -x zombie)",
+       "output": "    PID    PPID STAT COMMAND\n3463312 3463311 Z    zombie <defunct>"
+      },
+      {
+       "cmd": "grep -E '^(Name|State|PPid)' /proc/$(ps -o pid= --ppid $(pgrep -x zombie))/status",
+       "output": "Name:\tzombie\nState:\tZ (zombie)\nPPid:\t3463311"
+      }
+     ]
+    },
+    {
+     "title": "You cannot kill a zombie",
+     "text": "It is already dead. A signal has no process to run in. The fix is to make the parent call `wait`, or to remove the parent. Then PID 1 (or a subreaper) adopts the zombie and reaps it at once.",
+     "run": [
+      {
+       "cmd": "kill -9 $(ps -o pid= --ppid $(pgrep -x zombie)); sleep 0.5; ps -o pid,ppid,stat,comm --ppid $(pgrep -x zombie)",
+       "output": "    PID    PPID STAT COMMAND\n3463312 3463311 Z    zombie <defunct>"
+      },
+      {
+       "cmd": "kill $(pgrep -x zombie); sleep 1; ps -o pid,ppid,stat,comm -C zombie || echo 'both gone'",
+       "output": "bash: kill: (3463312) - No such process\n    PID    PPID STAT COMMAND\nboth gone"
+      }
+     ],
+     "under": "The kernel keeps the zombie's `task_struct` so the parent can read the exit status (`wait4`) and resource usage. When the parent exits, its children are re-parented to the nearest **subreaper** or to PID 1, which calls `wait` in a loop. A container's PID 1 that does not do this (a plain app) lets zombies pile up."
+    },
+    {
+     "title": "An orphan is the opposite",
+     "text": "An **orphan** is a living child whose parent exited. The kernel re-parents it to PID 1 (or a subreaper). It is harmless: it keeps running and is reaped later.",
+     "code": {
+      "file": "orphan.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <unistd.h>\n\nint main(void) {\n    pid_t pid = fork();\n    if (pid == 0) {\n        sleep(2);                  /* the child outlives its parent */\n        printf(\"child: my parent is now %d\\n\", getppid());\n        return 0;\n    }\n    printf(\"parent %d exits first\\n\", getpid());\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -o orphan orphan.c",
+       "output": ""
+      },
+      {
+       "cmd": "./orphan; sleep 3; echo 'done'",
+       "output": "parent 3463342 exits first\nchild: my parent is now 1373549\ndone"
+      }
+     ],
+     "after": "The child printed its new parent: an init-like process, not our shell's child. The number shown depends on whether a subreaper (for example `systemd --user`) exists in your session."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is a zombie process?",
+     "options": [
+      "A process using too much CPU",
+      "A finished process whose exit status has not been collected",
+      "A hung process",
+      "A stopped process"
+     ],
+     "answer": 1,
+     "explain": "Z state: dead but still in the table."
+    },
+    {
+     "q": "Why does `kill -9` not remove a zombie?",
+     "options": [
+      "Missing permission",
+      "It is already dead; only the parent's wait can remove it",
+      "Zombies ignore root",
+      "SIGKILL is blocked"
+     ],
+     "answer": 1,
+     "explain": "There is no running code to receive the signal."
+    },
+    {
+     "q": "Who reaps the zombie after its parent exits?",
+     "options": [
+      "Nobody",
+      "PID 1 or a subreaper",
+      "The kernel immediately without anyone",
+      "The shell"
+     ],
+     "answer": 1,
+     "explain": "The orphaned zombie is adopted and waited for."
+    },
+    {
+     "q": "What is an orphan?",
+     "options": [
+      "A zombie",
+      "A running child whose parent has exited",
+      "A process without PID",
+      "A kernel thread"
+     ],
+     "answer": 1,
+     "explain": "It keeps running under a new parent."
+    }
+   ],
+   "check": {
+    "scenario": "Monitoring shows 5000 zombie processes on a server. How do you find the cause and fix it?",
+    "answer": "`ps -eo pid,ppid,stat,comm | awk '$3 ~ /^Z/'` lists them; count by PPID with `| awk '{print $2}' | sort | uniq -c | sort -rn` to find the parent that does not call `wait`. Restart or fix that parent (it must handle SIGCHLD and `wait`). Killing the zombies is impossible; restarting the parent lets PID 1 reap them."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "Name the process states shown by ps.",
+   "a": "R running/runnable, S interruptible sleep, D uninterruptible sleep, T stopped, Z zombie, I idle kernel thread. See [the lesson](#/lesson/10/process-states).",
+   "level": "beginner"
+  },
+  {
+   "q": "What is a zombie and how do you get rid of it?",
+   "a": "A finished process whose parent has not called wait. You cannot kill it. Fix the parent so it waits, or restart/kill the parent so PID 1 reaps the zombie. See [zombies](#/lesson/10/zombies-orphans).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is a process in D state?",
+   "a": "It waits uninterruptibly for I/O. It cannot be killed until the I/O returns. Many D processes raise the load average with idle CPUs.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How does a classic daemon detach from the terminal?",
+   "a": "fork (parent exits), setsid, fork again, chdir to /, redirect stdin/out/err to /dev/null. See [the daemon](#/lesson/10/sessions-daemons).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the difference between an orphan and a zombie?",
+   "a": "An orphan is alive and re-parented to PID 1. A zombie is dead and waits for its parent to collect the status.",
+   "level": "beginner"
+  },
+  {
+   "q": "Why can a container's PID 1 cause zombies?",
+   "a": "PID 1 must reap adopted children. A normal application as PID 1 often does not call wait, so zombies accumulate. Use an init such as tini (`docker run --init`).",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Zombie",
+   "def": "A terminated process whose exit status has not been collected by its parent (state Z).",
+   "lesson": "10/zombies-orphans"
+  },
+  {
+   "term": "Orphan",
+   "def": "A running process whose parent has exited; it is adopted by PID 1 or a subreaper.",
+   "lesson": "10/zombies-orphans"
+  },
+  {
+   "term": "Uninterruptible sleep",
+   "def": "State D: waiting for I/O, ignores signals until it completes.",
+   "lesson": "10/process-states"
+  },
+  {
+   "term": "Process group",
+   "def": "A set of processes that receive terminal signals together, for example a pipeline.",
+   "lesson": "10/sessions-daemons"
+  },
+  {
+   "term": "Session",
+   "def": "A set of process groups belonging to one login, tied to a controlling terminal.",
+   "lesson": "10/sessions-daemons"
+  },
+  {
+   "term": "Daemon",
+   "def": "A background service process without a controlling terminal.",
+   "lesson": "10/sessions-daemons"
+  },
+  {
+   "term": "Subreaper",
+   "def": "A process that adopts orphaned descendants instead of PID 1.",
+   "lesson": "10/zombies-orphans"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "ps -eo pid,ppid,stat,wchan:30,comm",
+   "desc": "List processes with state and kernel wait function.",
+   "topic": "Processes",
+   "lesson": "10/process-states"
+  },
+  {
+   "cmd": "ps -eo pid,ppid,stat,comm | awk '$3 ~ /^Z/'",
+   "desc": "List zombies.",
+   "topic": "Processes",
+   "lesson": "10/zombies-orphans"
+  },
+  {
+   "cmd": "ps -o pid,ppid,pgid,sid,tty,comm",
+   "desc": "Show group, session and terminal.",
+   "topic": "Processes",
+   "lesson": "10/sessions-daemons"
+  },
+  {
+   "cmd": "setsid CMD",
+   "desc": "Run CMD in a new session.",
+   "topic": "Processes",
+   "lesson": "10/sessions-daemons"
+  },
+  {
+   "cmd": "nohup CMD &",
+   "desc": "Run CMD immune to hangup.",
+   "topic": "Processes",
+   "lesson": "10/sessions-daemons"
+  },
+  {
+   "cmd": "kill -STOP PID / kill -CONT PID",
+   "desc": "Freeze and resume a process.",
+   "topic": "Processes",
+   "lesson": "10/process-states"
+  },
+  {
+   "cmd": "grep State /proc/PID/status",
+   "desc": "Show the state of a process.",
+   "topic": "Processes",
+   "lesson": "10/process-states"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

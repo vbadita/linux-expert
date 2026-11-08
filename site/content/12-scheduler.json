@@ -1,0 +1,545 @@
+{
+ "title": "Threads and the CPU scheduler",
+ "lessons": [
+  {
+   "id": "threads-nice",
+   "title": "Threads, and CPU shares with nice",
+   "level": "beginner",
+   "goal": "Learn the difference between a thread and a process, and how `nice` changes how much CPU a process gets when the CPU is busy.\n\nWhy it matters: threads share memory, processes do not. And `nice` is the simplest tool to keep a background job from slowing down important work.",
+   "setup": {
+    "note": "Use a scratch directory. This machine has 1 CPU, which makes scheduling effects easy to see; with more CPUs the two busy programs would run side by side and the effect disappears (pin them to one CPU with `taskset -c 0`).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Threads share memory",
+     "text": "A **thread** is a flow of execution inside a process. All threads of a process share the same memory, open files and PID, but each has its own **thread ID** (TID) and stack. The program starts a thread that changes a global variable.",
+     "code": {
+      "file": "threads.c",
+      "lang": "c",
+      "src": "#include <pthread.h>\n#include <stdio.h>\n#include <sys/syscall.h>\n#include <unistd.h>\n\nstatic int counter = 0;\n\nstatic void *work(void *arg) {\n    (void)arg;\n    counter += 100;\n    printf(\"thread: pid=%d tid=%ld counter=%d at %p\\n\",\n           getpid(), syscall(SYS_gettid), counter, (void *)&counter);\n    return NULL;\n}\n\nint main(void) {\n    printf(\"main:   pid=%d tid=%ld counter=%d at %p\\n\",\n           getpid(), syscall(SYS_gettid), counter, (void *)&counter);\n    pthread_t t;\n    pthread_create(&t, NULL, work, NULL);\n    pthread_join(t, NULL);\n    printf(\"main:   counter=%d after the thread ended\\n\", counter);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -pthread -o threads threads.c",
+       "output": ""
+      },
+      {
+       "cmd": "./threads",
+       "output": "main:   pid=3463658 tid=3463658 counter=0 at 0x420048\nthread: pid=3463658 tid=3463659 counter=100 at 0x420048\nmain:   counter=100 after the thread ended"
+      }
+     ],
+     "after": "Same PID, different TIDs. The variable lives at the **same address** and the thread's change is visible to `main`. A forked child would have changed only its own copy (module 9)."
+    },
+    {
+     "title": "The kernel sees threads as tasks",
+     "text": "Linux treats a thread as a process that shares memory with others (`clone` with `CLONE_VM`). `/proc/PID/task/` has one directory per thread, and `ps -L` lists them. A shell has one task. A multi-threaded server such as the Docker daemon has many.",
+     "run": [
+      {
+       "cmd": "nproc",
+       "output": "1"
+      },
+      {
+       "cmd": "ls /proc/$$/task | wc -l",
+       "output": "1"
+      },
+      {
+       "cmd": "ls /proc/$(pgrep -o -x dockerd)/task | wc -l",
+       "output": "13"
+      }
+     ]
+    },
+    {
+     "title": "A CPU hog",
+     "text": "`burn.c` counts in a loop for 3 seconds and prints how many million loops it managed. It measures the CPU share it received.",
+     "code": {
+      "file": "burn.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <time.h>\n\nint main(void) {\n    struct timespec t0, t;\n    volatile unsigned long n = 0;\n    clock_gettime(CLOCK_MONOTONIC, &t0);\n    do {\n        for (int i = 0; i < 100000; i++)\n            n++;\n        clock_gettime(CLOCK_MONOTONIC, &t);\n    } while (t.tv_sec - t0.tv_sec < 3);        /* burn CPU for 3 seconds */\n    printf(\"%lu million loops\\n\", n / 1000000);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -O1 -o burn burn.c",
+       "output": ""
+      },
+      {
+       "cmd": "./burn",
+       "output": "1159 million loops"
+      }
+     ]
+    },
+    {
+     "title": "Two programs, one CPU",
+     "text": "With one CPU, two hogs share it. **nice** values range from -20 (most favoured) to 19 (least). `nice -n 19` asks the scheduler to give this process a much smaller share when others want the CPU.",
+     "run": [
+      {
+       "cmd": "./burn > a.txt & nice -n 19 ./burn > b.txt & wait; echo \"nice  0: $(cat a.txt)\"; echo \"nice 19: $(cat b.txt)\"",
+       "output": "[1] 3463680\n[2] 3463681\nnice  0: 1096 million loops\nnice 19: 16 million loops"
+      }
+     ],
+     "under": "Each nice level changes the process's scheduling **weight** by about 25% (the table `sched_prio_to_weight`: nice 0 = 1024, nice 19 = 15). The scheduler shares CPU time in proportion to weights, so nice 19 gets about 1.5% when competing with nice 0. If the CPU is idle, a niced process still runs at full speed."
+    },
+    {
+     "title": "See and change nice",
+     "text": "`ps -o ni` shows nice. `renice` changes a running process. Raising nice (making a process nicer) is allowed for everyone; lowering it needs root.",
+     "run": [
+      {
+       "cmd": "sleep 100 & p=$!; ps -o pid,ni,comm -p $p; renice -n 10 -p $p; ps -o pid,ni,comm -p $p; renice -n 5 -p $p 2>&1 | head -n 1; kill $p",
+       "output": "[1] 3463687\n    PID  NI COMMAND\n3463687   0 sleep\n3463687 (process ID) old priority 0, new priority 10\n    PID  NI COMMAND\n3463687  10 sleep\nrenice: failed to set priority for 3463687 (process ID): Permission denied"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What do the threads of one process share?",
+     "options": [
+      "Stack",
+      "Memory and open files",
+      "TID",
+      "Nothing"
+     ],
+     "answer": 1,
+     "explain": "Each thread has its own stack and TID; memory and files are shared."
+    },
+    {
+     "q": "Which nice value gives a process the smallest CPU share?",
+     "options": [
+      "-20",
+      "0",
+      "19",
+      "100"
+     ],
+     "answer": 2,
+     "explain": "19 is the nicest (lowest priority)."
+    },
+    {
+     "q": "What happens to a nice 19 process when the CPU is otherwise idle?",
+     "options": [
+      "It waits",
+      "It runs at full speed",
+      "It is killed",
+      "It runs at 1.5%"
+     ],
+     "answer": 1,
+     "explain": "Nice only matters under competition."
+    },
+    {
+     "q": "Who may lower a process's nice value (make it less nice)?",
+     "options": [
+      "Any user",
+      "Only root",
+      "Only the owner",
+      "Nobody"
+     ],
+     "answer": 1,
+     "explain": "Raising priority needs CAP_SYS_NICE."
+    }
+   ],
+   "check": {
+    "scenario": "A nightly backup makes the web server slow. Without changing the backup code, how do you reduce its impact on CPU and on disk?",
+    "answer": "Start it with `nice -n 19 ionice -c3 backup.sh` (idle I/O class). Nice lowers its CPU weight, `ionice -c3` lets it use the disk only when nobody else does. For a hard limit use a cgroup (`systemd-run -p CPUQuota=20%`)."
+   }
+  },
+  {
+   "id": "policies-affinity",
+   "title": "Priorities, scheduling policies and CPU affinity",
+   "level": "intermediate",
+   "goal": "Learn the scheduling policies (normal, batch, idle, real-time), how to read them with `chrt`, and how to pin a process to a CPU with `taskset`.\n\nWhy it matters: real-time policies can starve everything else, and affinity explains odd cache and NUMA effects. You should know what they do before touching them.",
+   "setup": {
+    "note": "Use a scratch directory. This machine has 1 CPU, which makes scheduling effects easy to see; with more CPUs the two busy programs would run side by side and the effect disappears (pin them to one CPU with `taskset -c 0`).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Policies",
+     "text": "Every task has a **scheduling policy**. Most use `SCHED_OTHER` (the normal fair scheduler, called CFS for years, EEVDF since kernel 6.6). Others: `SCHED_BATCH` (throughput jobs), `SCHED_IDLE` (runs only when nothing else wants the CPU), and real-time `SCHED_FIFO` and `SCHED_RR`.",
+     "run": [
+      {
+       "cmd": "chrt -p $$",
+       "output": "pid 3463694's current scheduling policy: SCHED_OTHER\npid 3463694's current scheduling priority: 0"
+      },
+      {
+       "cmd": "chrt -m",
+       "output": "SCHED_OTHER min/max priority\t: 0/0\nSCHED_FIFO min/max priority\t: 1/99\nSCHED_RR min/max priority\t: 1/99\nSCHED_BATCH min/max priority\t: 0/0\nSCHED_IDLE min/max priority\t: 0/0\nSCHED_DEADLINE min/max priority\t: 0/0"
+      }
+     ]
+    },
+    {
+     "title": "Real-time priorities beat everything normal",
+     "text": "Real-time tasks have priority 1-99. They always run before any normal task, and a FIFO task keeps the CPU until it blocks. A real-time task that loops forever **freezes the machine** (the kernel limits it to 95% by default, `sched_rt_runtime_us`). We only read the policy of a short real-time command.",
+     "run": [
+      {
+       "cmd": "sudo chrt -f 10 chrt -p 0 2>&1 | head -n 2",
+       "output": "pid 3463705's current scheduling policy: SCHED_FIFO\npid 3463705's current scheduling priority: 10"
+      },
+      {
+       "cmd": "cat /proc/sys/kernel/sched_rt_runtime_us /proc/sys/kernel/sched_rt_period_us",
+       "output": "950000\n1000000"
+      }
+     ]
+    },
+    {
+     "title": "SCHED_IDLE and SCHED_BATCH",
+     "text": "`chrt -i` runs a command with the idle policy: it only runs when the CPU would otherwise be idle. This is stronger than `nice 19`. The same CPU hog as in the previous lesson (save it as `burn.c`): the idle one gets almost nothing.",
+     "code": {
+      "file": "burn.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n#include <time.h>\n\nint main(void) {\n    struct timespec t0, t;\n    volatile unsigned long n = 0;\n    clock_gettime(CLOCK_MONOTONIC, &t0);\n    do {\n        for (int i = 0; i < 100000; i++)\n            n++;\n        clock_gettime(CLOCK_MONOTONIC, &t);\n    } while (t.tv_sec - t0.tv_sec < 3);        /* burn CPU for 3 seconds */\n    printf(\"%lu million loops\\n\", n / 1000000);\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "gcc -O1 -o burn burn.c",
+       "output": ""
+      },
+      {
+       "cmd": "./burn > a.txt & chrt -i 0 ./burn > b.txt & wait; echo \"normal: $(cat a.txt)\"; echo \"idle:   $(cat b.txt)\"",
+       "output": "[1] 3463717\n[2] 3463718\nnormal: 922 million loops\nidle:   364 million loops"
+      }
+     ]
+    },
+    {
+     "title": "CPU affinity",
+     "text": "The **affinity mask** lists the CPUs a task may run on. `taskset -p` shows it and `taskset -c LIST CMD` starts a command pinned to those CPUs. Pinning keeps caches warm and isolates noisy jobs, but can leave other CPUs idle.",
+     "run": [
+      {
+       "cmd": "taskset -p $$",
+       "output": "pid 3463694's current affinity mask: 1"
+      },
+      {
+       "cmd": "taskset -cp $$",
+       "output": "pid 3463694's current affinity list: 0"
+      },
+      {
+       "cmd": "taskset -c 0 echo \"ran on CPU 0\"",
+       "output": "ran on CPU 0"
+      }
+     ],
+     "under": "The affinity mask is stored in the task (`cpus_ptr`). The scheduler only places the task on CPUs in the mask. Child processes inherit it. With cgroups (`cpuset` controller) you can set masks for whole groups, and Kubernetes' CPU manager uses that."
+    },
+    {
+     "title": "Where the task is running",
+     "text": "Field 39 of `/proc/PID/stat` is the CPU number the task last ran on.",
+     "run": [
+      {
+       "cmd": "awk '{print \"last CPU:\", $39}' /proc/$$/stat",
+       "output": "last CPU: 0"
+      },
+      {
+       "cmd": "grep -E '^(Cpus_allowed|Cpus_allowed_list)' /proc/$$/status",
+       "output": "Cpus_allowed:\t1\nCpus_allowed_list:\t0"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which policy runs a task only when the CPU would otherwise be idle?",
+     "options": [
+      "SCHED_FIFO",
+      "SCHED_IDLE",
+      "SCHED_RR",
+      "SCHED_OTHER"
+     ],
+     "answer": 1,
+     "explain": "SCHED_IDLE."
+    },
+    {
+     "q": "Why are real-time policies dangerous?",
+     "options": [
+      "They use more memory",
+      "A busy real-time task can starve all normal tasks",
+      "They need a reboot",
+      "They disable swap"
+     ],
+     "answer": 1,
+     "explain": "Real-time tasks outrank all normal tasks."
+    },
+    {
+     "q": "What does `taskset -c 0 CMD` do?",
+     "options": [
+      "Limits CPU use to 0%",
+      "Runs CMD only on CPU 0",
+      "Sets nice 0",
+      "Counts CPUs"
+     ],
+     "answer": 1,
+     "explain": "It sets the affinity mask."
+    },
+    {
+     "q": "Which policy do ordinary processes use?",
+     "options": [
+      "SCHED_FIFO",
+      "SCHED_BATCH",
+      "SCHED_OTHER",
+      "SCHED_DEADLINE"
+     ],
+     "answer": 2,
+     "explain": "SCHED_OTHER (the fair scheduler)."
+    }
+   ],
+   "check": {
+    "scenario": "A latency-sensitive process shares a 4-CPU server with batch jobs and sees occasional delays. List the tools you would use, from least to most invasive.",
+    "answer": "1. `nice`/`ionice` or `SCHED_BATCH`/`SCHED_IDLE` for the batch jobs.\n2. cgroup limits (`CPUQuota`, `cpu.weight`) per service.\n3. CPU affinity or `cpuset` to give the latency-sensitive process its own CPUs, and `isolcpus`/IRQ affinity for extreme cases.\n4. Real-time policy only for a tiny, well-behaved task, with a sane `sched_rt_runtime_us`."
+   }
+  },
+  {
+   "id": "fair-scheduler-eevdf",
+   "title": "The fair scheduler: EEVDF, vruntime, sched_ext",
+   "level": "advanced",
+   "goal": "Learn how the Linux scheduler decides who runs next, and look at the per-task numbers the kernel keeps.\n\nWhy it matters: when you tune latency or explain why a task is slow, you should know the model. Recent kernels also let you load your own scheduler as a BPF program (sched_ext).",
+   "setup": {
+    "note": "Use a scratch directory. This machine has 1 CPU, which makes scheduling effects easy to see; with more CPUs the two busy programs would run side by side and the effect disappears (pin them to one CPU with `taskset -c 0`).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Which scheduler is this kernel?",
+     "text": "Up to Linux 6.5 the normal scheduler was **CFS** (Completely Fair Scheduler). Since 6.6 it is **EEVDF** (Earliest Eligible Virtual Deadline First). Both live in the `fair` scheduling class. We check the running kernel. The file `base_slice_ns` (the default time slice, here 0.7 ms) exists only with EEVDF; CFS had `sched_latency_ns` and `sched_min_granularity_ns` instead, which are absent here.",
+     "run": [
+      {
+       "cmd": "uname -r | cut -d- -f1",
+       "output": "6.12.0"
+      },
+      {
+       "cmd": "sudo ls /sys/kernel/debug/sched | tr '\\n' ' '; echo",
+       "output": "base_slice_ns debug fair_server features latency_warn_ms latency_warn_once migration_cost_ns nr_migrate numa_balancing tunable_scaling verbose "
+      },
+      {
+       "cmd": "sudo cat /sys/kernel/debug/sched/base_slice_ns",
+       "output": "700000"
+      }
+     ]
+    },
+    {
+     "title": "Every task has a virtual runtime",
+     "text": "The scheduler keeps, for each task, how much weighted CPU time it has received: **vruntime**. A task that ran less than its fair share is **eligible** and may run. Among eligible tasks, EEVDF picks the one with the **earliest virtual deadline**, which is shorter for tasks that ask for small time slices (latency-sensitive tasks). CFS simply ran the task with the smallest vruntime.",
+     "run": [
+      {
+       "cmd": "sudo grep -E '^(se.vruntime|se.sum_exec_runtime|nr_switches|nr_voluntary_switches|nr_involuntary_switches|prio) ' /proc/$$/sched | awk '{print $1, $3}'",
+       "output": "se.vruntime 85918605.218071\nse.sum_exec_runtime 5.817800\nnr_switches 37\nnr_voluntary_switches 15\nnr_involuntary_switches 22\nprio 120"
+      }
+     ],
+     "after": "`nr_voluntary_switches` counts times the task gave up the CPU by blocking (reading input, sleeping). `nr_involuntary_switches` counts times the scheduler took the CPU away. An interactive shell has mostly voluntary ones."
+    },
+    {
+     "title": "Weights come from nice",
+     "text": "A task's **weight** is derived from its nice level, which sets how fast its vruntime advances: heavy tasks advance slowly, so they stay eligible more often and get a larger share.",
+     "run": [
+      {
+       "cmd": "sleep 100 & p=$!; sudo grep -E '^(prio|se.load.weight) ' /proc/$p/sched | awk '{print $1, $3}'; renice -n 10 -p $p > /dev/null; sudo grep -E '^(prio|se.load.weight) ' /proc/$p/sched | awk '{print $1, $3}'; kill $p",
+       "output": "[1] 3463795\nse.load.weight 1048576\nprio 120\nse.load.weight 112640\nprio 130"
+      }
+     ],
+     "under": "`prio` is 120 + nice for normal tasks. The weight table gives 1024 at nice 0 and 110 at nice 10 (each step about 1.25x). Real-time tasks have `prio` below 100."
+    },
+    {
+     "title": "Scheduler classes",
+     "text": "The kernel has several classes in strict order: stop, deadline (`SCHED_DEADLINE`), real-time, fair, then idle. A class only runs when all higher ones have nothing to run. Since 6.12 there is also an extensible class, **sched_ext**, where a BPF program decides who runs, so schedulers can be written, loaded and replaced at run time without rebooting.",
+     "run": [
+      {
+       "cmd": "ls /sys/kernel/sched_ext 2>&1 | head -n 2",
+       "output": "enable_seq\nhotplug_seq"
+      },
+      {
+       "cmd": "grep -E 'CONFIG_SCHED_CLASS_EXT|CONFIG_SCHED_DEBUG' /boot/config-$(uname -r)",
+       "output": "CONFIG_SCHED_CLASS_EXT=y\nCONFIG_SCHED_DEBUG=y"
+      }
+     ]
+    },
+    {
+     "title": "Sub-schedulers and cgroups",
+     "text": "The fair class is **hierarchical**: CPU shares are divided between cgroups first (`cpu.weight`), then between tasks inside each group. This is how a container gets a fair share regardless of how many processes it runs. sched_ext work on \"sub-schedulers\" extends the idea so a cgroup subtree can run its own BPF scheduler.",
+     "run": [
+      {
+       "cmd": "scx_simple",
+       "explanationOnly": true,
+       "reason": "loading a sched_ext scheduler needs a kernel with CONFIG_SCHED_CLASS_EXT and the scx tools; shown here as the command you would run"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What replaced CFS as the default fair scheduler in Linux 6.6?",
+     "options": [
+      "O(1)",
+      "BFS",
+      "EEVDF",
+      "RR"
+     ],
+     "answer": 2,
+     "explain": "EEVDF."
+    },
+    {
+     "q": "What does `nr_involuntary_switches` count?",
+     "options": [
+      "Blocking calls",
+      "Times the scheduler preempted the task",
+      "Signals",
+      "Page faults"
+     ],
+     "answer": 1,
+     "explain": "The task was forced off the CPU."
+    },
+    {
+     "q": "What is sched_ext?",
+     "options": [
+      "A file system",
+      "A scheduler class whose policy is a BPF program loaded at run time",
+      "A nice alternative",
+      "A cgroup file"
+     ],
+     "answer": 1,
+     "explain": "It makes schedulers pluggable."
+    },
+    {
+     "q": "How are CPU shares divided in a cgroup hierarchy?",
+     "options": [
+      "Equal per task",
+      "First between groups by weight, then between tasks in a group",
+      "By PID",
+      "Randomly"
+     ],
+     "answer": 1,
+     "explain": "The fair class is hierarchical."
+    }
+   ],
+   "check": {
+    "scenario": "Two containers run on one host: A with 10 busy processes, B with 1. Both have `cpu.weight` 100. How much CPU does B get when the host is saturated, and why?",
+    "answer": "About half. The scheduler divides CPU between the **cgroups** by weight first, then among tasks inside each group. A's 10 processes share A's half. If you want shares per process, put all processes in the same group or use larger weights/quotas deliberately."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is the difference between a thread and a process?",
+   "a": "Threads of a process share memory, files and PID but have their own TID, stack and registers. Processes have separate address spaces. Linux implements both with `clone` and different sharing flags. See [the lesson](#/lesson/12/threads-nice).",
+   "level": "beginner"
+  },
+  {
+   "q": "What does nice do?",
+   "a": "It sets a task's weight for the fair scheduler, from -20 (largest share) to 19 (smallest). It matters only when CPUs compete.",
+   "level": "beginner"
+  },
+  {
+   "q": "Name the Linux scheduling policies.",
+   "a": "SCHED_OTHER (normal), SCHED_BATCH, SCHED_IDLE, SCHED_FIFO and SCHED_RR (real-time), SCHED_DEADLINE. See [the lesson](#/lesson/12/policies-affinity).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is CPU affinity and when do you use it?",
+   "a": "The set of CPUs a task may run on (`taskset`, cpuset). Use it to keep caches warm, isolate noisy jobs or respect NUMA locality.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Explain EEVDF in a few sentences.",
+   "a": "Each task has a virtual runtime and a lag (how much service it is owed). Only tasks with non-negative lag are eligible; among them the scheduler runs the one with the earliest virtual deadline (now + slice/weight). Short slices give low latency without special heuristics. See [the lesson](#/lesson/12/fair-scheduler-eevdf).",
+   "level": "advanced"
+  },
+  {
+   "q": "What is sched_ext?",
+   "a": "A scheduler class (Linux 6.12+) where the scheduling policy is a BPF program loaded at run time, so schedulers can be changed without rebuilding the kernel.",
+   "level": "expert"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Thread",
+   "def": "A flow of execution in a process, sharing its memory and files.",
+   "lesson": "12/threads-nice"
+  },
+  {
+   "term": "TID",
+   "def": "Thread ID: the kernel's per-thread identifier.",
+   "lesson": "12/threads-nice"
+  },
+  {
+   "term": "nice",
+   "def": "A value from -20 to 19 that lowers or raises a task's CPU share.",
+   "lesson": "12/threads-nice"
+  },
+  {
+   "term": "Scheduling policy",
+   "def": "The rule class for a task: normal, batch, idle, FIFO, RR, deadline.",
+   "lesson": "12/policies-affinity"
+  },
+  {
+   "term": "CPU affinity",
+   "def": "The mask of CPUs a task may run on.",
+   "lesson": "12/policies-affinity"
+  },
+  {
+   "term": "vruntime",
+   "def": "Weighted CPU time a task has received, used by the fair scheduler.",
+   "lesson": "12/fair-scheduler-eevdf"
+  },
+  {
+   "term": "EEVDF",
+   "def": "Earliest Eligible Virtual Deadline First: the fair scheduler since Linux 6.6.",
+   "lesson": "12/fair-scheduler-eevdf"
+  },
+  {
+   "term": "sched_ext",
+   "def": "BPF-extensible scheduler class in Linux 6.12.",
+   "lesson": "12/fair-scheduler-eevdf"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "nice -n 19 CMD",
+   "desc": "Run CMD with the lowest CPU priority.",
+   "topic": "Scheduling",
+   "lesson": "12/threads-nice"
+  },
+  {
+   "cmd": "renice -n 10 -p PID",
+   "desc": "Change a running process's nice value.",
+   "topic": "Scheduling",
+   "lesson": "12/threads-nice"
+  },
+  {
+   "cmd": "ps -L -o pid,tid,comm -p PID",
+   "desc": "List the threads of a process.",
+   "topic": "Scheduling",
+   "lesson": "12/threads-nice"
+  },
+  {
+   "cmd": "chrt -p PID",
+   "desc": "Show the scheduling policy and priority.",
+   "topic": "Scheduling",
+   "lesson": "12/policies-affinity"
+  },
+  {
+   "cmd": "chrt -i 0 CMD",
+   "desc": "Run CMD with the idle policy.",
+   "topic": "Scheduling",
+   "lesson": "12/policies-affinity"
+  },
+  {
+   "cmd": "taskset -cp PID",
+   "desc": "Show the CPU affinity of a process.",
+   "topic": "Scheduling",
+   "lesson": "12/policies-affinity"
+  },
+  {
+   "cmd": "taskset -c 0,1 CMD",
+   "desc": "Run CMD on CPUs 0 and 1 only.",
+   "topic": "Scheduling",
+   "lesson": "12/policies-affinity"
+  },
+  {
+   "cmd": "cat /proc/PID/sched",
+   "desc": "Show scheduler statistics of a task.",
+   "topic": "Scheduling",
+   "lesson": "12/fair-scheduler-eevdf"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

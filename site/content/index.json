@@ -47,8 +47,8 @@
    "part": 1,
    "title": "The shell",
    "summary": "How bash reads, expands and runs a command; quoting; globbing; redirection; pipes; exit codes; environment variables; PATH; builtins vs programs.",
-   "status": "partial",
-   "lessons": 1,
+   "status": "ready",
+   "lessons": 4,
    "file": "01-shell.json"
   },
   {
@@ -56,8 +56,8 @@
    "part": 1,
    "title": "Filesystem hierarchy",
    "summary": "/, /etc, /var, /proc, /sys, /dev, /usr, /home, /tmp, /boot. Everything is a file.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "02-filesystem.json"
   },
   {
@@ -65,8 +65,8 @@
    "part": 1,
    "title": "Files and permissions",
    "summary": "rwx, octal mode, umask, ownership, setuid/setgid/sticky, ACLs, chattr/lsattr.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "03-permissions.json"
   },
   {
@@ -74,8 +74,8 @@
    "part": 1,
    "title": "Users and groups",
    "summary": "/etc/passwd, /etc/shadow, /etc/group, sudo and sudoers, su, UID 0.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "04-users.json"
   },
   {
@@ -83,8 +83,8 @@
    "part": 1,
    "title": "Text processing",
    "summary": "grep, sed, awk, cut, sort, uniq, tr, wc, head, tail, tee, xargs, find, diff.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "05-text.json"
   },
   {
@@ -92,8 +92,8 @@
    "part": 1,
    "title": "Editors",
    "summary": "vim essentials, with nano as a fallback.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "06-editors.json"
   },
   {
@@ -101,8 +101,8 @@
    "part": 1,
    "title": "Package management",
    "summary": "rpm/dnf and dpkg/apt, repositories, dependencies, building from source.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "07-packages.json"
   },
   {
@@ -110,8 +110,8 @@
    "part": 2,
    "title": "System calls and strace",
    "summary": "What a system call is and how strace shows them.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "08-syscalls.json"
   },
   {
@@ -119,8 +119,8 @@
    "part": 2,
    "title": "Processes",
    "summary": "fork, exec, wait, copy-on-write.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "09-processes.json"
   },
   {
@@ -128,8 +128,8 @@
    "part": 2,
    "title": "Process states, ps, sessions, daemons, zombies",
    "summary": "How the kernel tracks process state, and how daemons and zombies come to exist.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "10-process-states.json"
   },
   {
@@ -137,8 +137,8 @@
    "part": 2,
    "title": "Signals",
    "summary": "SIGTERM vs SIGKILL, SIGHUP, SIGCHLD, trap, kill, nohup.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "11-signals.json"
   },
   {
@@ -146,8 +146,8 @@
    "part": 2,
    "title": "Threads and the CPU scheduler",
    "summary": "Threads, CFS/EEVDF, nice, priorities, real-time scheduling, CPU affinity, sched_ext and sub-schedulers.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "12-scheduler.json"
   },
   {
@@ -155,8 +155,8 @@
    "part": 2,
    "title": "Kernel modules, sysctl, /proc and /sys",
    "summary": "lsmod, modprobe, modinfo, sysctl, /proc and /sys in depth.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "13-modules.json"
   },
   {
@@ -164,8 +164,8 @@
    "part": 2,
    "title": "Building and booting a custom kernel",
    "summary": "Kernel versions and the release cycle.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "14-custom-kernel.json"
   },
   {
@@ -173,8 +173,8 @@
    "part": 3,
    "title": "Memory",
    "summary": "Virtual memory, VSZ/RSS, mmap, page cache, dirty pages, swap, the OOM killer.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "15-memory.json"
   },
   {
@@ -182,8 +182,8 @@
    "part": 3,
    "title": "Advanced memory",
    "summary": "Huge pages, NUMA, /proc/PID/smaps, memory leaks, slab (slabtop).",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "16-memory-advanced.json"
   },
   {
@@ -191,8 +191,8 @@
    "part": 3,
    "title": "File descriptors and the VFS",
    "summary": "What a file descriptor is and how the VFS routes I/O.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "17-fds-vfs.json"
   },
   {
@@ -200,8 +200,8 @@
    "part": 3,
    "title": "Inodes and links",
    "summary": "Hard and soft links, \"disk full but df says no\", deleted-but-open files (lsof +L1).",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "18-inodes.json"
   },
   {
@@ -209,8 +209,8 @@
    "part": 3,
    "title": "Disks and partitions",
    "summary": "Block devices, lsblk, fdisk/parted, GPT vs MBR.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "19-disks.json"
   },
   {
@@ -218,8 +218,8 @@
    "part": 3,
    "title": "Filesystems",
    "summary": "ext4, xfs, btrfs; mkfs, mount, /etc/fstab, fsck, journaling.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "20-filesystems.json"
   },
   {
@@ -227,8 +227,8 @@
    "part": 3,
    "title": "LVM",
    "summary": "Physical volumes, volume groups, logical volumes, extending and snapshots.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "21-lvm.json"
   },
   {
@@ -236,8 +236,8 @@
    "part": 3,
    "title": "RAID, I/O schedulers, iostat",
    "summary": "Software RAID with mdadm, I/O schedulers, iostat.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "22-raid.json"
   },
   {
@@ -245,8 +245,8 @@
    "part": 3,
    "title": "NFS, iSCSI and network storage",
    "summary": "Network storage protocols and how to use them.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "23-netstorage.json"
   },
   {
@@ -254,8 +254,8 @@
    "part": 4,
    "title": "The boot process",
    "summary": "Firmware (UEFI/BIOS), GRUB, kernel, initramfs, systemd.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "24-boot.json"
   },
   {
@@ -263,8 +263,8 @@
    "part": 4,
    "title": "systemd in depth",
    "summary": "Units, targets, dependencies, writing a service, timers, journald.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "25-systemd.json"
   },
   {
@@ -272,8 +272,8 @@
    "part": 4,
    "title": "Logging",
    "summary": "journalctl, rsyslog, logrotate.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "26-logging.json"
   },
   {
@@ -281,8 +281,8 @@
    "part": 4,
    "title": "Scheduling",
    "summary": "cron, at, systemd timers.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "27-scheduling.json"
   },
   {
@@ -290,8 +290,8 @@
    "part": 5,
    "title": "Network basics in Linux",
    "summary": "Interfaces, ip addr/link/route, NetworkManager.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "28-network-basics.json"
   },
   {
@@ -299,8 +299,8 @@
    "part": 5,
    "title": "TCP/IP inside the kernel",
    "summary": "Sockets, ss, connection states, the TCP handshake.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "29-tcpip.json"
   },
   {
@@ -308,8 +308,8 @@
    "part": 5,
    "title": "DNS",
    "summary": "resolv.conf, nsswitch, dig, systemd-resolved.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "30-dns.json"
   },
   {
@@ -317,8 +317,8 @@
    "part": 5,
    "title": "Firewalls",
    "summary": "netfilter, iptables, nftables, firewalld.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "31-firewalls.json"
   },
   {
@@ -326,8 +326,8 @@
    "part": 5,
    "title": "Network troubleshooting",
    "summary": "ping, traceroute, mtr, tcpdump, curl, nc.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "32-net-troubleshooting.json"
   },
   {
@@ -335,8 +335,8 @@
    "part": 5,
    "title": "SSH in depth",
    "summary": "Keys, agent, config file, tunnels, port forwarding, jump hosts.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "33-ssh.json"
   },
   {
@@ -344,8 +344,8 @@
    "part": 6,
    "title": "The Linux security model",
    "summary": "Users, capabilities, PAM.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "34-security-model.json"
   },
   {
@@ -353,8 +353,8 @@
    "part": 6,
    "title": "SELinux and AppArmor",
    "summary": "Mandatory access control.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "35-mac.json"
   },
   {
@@ -362,8 +362,8 @@
    "part": 6,
    "title": "Hardening",
    "summary": "SSH, updates, auditd, file integrity checks.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "36-hardening.json"
   },
   {
@@ -371,8 +371,8 @@
    "part": 7,
    "title": "Namespaces",
    "summary": "pid, net, mnt, uts, ipc, user namespaces, with unshare demos.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "37-namespaces.json"
   },
   {
@@ -380,8 +380,8 @@
    "part": 7,
    "title": "cgroups",
    "summary": "cgroups v1 and v2: CPU, memory and I/O limits.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "38-cgroups.json"
   },
   {
@@ -389,8 +389,8 @@
    "part": 7,
    "title": "Containers from scratch",
    "summary": "What Docker and Podman really do; rootless containers.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "39-containers.json"
   },
   {
@@ -398,8 +398,8 @@
    "part": 7,
    "title": "Virtualization",
    "summary": "KVM, QEMU, libvirt.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "40-virtualization.json"
   },
   {
@@ -407,8 +407,8 @@
    "part": 8,
    "title": "Performance methodology",
    "summary": "The USE method, load average, uptime.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "41-perf-method.json"
   },
   {
@@ -416,8 +416,8 @@
    "part": 8,
    "title": "CPU performance",
    "summary": "top, htop, mpstat, pidstat, perf.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "42-cpu.json"
   },
   {
@@ -425,8 +425,8 @@
    "part": 8,
    "title": "Memory and I/O performance",
    "summary": "vmstat, free, iostat, iotop, sar.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "43-mem-io.json"
   },
   {
@@ -434,8 +434,8 @@
    "part": 8,
    "title": "Tracing",
    "summary": "strace vs ltrace vs perf vs eBPF; bpftrace one-liners; bcc tools.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "44-tracing.json"
   },
   {
@@ -443,8 +443,8 @@
    "part": 9,
    "title": "Bash scripting",
    "summary": "Variables, conditions, loops, functions, error handling (set -euo pipefail), arrays.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 3,
    "file": "45-bash-scripting.json"
   },
   {
@@ -452,8 +452,8 @@
    "part": 9,
    "title": "Advanced bash",
    "summary": "Process substitution, here-docs, getopts, debugging with bash -x.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "46-bash-advanced.json"
   },
   {
@@ -461,8 +461,8 @@
    "part": 9,
    "title": "Ansible basics",
    "summary": "Managing many Linux servers.",
-   "status": "soon",
-   "lessons": 0,
+   "status": "ready",
+   "lessons": 2,
    "file": "47-ansible.json"
   },
   {
@@ -470,7 +470,7 @@
    "part": 10,
    "title": "Troubleshooting labs",
    "summary": "Interactive incidents: high load with idle CPU, OOM kills, too many open files, full disk, service won't start, slow DNS, network timeouts, zombie buildup, a server that won't boot, a read-only filesystem.",
-   "status": "partial",
+   "status": "ready",
    "lessons": 0,
    "file": "48-labs.json",
    "kind": "labs"
@@ -482,7 +482,8 @@
    "summary": "Mixed questions across all modules, with a score.",
    "status": "ready",
    "lessons": 0,
-   "kind": "exam"
+   "kind": "exam",
+   "file": "49-exam.json"
   }
  ]
 }

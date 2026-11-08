@@ -1,0 +1,383 @@
+{
+ "title": "DNS",
+ "lessons": [
+  {
+   "id": "name-resolution",
+   "title": "How a name becomes an address: nsswitch, hosts, resolv.conf",
+   "level": "beginner",
+   "goal": "Learn the path a program takes to turn `example.com` into an IP address, and which files control it.\n\nWhy it matters: \"it works with the IP but not the name\" is a DNS question. You must know which layer to blame: the program, the C library, the local files or the DNS server.",
+   "setup": {
+    "note": "Steps with sudo edit /etc/hosts for a moment (a copy is restored at the end) and run a tiny DNS server on 127.0.0.1:5353. Use a throwaway machine. Needs dig (`bind-utils`) and tcpdump.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo sed -i '/labhost.example/d' /etc/hosts; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Programs ask the C library",
+     "text": "A program calls `getaddrinfo()` in libc. libc reads `/etc/nsswitch.conf` to learn **where** to look and in what order. The `hosts:` line lists the sources: `files` (/etc/hosts), `dns`, `myhostname` and so on.",
+     "run": [
+      {
+       "cmd": "grep '^hosts:' /etc/nsswitch.conf | tr -s ' ' ' '",
+       "output": "hosts: files dns myhostname"
+      }
+     ]
+    },
+    {
+     "title": "getent asks the same way a program does",
+     "text": "`getent hosts NAME` goes through libc and nsswitch, exactly like `ping` or `curl`. Names with no answer give exit code 2.",
+     "run": [
+      {
+       "cmd": "getent hosts localhost | head -n 1 | tr -s ' ' ' '",
+       "output": "::1 localhost localhost.localdomain localhost6 localhost6.localdomain6"
+      },
+      {
+       "cmd": "getent hosts no-such-name.invalid; echo \"exit code: $?\"",
+       "output": "exit code: 2"
+      }
+     ]
+    },
+    {
+     "title": "/etc/hosts: a local override",
+     "text": "Because `files` comes first, an entry in `/etc/hosts` wins over DNS. We add a fake name, ask libc, and remove it again.",
+     "run": [
+      {
+       "cmd": "echo '10.200.7.7 labhost.example' | sudo tee -a /etc/hosts > /dev/null; getent hosts labhost.example | tr -s ' ' ' '",
+       "output": "10.200.7.7 labhost.example"
+      },
+      {
+       "cmd": "sudo sed -i '/labhost.example/d' /etc/hosts; getent hosts labhost.example; echo \"exit code after removal: $?\"",
+       "output": "exit code after removal: 2"
+      }
+     ]
+    },
+    {
+     "title": "/etc/resolv.conf: which DNS servers",
+     "text": "For the `dns` source libc reads `/etc/resolv.conf`: the `nameserver` lines (up to three), a `search` list of domains tried for short names, and options (`timeout`, `attempts`). NetworkManager or systemd-resolved usually generates it.",
+     "run": [
+      {
+       "cmd": "head -n 1 /etc/resolv.conf | cut -c1-40",
+       "output": "; Any changes made to this file will be "
+      },
+      {
+       "cmd": "awk '/^nameserver/ {n++} END {print n, \"nameserver line(s)\"}' /etc/resolv.conf",
+       "output": "1 nameserver line(s)"
+      }
+     ],
+     "under": "The resolver sends the query to the first nameserver and waits `timeout` seconds (default 5) before trying the next one, and repeats `attempts` times (default 2). A dead first nameserver therefore adds 5 seconds to every lookup: a classic cause of \"everything is slow\"."
+    },
+    {
+     "title": "dig talks DNS directly and ignores /etc/hosts",
+     "text": "`dig` is a DNS client: it sends a query to a DNS server and shows the answer. It does **not** use nsswitch, so it does not see `/etc/hosts`. This difference is a favourite troubleshooting trap.",
+     "run": [
+      {
+       "cmd": "echo '10.200.7.7 labhost.example' | sudo tee -a /etc/hosts > /dev/null; getent hosts labhost.example | wc -l | awk '{print \"getent finds it:\", $1}'; dig +short labhost.example | wc -l | awk '{print \"dig finds it:\", $1}'; sudo sed -i '/labhost.example/d' /etc/hosts",
+       "output": "getent finds it: 1\ndig finds it: 0"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which file decides the order of name sources (files, dns)?",
+     "options": [
+      "/etc/hosts",
+      "/etc/nsswitch.conf",
+      "/etc/resolv.conf",
+      "/etc/hostname"
+     ],
+     "answer": 1,
+     "explain": "The `hosts:` line in nsswitch.conf."
+    },
+    {
+     "q": "`ping name` works with the entry in /etc/hosts, but `dig name` shows nothing. Why?",
+     "options": [
+      "dig is broken",
+      "dig queries DNS servers and does not read /etc/hosts",
+      "ping caches",
+      "DNS is down"
+     ],
+     "answer": 1,
+     "explain": "dig bypasses nsswitch."
+    },
+    {
+     "q": "What does `getent hosts NAME` use?",
+     "options": [
+      "Only DNS",
+      "The same libc path as normal programs",
+      "Only /etc/hosts",
+      "Only the cache"
+     ],
+     "answer": 1,
+     "explain": "libc and nsswitch."
+    },
+    {
+     "q": "A dead first nameserver in resolv.conf causes...",
+     "options": [
+      "Nothing",
+      "Several seconds of delay on lookups before the next server is tried",
+      "A crash",
+      "Wrong answers"
+     ],
+     "answer": 1,
+     "explain": "The timeout applies per attempt."
+    }
+   ],
+   "check": {
+    "scenario": "Users say a website opens only after 5 seconds, every time. Pinging the IP is instant. What is the most likely cause and how do you confirm it?",
+    "answer": "A slow or dead **first nameserver** in `/etc/resolv.conf` (5 s timeout) or an IPv6 (AAAA) lookup issue. Confirm with `time getent hosts name` and `dig @FIRST_NS name` versus `dig @SECOND_NS name`; with `strace -f -e trace=network,connect getent hosts name` you can see the timeouts. Fix by removing the dead server or reducing `timeout`."
+   }
+  },
+  {
+   "id": "dig-and-dns-protocol",
+   "title": "dig and the DNS protocol, with a tiny DNS server",
+   "level": "intermediate",
+   "goal": "Read a DNS answer in full, see the query and reply as real packets, and meet the response codes, using a DNS server we write ourselves.\n\nWhy it matters: DNS is behind almost every outage story. You should be able to read `dig` output and tell NXDOMAIN from NODATA from a timeout.",
+   "setup": {
+    "note": "Steps with sudo edit /etc/hosts for a moment (a copy is restored at the end) and run a tiny DNS server on 127.0.0.1:5353. Use a throwaway machine. Needs dig (`bind-utils`) and tcpdump.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo sed -i '/labhost.example/d' /etc/hosts; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A DNS server in 30 lines",
+     "text": "DNS queries are small UDP packets. This Python program answers type **A** queries for two names and says \"no such name\" (NXDOMAIN) for anything else. It listens on 127.0.0.1 port 5353. Save it as `dnsd.py`.",
+     "code": {
+      "file": "dnsd.py",
+      "lang": "py",
+      "src": "import socket, struct\n\nANSWERS = {\"lab.example.\": \"10.200.8.8\", \"www.lab.example.\": \"10.200.8.9\"}\n\n\ndef parse_name(data, pos):\n    labels = []\n    while data[pos]:\n        n = data[pos]\n        labels.append(data[pos + 1:pos + 1 + n].decode())\n        pos += n + 1\n    return \".\".join(labels) + \".\", pos + 1\n\n\nsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\nsock.bind((\"127.0.0.1\", 5353))\nwhile True:\n    data, client = sock.recvfrom(512)\n    name, end = parse_name(data, 12)\n    qtype, qclass = struct.unpack(\"!HH\", data[end:end + 4])\n    question = data[12:end + 4]\n    ip = ANSWERS.get(name.lower())\n    flags = 0x8180 if ip else 0x8183                    # response + recursion available; or NXDOMAIN\n    answers = 1 if ip and qtype == 1 else 0             # only type A (1) gets an answer\n    reply = data[:2] + struct.pack(\"!HHHHH\", flags, 1, answers, 0, 0) + question\n    if answers:\n        reply += b\"\\xc0\\x0c\" + struct.pack(\"!HHIH\", 1, 1, 60, 4) + socket.inet_aton(ip)\n    sock.sendto(reply, client)\n"
+     },
+     "run": [
+      {
+       "cmd": "python3 dnsd.py > /dev/null 2>&1 & echo $! > dns.pid; sleep 0.5; echo started",
+       "output": "[1] 3480072\nstarted"
+      }
+     ]
+    },
+    {
+     "title": "Ask it with dig",
+     "text": "`dig @SERVER -p PORT NAME` sends one query to that server. `+noall +comments +question +answer` prints the header, the question and the answer section only.",
+     "run": [
+      {
+       "cmd": "dig @127.0.0.1 -p 5353 lab.example +noall +comments +question +answer | grep -vE '^$|OPT PSEUDOSECTION|EDNS|^; COOKIE'",
+       "output": ";; Got answer:\n;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 29575\n;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 0\n;; QUESTION SECTION:\n;lab.example.\t\t\tIN\tA\n;; ANSWER SECTION:\nlab.example.\t\t60\tIN\tA\t10.200.8.8"
+      }
+     ],
+     "after": "`status: NOERROR` is success. `flags: qr rd ra` mean: this is a response, recursion was desired, recursion is available. The answer line has the name, the **TTL** (60 seconds: how long a resolver may cache it), class `IN`, type `A` and the data."
+    },
+    {
+     "title": "Short output, and the other cases",
+     "text": "`+short` prints only the data. Three outcomes you must tell apart:\n\n- **NOERROR with an answer**: the name exists and has that type.\n- **NXDOMAIN**: the name does not exist.\n- **NOERROR with no answer (NODATA)**: the name exists but has no record of that type (here: no AAAA).",
+     "run": [
+      {
+       "cmd": "dig @127.0.0.1 -p 5353 www.lab.example +short",
+       "output": "10.200.8.9"
+      },
+      {
+       "cmd": "dig @127.0.0.1 -p 5353 nothere.example +noall +comments | grep -oE 'status: [A-Z]+'",
+       "output": "status: NXDOMAIN"
+      },
+      {
+       "cmd": "dig @127.0.0.1 -p 5353 lab.example AAAA +noall +comments | grep -oE 'status: [A-Z]+|ANSWER: [0-9]+' | tr '\\n' ' '; echo",
+       "output": "status: NOERROR ANSWER: 0 "
+      }
+     ]
+    },
+    {
+     "title": "The packets on the wire",
+     "text": "We capture the exchange on loopback. tcpdump decodes UDP port 5353 as multicast DNS, so the query is printed as `A (QM)? lab.example.` (the standard port 53 would print `A? lab.example.`). The reply carries one answer, `1/0/0` (answers/authority/additional). The first number is the query ID that matches request and reply.",
+     "run": [
+      {
+       "cmd": "sudo timeout 3 tcpdump -i lo -nn -l udp port 5353 -c 2 2>/dev/null | sed -E 's/^[0-9:.]+ IP //; s/127.0.0.1\\.[0-9]{5}/CLIENT/; s/^CLIENT > 127.0.0.1.5353: [0-9]+/CLIENT > SERVER: id/; s/^127.0.0.1.5353 > CLIENT: [0-9]+/SERVER > CLIENT: id/' > dns.cap & T=$!; sleep 1; dig @127.0.0.1 -p 5353 lab.example +short > /dev/null; wait $T; cat dns.cap",
+       "output": "[2] 3480104\nCLIENT > SERVER: id+ [1au] A (QM)? lab.example. (52)\nSERVER > CLIENT: id 1/0/0 A 10.200.8.8 (45)"
+      }
+     ],
+     "under": "DNS uses UDP port 53 for small messages (up to 512 bytes, or about 1232 with EDNS0) and falls back to **TCP** when a reply is truncated (the `tc` flag) or for zone transfers. DNSSEC and large answers make TCP more common. A firewall that blocks 53/tcp causes odd failures only for big answers."
+    },
+    {
+     "title": "Record types you meet",
+     "text": "- **A** / **AAAA**: IPv4 / IPv6 address.\n- **CNAME**: an alias to another name.\n- **MX**: mail servers. **TXT**: text (SPF, verification).\n- **NS**: the servers responsible for a zone. **SOA**: zone parameters.\n- **PTR**: reverse lookup (address to name).\n\nA **resolver** (recursive) walks from the root to the authoritative server for you and caches the answer for its TTL. A **stub** resolver (libc) only asks one such server.",
+     "run": [
+      {
+       "cmd": "kill $(cat dns.pid); sleep 0.3; echo stopped",
+       "output": "stopped"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `status: NXDOMAIN` mean?",
+     "options": [
+      "Server error",
+      "The name does not exist",
+      "The name exists with no record of that type",
+      "A timeout"
+     ],
+     "answer": 1,
+     "explain": "Non-existent domain."
+    },
+    {
+     "q": "A reply with `status: NOERROR` and `ANSWER: 0` for an AAAA query means...",
+     "options": [
+      "The name does not exist",
+      "The name exists but has no AAAA record",
+      "The server is down",
+      "DNSSEC failed"
+     ],
+     "answer": 1,
+     "explain": "NODATA."
+    },
+    {
+     "q": "What is the TTL in a DNS answer?",
+     "options": [
+      "Time to live of the packet",
+      "How long the answer may be cached",
+      "The query time",
+      "The number of hops"
+     ],
+     "answer": 1,
+     "explain": "Seconds a resolver may cache the record."
+    },
+    {
+     "q": "When does DNS use TCP?",
+     "options": [
+      "Never",
+      "For truncated replies, zone transfers and large answers",
+      "Only for IPv6",
+      "Only for MX"
+     ],
+     "answer": 1,
+     "explain": "UDP first; TCP fallback."
+    }
+   ],
+   "check": {
+    "scenario": "`dig +short www.example.com` returns nothing, but `dig www.example.com` with its full output shows `status: NOERROR` and `ANSWER: 0`. What does that tell you?",
+    "answer": "The name exists but has no record of the type you asked for (A by default): it may have only AAAA or a CNAME to a name without A. Try `dig AAAA`, `dig ANY`/`CNAME`, and compare the authoritative server's answer (`dig @ns1... name`). NXDOMAIN would instead mean the name itself does not exist."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "How does a program resolve a hostname on Linux?",
+   "a": "It calls getaddrinfo() in libc, which follows /etc/nsswitch.conf (usually files, then dns), reads /etc/hosts and queries the nameservers in /etc/resolv.conf. See [the lesson](#/lesson/30/name-resolution).",
+   "level": "beginner"
+  },
+  {
+   "q": "Why does dig not see an entry in /etc/hosts?",
+   "a": "dig is a DNS client and talks to a DNS server directly; it does not use nsswitch or /etc/hosts. Use `getent hosts` to test what programs see.",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the difference between NXDOMAIN and NODATA?",
+   "a": "NXDOMAIN: the name does not exist. NODATA: the name exists, but has no record of the requested type (NOERROR with zero answers). See [the lesson](#/lesson/30/dig-and-dns-protocol).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is a TTL and what happens when it is long?",
+   "a": "Cache lifetime of a record. A long TTL means fewer queries but slow propagation of changes; lower it before a planned migration.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Name common DNS record types.",
+   "a": "A, AAAA, CNAME, MX, TXT, NS, SOA, PTR, SRV, CAA.",
+   "level": "beginner"
+  },
+  {
+   "q": "Why is every lookup 5 seconds slow?",
+   "a": "The first nameserver in resolv.conf is unreachable (timeout 5 s) before the second is used, or an AAAA query is blocked. Check with `time getent hosts` and `dig @server`.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "DNS",
+   "def": "The Domain Name System: a distributed database that maps names to addresses and other data.",
+   "lesson": "30/name-resolution"
+  },
+  {
+   "term": "nsswitch.conf",
+   "def": "The file that tells libc the order of sources for names, users and more.",
+   "lesson": "30/name-resolution"
+  },
+  {
+   "term": "resolv.conf",
+   "def": "The file listing DNS servers and search domains for the libc resolver.",
+   "lesson": "30/name-resolution"
+  },
+  {
+   "term": "TTL",
+   "def": "Time to live: seconds a DNS record may be cached.",
+   "lesson": "30/dig-and-dns-protocol"
+  },
+  {
+   "term": "NXDOMAIN",
+   "def": "DNS response: the name does not exist.",
+   "lesson": "30/dig-and-dns-protocol"
+  },
+  {
+   "term": "Resolver",
+   "def": "Software that looks up names, often with a cache (recursive) or as a stub in libc.",
+   "lesson": "30/dig-and-dns-protocol"
+  },
+  {
+   "term": "Authoritative server",
+   "def": "A DNS server that holds the real data for a zone.",
+   "lesson": "30/dig-and-dns-protocol"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "getent hosts NAME",
+   "desc": "Resolve a name the way programs do.",
+   "topic": "DNS",
+   "lesson": "30/name-resolution"
+  },
+  {
+   "cmd": "grep '^hosts:' /etc/nsswitch.conf",
+   "desc": "Show name source order.",
+   "topic": "DNS",
+   "lesson": "30/name-resolution"
+  },
+  {
+   "cmd": "dig NAME",
+   "desc": "Query DNS directly and show the full answer.",
+   "topic": "DNS",
+   "lesson": "30/dig-and-dns-protocol"
+  },
+  {
+   "cmd": "dig +short NAME",
+   "desc": "Show only the answer data.",
+   "topic": "DNS",
+   "lesson": "30/dig-and-dns-protocol"
+  },
+  {
+   "cmd": "dig @SERVER NAME TYPE",
+   "desc": "Ask a specific server for a record type.",
+   "topic": "DNS",
+   "lesson": "30/dig-and-dns-protocol"
+  },
+  {
+   "cmd": "dig -x ADDRESS",
+   "desc": "Reverse lookup.",
+   "topic": "DNS",
+   "lesson": "30/dig-and-dns-protocol"
+  },
+  {
+   "cmd": "dig +trace NAME",
+   "desc": "Follow delegation from the root.",
+   "topic": "DNS",
+   "lesson": "30/dig-and-dns-protocol"
+  },
+  {
+   "cmd": "time getent hosts NAME",
+   "desc": "Measure resolution delay as programs see it.",
+   "topic": "DNS",
+   "lesson": "30/name-resolution"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

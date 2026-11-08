@@ -7,21 +7,30 @@ How it works
 - Each lesson (and each lab) runs in ONE persistent `bash --noprofile --norc` session,
   so variables, cwd and files carry from step to step, exactly as for a learner.
 - The session starts in a fresh /tmp/lab. The lesson's `setup.commands` run first.
-- A step with `code` {file, src} writes that source to /tmp/lab/<file> before its runs.
+- A step with `code` {file, src} writes that source into the session's current directory before its runs.
 - Every run {cmd} gets stdout+stderr recorded. A lesson with any missing output is re-run
   completely (steps depend on each other). --force re-records everything.
 - Runs with "explanationOnly": true are never executed.
+- Outputs that contain host identifiers (hostname, IPs, MACs, machine-id) abort the capture.
 - Labs may have `build` (commands run first, may use sudo) and `teardown`.
 - `env` at the top of the module is refreshed with the machine the output came from.
 """
-import json, os, platform, select, shutil, subprocess, sys, time, uuid
+import json, os, platform, re, select, shutil, subprocess, sys, time, uuid
 
 WORK = "/tmp/lab"
 MARK = "__END_" + uuid.uuid4().hex[:8] + "__"
 
 
+def unmount_leftovers():
+    """A failed lesson may leave tmpfs/loop mounts under /tmp/lab; remove them before starting over."""
+    r = subprocess.run("findmnt -rn -o TARGET", shell=True, capture_output=True, text=True)
+    for t in sorted((x for x in r.stdout.split() if x.startswith(WORK + "/")), reverse=True):
+        subprocess.run(["sudo", "umount", t], check=False)
+
+
 class Session:
     def __init__(self):
+        unmount_leftovers()
         shutil.rmtree(WORK, ignore_errors=True)
         os.makedirs(WORK)
         # Interactive mode (-i) so messages read like a terminal ("bash: x: command not found",
@@ -34,7 +43,7 @@ class Session:
         self.run("set +H")  # drains the "no job control" start-up noise; discard it
         return self
 
-    def run(self, cmd, timeout=60):
+    def run(self, cmd, timeout=300):
         time.sleep(0.4)  # a human takes a moment between commands; lets killed processes exit
         # rc=$? ... (exit $rc) keeps $? intact for the next command, like at a prompt
         self.p.stdin.write((cmd + f"\nrc=$?; printf '\\n{MARK}%s\\n' \"$rc\"; (exit $rc)\n").encode())
@@ -59,6 +68,8 @@ class Session:
                 data += chunk
         rc = int(data[i + len(tag):].split(b"\n")[0])
         out = data[:i].decode("utf-8", "replace")
+        # artifact of an interactive bash that reads from a pipe: a real terminal never prints it
+        out = "\n".join(l for l in out.split("\n") if "tcsetattr: Inappropriate ioctl" not in l)
         return out.rstrip("\n"), rc
 
     def close(self):
@@ -68,6 +79,35 @@ class Session:
         except Exception:
             self.p.kill()
         shutil.rmtree(WORK, ignore_errors=True)
+
+
+def host_secrets():
+    """Strings that identify THIS machine. The site is public, so they must never be recorded."""
+    out = set()
+    for cmd in ("hostname", "hostname -f", "cat /etc/machine-id",
+                "ip -o addr | awk '$2!=\"lo\"{print $4}' | cut -d/ -f1",
+                "cat /sys/class/net/*/address | grep -v '^00:00:00:00:00:00$'"):
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        out |= {x.strip() for x in r.stdout.split() if len(x.strip()) > 3}
+    out |= {"rc-workspace", ".claude", "ocir.io", "frjpwv", "valentin", "169.254.169.254"}
+    return out
+
+
+SECRETS = None
+ALLOWED_IP = re.compile(r"^(127\.|0\.|10\.(200|201|99)\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|255\.|224\.)")
+IPV4 = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
+
+
+def check_leaks(cmd, out, r):
+    global SECRETS
+    if SECRETS is None:
+        SECRETS = host_secrets()
+    bad = [s for s in SECRETS if s in out]
+    if r.get("ok") != "ip":
+        bad += [m for m in IPV4.findall(out) if all(int(x) < 256 for x in m.split(".")) and not ALLOWED_IP.match(m)]
+    if bad:
+        sys.exit(f"LEAK in output of `{cmd.splitlines()[0][:60]}`: {sorted(set(bad))}\n"
+                 "Change the command (use netns/loopback/documentation addresses) or set \"ok\": \"ip\" for a version string.")
 
 
 def must(sess, cmd, what):
@@ -80,6 +120,7 @@ def do_run(sess, r, force, label):
     if r.get("explanationOnly") or ("output" in r and not force):
         return 0
     out, rc = sess.run(r["cmd"])
+    check_leaks(r["cmd"], out, r)
     r["output"] = out
     print(f"  [{rc}] {label}: {r['cmd'].splitlines()[0][:70]}")
     return 1
@@ -101,7 +142,8 @@ def capture_lesson(lesson, force):
             must(sess, c, "setup")
         for step in lesson["steps"]:
             if step.get("code") and step["code"].get("file"):
-                with open(os.path.join(WORK, step["code"]["file"]), "w") as f:
+                cwd = sess.run("pwd")[0].strip() or WORK      # the learner saves it where they are
+                with open(os.path.join(cwd, step["code"]["file"]), "w") as f:
                     f.write(step["code"]["src"])
             for r in ([step["run"]] if isinstance(step.get("run"), dict) else step.get("run") or []):
                 n += do_run(sess, r, force, lesson["id"])
@@ -143,6 +185,10 @@ def machine():
 
 
 def main():
+    # captures share /tmp/lab, so two at once would corrupt each other: take a lock
+    import fcntl
+    lock = open("/tmp/capture.lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
     argv = sys.argv[1:]
     force = "--force" in argv
     only = argv[argv.index("--only") + 1] if "--only" in argv else None

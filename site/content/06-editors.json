@@ -1,0 +1,381 @@
+{
+ "title": "Editors",
+ "lessons": [
+  {
+   "id": "vim-first-keys",
+   "title": "vim: modes and the first keys",
+   "level": "beginner",
+   "goal": "Learn what vim's modes are and the small set of keys that is enough to edit any file on any server.\n\nWhy it matters: on a minimal server, in rescue mode, or over a slow SSH link, `vi` or `vim` is often the only editor you have.",
+   "setup": {
+    "note": "Vim is interactive. For the outputs we drive it with scripts (`-Nes -u NONE -c ...`), which run exactly the keys you would type. Use a scratch directory.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "printf 'one\\ntwo\\nthree\\nfour\\n' > n.txt"
+    ]
+   },
+   "steps": [
+    {
+     "title": "vi is almost always there",
+     "text": "`vi` is part of the POSIX tools, so even tiny systems have it. `vim` is the improved version, and often `vi` is a link to it.",
+     "run": [
+      {
+       "cmd": "type -a vi vim",
+       "output": "vi is /usr/bin/vi\nvim is /usr/bin/vim"
+      },
+      {
+       "cmd": "vim --version | head -n 1",
+       "output": "VIM - Vi IMproved 8.2 (2019 Dec 12, compiled Jul 29 2026 00:00:00)"
+      }
+     ]
+    },
+    {
+     "title": "Modes decide what a key does",
+     "text": "Vim has **modes**. In **Normal** mode keys are commands (`dd` deletes a line). In **Insert** mode keys are text. Press `i` to enter Insert and `Esc` to return. `:` opens the command line (**Command-line** mode). `v` starts **Visual** mode to select text.\n\nThe start is Normal mode. When you are lost, press `Esc` twice.",
+     "run": [
+      {
+       "cmd": "vim n.txt",
+       "explanationOnly": true,
+       "reason": "vim needs an interactive terminal; the next steps drive the same keys from a script"
+      }
+     ]
+    },
+    {
+     "title": "Keys are commands: a scripted proof",
+     "text": "`-Nes -u NONE` starts vim silent, without compatibility mode and without any config, so the result is repeatable. `-c` runs a command. `normal KEYS` types the keys in Normal mode. Silent Ex mode starts on the **last** line, so we begin with `gg` (go to the first line). Then `j` moves down and `dd` deletes the line.",
+     "run": [
+      {
+       "cmd": "vim -Nes -u NONE -c 'normal ggjdd' -c 'wq' n.txt; cat n.txt",
+       "output": "one\nthree\nfour"
+      }
+     ],
+     "under": "`:wq` writes the buffer to the file and quits. Vim edits a **buffer** in memory. The file on disk changes only when you write."
+    },
+    {
+     "title": "Copy, paste, undo, insert",
+     "text": "`yy` copies (yanks) a line, `p` pastes after, `P` before, `u` undoes, `x` deletes a character. `O` opens a new line above and enters Insert mode. In the script, the text after `O` is typed in Insert mode, and the end of the command acts like `Esc`.",
+     "run": [
+      {
+       "cmd": "vim -Nes -u NONE -c 'normal ggyyP' -c 'normal ggOnew first line' -c 'wq' n.txt; cat n.txt",
+       "output": "new first line\none\none\nthree\nfour"
+      }
+     ]
+    },
+    {
+     "title": "Search and replace",
+     "text": "`:%s/old/new/g` replaces in the whole file (`%` = all lines, `g` = every match on the line). `:g/pattern/d` deletes every line that matches.",
+     "run": [
+      {
+       "cmd": "vim -Nes -u NONE -c '%s/three/THREE/' -c 'g/^new/d' -c 'wq' n.txt; cat n.txt",
+       "output": "one\none\nTHREE\nfour"
+      }
+     ]
+    },
+    {
+     "title": "Save and quit",
+     "text": "Type these in Normal mode, they start with `:`. `:w` write, `:q` quit, `:wq` or `:x` write and quit, `:q!` quit and **discard** changes, `u` undo, `Ctrl-r` redo, `/text` search, `n` next match.",
+     "run": [
+      {
+       "cmd": ":wq",
+       "explanationOnly": true,
+       "reason": "typed inside an interactive vim session"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "You opened a file in vim and typing letters does nothing useful. Which mode are you in?",
+     "options": [
+      "Insert",
+      "Normal",
+      "Binary",
+      "Safe"
+     ],
+     "answer": 1,
+     "explain": "In Normal mode keys are commands. Press `i` to type text."
+    },
+    {
+     "q": "How do you leave vim and throw away your changes?",
+     "options": [
+      ":wq",
+      ":q!",
+      ":x",
+      "Ctrl-c"
+     ],
+     "answer": 1,
+     "explain": "`:q!` quits without saving."
+    },
+    {
+     "q": "What does `dd` do in Normal mode?",
+     "options": [
+      "Deletes the line",
+      "Duplicates the line",
+      "Moves down twice",
+      "Deletes the file"
+     ],
+     "answer": 0,
+     "explain": "It deletes (and yanks) the current line."
+    },
+    {
+     "q": "Why did the scripted examples start with `normal gg`?",
+     "options": [
+      "gg saves",
+      "Silent Ex mode starts on the last line",
+      "gg is required syntax",
+      "It disables swap files"
+     ],
+     "answer": 1,
+     "explain": "Otherwise `j` cannot move down from the last line."
+    }
+   ],
+   "check": {
+    "scenario": "You edited /etc/hosts as root in vim, made a mess and want to start over without saving. What do you press?",
+    "answer": "`Esc` (to be sure you are in Normal mode), then `:q!` and Enter. Nothing is written. If you already saved, undo with `u` until the text is right and save again, or restore from a backup."
+   }
+  },
+  {
+   "id": "vim-operators-macros",
+   "title": "vim: operators, motions, macros, filters, and nano",
+   "level": "intermediate",
+   "goal": "Learn vim's grammar (operator + motion), repeating with `.`, recording macros, filtering through shell commands, and what to use when you only have nano.\n\nWhy it matters: with the grammar you combine a few commands instead of memorising hundreds, and macros turn a 100-line edit into one command.",
+   "setup": {
+    "note": "Vim is interactive. For the outputs we drive it with scripts (`-Nes -u NONE -c ...`), which run exactly the keys you would type. Use a scratch directory.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "printf 'one\\ntwo\\nthree\\nfour\\n' > n.txt"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Operator + motion",
+     "text": "A command is an **operator** (`d` delete, `c` change, `y` yank) plus a **motion** (`w` next word, `$` end of line, `}` next paragraph) or a **text object** (`iw` inner word, `i\"` inside quotes). A count multiplies: `d2w` deletes two words.",
+     "run": [
+      {
+       "cmd": "printf 'one two three four\\n' > w.txt; vim -Nes -u NONE -c 'normal ggwd2w' -c 'wq' w.txt; cat w.txt",
+       "output": "one four"
+      },
+      {
+       "cmd": "printf 'say \"old\" now\\n' > q.txt; vim -Nes -u NONE -c 'normal ggf\"ci\"new' -c 'wq' q.txt; cat q.txt",
+       "output": "say \"new\" now"
+      }
+     ]
+    },
+    {
+     "title": "The dot repeats the last change",
+     "text": "`.` repeats the last change in Normal mode. Make one change, move, press `.` again.",
+     "run": [
+      {
+       "cmd": "printf 'a\\nb\\nc\\n' > d.txt; vim -Nes -u NONE -c 'normal ggx' -c 'normal j.' -c 'wq' d.txt; cat d.txt",
+       "output": "\n\nc"
+      }
+     ]
+    },
+    {
+     "title": "Macros",
+     "text": "A **macro** is a register that holds keys. In the editor, `qa` records into register `a`, `q` stops, `@a` replays it, `3@a` replays three times. Here we fill the register with a script and replay it: append `;` to a line and move down.",
+     "run": [
+      {
+       "cmd": "printf 'a\\nb\\nc\\n' > k.txt; vim -Nes -u NONE -c 'let @a = \"A;\\<Esc>j\"' -c 'normal gg3@a' -c 'wq' k.txt; cat k.txt",
+       "output": "a;\nb;\nc;"
+      }
+     ]
+    },
+    {
+     "title": "Filter lines through any shell command",
+     "text": "`:%!cmd` sends the whole buffer to `cmd` and replaces it with the output. Anything in your shell toolbox becomes an editor command: `sort -u` here.",
+     "run": [
+      {
+       "cmd": "printf 'c\\na\\nb\\na\\n' > s.txt; vim -Nes -u NONE -c '%!sort -u' -c 'wq' s.txt; cat s.txt",
+       "output": "a\nb\nc"
+      }
+     ]
+    },
+    {
+     "title": "Global commands",
+     "text": "`:g/pattern/cmd` runs `cmd` on every matching line. `:g/^$/d` removes empty lines, `:g/foo/s/a/b/` substitutes only on lines with foo, and `:v/foo/d` deletes lines that do **not** match.",
+     "run": [
+      {
+       "cmd": "printf 'x\\n\\ny\\n\\n\\nz\\n' > e.txt; vim -Nes -u NONE -c 'g/^$/d' -c 'wq' e.txt; cat e.txt",
+       "output": "x\ny\nz"
+      }
+     ]
+    },
+    {
+     "title": "nano as a fallback",
+     "text": "`nano` shows its commands at the bottom (`^` means Ctrl): `Ctrl-O` write out, `Ctrl-X` exit, `Ctrl-W` search. There are no modes. Programs such as `visudo` and `crontab -e` start the editor named in `$VISUAL` or `$EDITOR`, so you can choose.",
+     "run": [
+      {
+       "cmd": "nano file.txt",
+       "explanationOnly": true,
+       "reason": "nano needs an interactive terminal"
+      },
+      {
+       "cmd": "echo \"EDITOR=${EDITOR:-not set}\"",
+       "output": "EDITOR=not set"
+      },
+      {
+       "cmd": "export EDITOR=nano && crontab -e",
+       "explanationOnly": true,
+       "reason": "crontab -e opens an interactive editor on your own crontab"
+      }
+     ],
+     "under": "`:%!cmd` works like a pipeline: vim writes the lines to the command's stdin and reads its stdout back. That is why every Unix filter works inside vim."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `ci\"` do in Normal mode?",
+     "options": [
+      "Closes the quote",
+      "Changes the text inside the quotes",
+      "Copies the quotes",
+      "Inserts a quote"
+     ],
+     "answer": 1,
+     "explain": "`c` is the change operator and `i\"` the text object inside quotes."
+    },
+    {
+     "q": "What does `:%!sort -u` do?",
+     "options": [
+      "Sorts the buffer through the sort command",
+      "Saves a sorted copy",
+      "Prints sort help",
+      "Deletes duplicates in the file name"
+     ],
+     "answer": 0,
+     "explain": "The whole buffer is replaced by the command's output."
+    },
+    {
+     "q": "How do you repeat the last change?",
+     "options": [
+      "r",
+      ".",
+      "@@",
+      "Ctrl-r"
+     ],
+     "answer": 1,
+     "explain": "The dot repeats the last change."
+    },
+    {
+     "q": "Which variable chooses the editor for `visudo` and `crontab -e`?",
+     "options": [
+      "SHELL",
+      "EDITOR / VISUAL",
+      "TERM",
+      "PAGER"
+     ],
+     "answer": 1,
+     "explain": "The programs start the editor named there."
+    }
+   ],
+   "check": {
+    "scenario": "A config file has 300 lines `foo=1` and you must change each to `foo=2`, but only in the section after the line `[prod]`. Which vim approach is safest?",
+    "answer": "Use a range: `:/\\[prod\\]/,$s/foo=1/foo=2/gc` (the `c` asks before each change). `/\\[prod\\]/,$` is the range from the next `[prod]` line to the end of the file. Review with `:w !diff % -` or keep a backup first."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What are vim's modes?",
+   "a": "Normal (commands), Insert (typing text), Command-line (`:` commands), Visual (selection), plus Replace. See [the lesson](#/lesson/6/vim-first-keys).",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you quit vim without saving?",
+   "a": "Esc, then `:q!`.",
+   "level": "beginner"
+  },
+  {
+   "q": "Explain vim's \"operator + motion\" idea.",
+   "a": "Commands combine an operator (d, c, y) with a motion or text object (w, $, ip, i\"). `d2w`, `ci\"`, `y}` follow one grammar, so you learn parts, not hundreds of commands. See [the lesson](#/lesson/6/vim-operators-macros).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How can you run a shell command on the whole buffer?",
+   "a": "`:%!command`, for example `:%!sort -u`. The buffer goes to the command's stdin and is replaced with its stdout.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why does a terminal editor still matter for admins?",
+   "a": "It is on every server and works over slow SSH and in recovery mode, where no GUI editor exists.",
+   "level": "beginner"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Buffer",
+   "def": "The in-memory text vim edits. The file changes only when written.",
+   "lesson": "6/vim-first-keys"
+  },
+  {
+   "term": "Normal mode",
+   "def": "Vim's default mode, where keys are commands.",
+   "lesson": "6/vim-first-keys"
+  },
+  {
+   "term": "Operator",
+   "def": "A vim command that acts on a motion: d (delete), c (change), y (yank).",
+   "lesson": "6/vim-operators-macros"
+  },
+  {
+   "term": "Register",
+   "def": "A named storage slot for text or macro keys (a to z, and special ones).",
+   "lesson": "6/vim-operators-macros"
+  },
+  {
+   "term": "Macro",
+   "def": "A recorded sequence of keys stored in a register and replayed with @.",
+   "lesson": "6/vim-operators-macros"
+  },
+  {
+   "term": "EDITOR",
+   "def": "Environment variable naming the editor that programs such as visudo start.",
+   "lesson": "6/vim-operators-macros"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "vim -Nes -u NONE -c 'normal ggdd' -c wq FILE",
+   "desc": "Script an edit: delete the first line.",
+   "topic": "Editors",
+   "lesson": "6/vim-first-keys"
+  },
+  {
+   "cmd": ":%s/old/new/g",
+   "desc": "Replace in the whole file (inside vim).",
+   "topic": "Editors",
+   "lesson": "6/vim-first-keys"
+  },
+  {
+   "cmd": ":g/pattern/d",
+   "desc": "Delete lines matching pattern (inside vim).",
+   "topic": "Editors",
+   "lesson": "6/vim-first-keys"
+  },
+  {
+   "cmd": ":q!",
+   "desc": "Quit and discard changes (inside vim).",
+   "topic": "Editors",
+   "lesson": "6/vim-first-keys"
+  },
+  {
+   "cmd": ":%!sort -u",
+   "desc": "Filter the buffer through a command (inside vim).",
+   "topic": "Editors",
+   "lesson": "6/vim-operators-macros"
+  },
+  {
+   "cmd": "export EDITOR=vim",
+   "desc": "Choose the editor for visudo, crontab -e, git.",
+   "topic": "Editors",
+   "lesson": "6/vim-operators-macros"
+  },
+  {
+   "cmd": "nano FILE",
+   "desc": "Edit with nano (Ctrl-O save, Ctrl-X exit).",
+   "topic": "Editors",
+   "lesson": "6/vim-operators-macros"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

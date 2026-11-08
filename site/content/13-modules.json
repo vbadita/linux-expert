@@ -1,0 +1,605 @@
+{
+ "title": "Kernel modules, sysctl, /proc and /sys",
+ "lessons": [
+  {
+   "id": "kernel-modules",
+   "title": "Kernel modules: lsmod, modinfo, modprobe",
+   "level": "beginner",
+   "goal": "Learn what a kernel module is, how to list, inspect, load and unload one, and how the kernel finds its dependencies.\n\nWhy it matters: drivers (network cards, file systems, firewall features) are usually modules. When hardware or a feature does not work, the first question is \"is the module loaded?\"",
+   "setup": {
+    "note": "Steps with sudo load a harmless module (`dummy`) and change one sysctl value, then restore both. Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The kernel can be extended while running",
+     "text": "A **module** is a piece of kernel code in a `.ko` file that can be loaded and removed at run time, so the kernel does not need every driver built in. Modules for the running kernel live under `/lib/modules/VERSION`.",
+     "run": [
+      {
+       "cmd": "ls /lib/modules/$(uname -r)/kernel | tr '\\n' ' '; echo",
+       "output": "arch crypto drivers fs kernel lib mm net sound vmlinux.ctfa "
+      },
+      {
+       "cmd": "lsmod | wc -l",
+       "output": "96"
+      }
+     ]
+    },
+    {
+     "title": "lsmod lists loaded modules",
+     "text": "Columns: name, size in bytes, and a use count followed by the modules that depend on it. `lsmod` simply formats `/proc/modules`.",
+     "run": [
+      {
+       "cmd": "lsmod | head -n 3",
+       "output": "Module                  Size  Used by\nip_set_hash_net        65536  2\nxt_statistic           16384  0"
+      },
+      {
+       "cmd": "head -n 1 /proc/modules | cut -d' ' -f1-3",
+       "output": "ip_set_hash_net 65536 2"
+      }
+     ]
+    },
+    {
+     "title": "modinfo describes a module",
+     "text": "`modinfo` reads the metadata stored inside the `.ko` file: description, license, parameters, and which other modules it needs.",
+     "run": [
+      {
+       "cmd": "modinfo -F description dummy",
+       "output": "Dummy netdevice driver which discards all packets sent to it"
+      },
+      {
+       "cmd": "modinfo -F filename dummy | sed 's#.*/kernel/#kernel/#'",
+       "output": "kernel/drivers/net/dummy.ko.xz"
+      },
+      {
+       "cmd": "modinfo -p dummy",
+       "output": "numdummies:Number of dummy pseudo devices (int)"
+      }
+     ]
+    },
+    {
+     "title": "modprobe loads, and removes",
+     "text": "`modprobe NAME` loads a module and everything it depends on. `modprobe -r NAME` removes it again. Both need root. We load the harmless `dummy` network driver.",
+     "run": [
+      {
+       "cmd": "lsmod | grep -c '^dummy'",
+       "output": "0"
+      },
+      {
+       "cmd": "sudo modprobe dummy",
+       "output": ""
+      },
+      {
+       "cmd": "lsmod | grep '^dummy' | awk '{print $1, $3}'",
+       "output": "dummy 0"
+      },
+      {
+       "cmd": "ls /sys/module/dummy",
+       "output": "coresize\nholders\ninitsize\ninitstate\nnotes\nrefcnt\nsections\nsrcversion\ntaint\nuevent"
+      },
+      {
+       "cmd": "sudo modprobe -r dummy; lsmod | grep -c '^dummy'",
+       "output": "0"
+      }
+     ]
+    },
+    {
+     "title": "Underneath: a system call loads the file",
+     "text": "`modprobe` reads the file, finds dependencies in `modules.dep`, and asks the kernel to load it with `init_module` (data passed from user space; used when the file is compressed, as here) or `finit_module` (file descriptor). The kernel then relocates the code and runs the module's init function.",
+     "run": [
+      {
+       "cmd": "sudo strace -f -e trace=init_module,finit_module modprobe dummy 2>&1 | grep -E 'init_module' | sed -E 's/\\(.*\\)/(...)/' | sed -E 's/^\\[pid +[0-9]+\\] //'; sudo modprobe -r dummy",
+       "output": "init_module(...) = 0"
+      },
+      {
+       "cmd": "grep -m1 '^kernel/net/netfilter/ipset/ip_set_hash_net' /lib/modules/$(uname -r)/modules.dep | cut -c1-110",
+       "output": "kernel/net/netfilter/ipset/ip_set_hash_net.ko.xz: kernel/net/netfilter/ipset/ip_set.ko.xz"
+      }
+     ],
+     "under": "A module runs in kernel mode with full privileges. A bug can crash the whole system, and a malicious module is a rootkit. That is why Secure Boot can require signed modules, and why `kernel.modules_disabled=1` can lock loading after boot."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Where are the modules of the running kernel stored?",
+     "options": [
+      "/boot",
+      "/lib/modules/VERSION",
+      "/etc/modules",
+      "/var/lib"
+     ],
+     "answer": 1,
+     "explain": "/lib/modules/$(uname -r)."
+    },
+    {
+     "q": "Which command loads a module and its dependencies?",
+     "options": [
+      "insmod",
+      "modprobe",
+      "lsmod",
+      "depmod"
+     ],
+     "answer": 1,
+     "explain": "`insmod` loads a single file only."
+    },
+    {
+     "q": "Which system call does modprobe use to hand the module to the kernel?",
+     "options": [
+      "open",
+      "init_module / finit_module",
+      "mmap",
+      "ioctl"
+     ],
+     "answer": 1,
+     "explain": "init_module(2) or finit_module(2)."
+    },
+    {
+     "q": "Where does `lsmod` get its data?",
+     "options": [
+      "/etc/modules",
+      "/proc/modules",
+      "/sys/modules",
+      "dmesg"
+     ],
+     "answer": 1,
+     "explain": "lsmod formats /proc/modules."
+    }
+   ],
+   "check": {
+    "scenario": "A new USB network adapter does not show up. Which steps do you take regarding modules?",
+    "answer": "`dmesg | tail` to see whether the kernel detected it and asked for a driver, `lsusb` for the vendor:product IDs, `modinfo` / `modprobe -c | grep ID` to find the matching driver, `modprobe DRIVER` to load it, and check `dmesg` for firmware errors. If the module is missing, install the package with extra modules (on Oracle Linux `kernel-uek-modules-extra`)."
+   }
+  },
+  {
+   "id": "sysctl-tuning",
+   "title": "sysctl: reading and tuning kernel parameters",
+   "level": "intermediate",
+   "goal": "Learn how to read and change kernel parameters with `sysctl`, make changes permanent, and see that some are per-namespace.\n\nWhy it matters: network, memory and process limits (`net.core.somaxconn`, `vm.swappiness`, `fs.file-max`) are tuned this way. A change that is not persisted disappears at reboot.",
+   "setup": {
+    "note": "Steps with sudo load a harmless module (`dummy`) and change one sysctl value, then restore both. Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Parameters are files in /proc/sys",
+     "text": "`sysctl NAME` reads the parameter. The dots in the name are slashes in the path: `vm.swappiness` is `/proc/sys/vm/swappiness`.",
+     "run": [
+      {
+       "cmd": "sysctl vm.swappiness",
+       "output": "vm.swappiness = 60"
+      },
+      {
+       "cmd": "cat /proc/sys/vm/swappiness",
+       "output": "60"
+      },
+      {
+       "cmd": "ls /proc/sys",
+       "output": "abi\ncrypto\ndebug\ndev\nfs\nkernel\nnet\nsunrpc\nuser\nvm"
+      },
+      {
+       "cmd": "sysctl -a 2>/dev/null | wc -l",
+       "output": "1571"
+      }
+     ]
+    },
+    {
+     "title": "Change at run time",
+     "text": "`sysctl -w NAME=VALUE` (root) writes to the file. The kernel uses the value at once. It is lost at reboot. We remember the old value and restore it.",
+     "run": [
+      {
+       "cmd": "orig=$(sysctl -n vm.swappiness); echo \"original: $orig\"",
+       "output": "original: 60"
+      },
+      {
+       "cmd": "sudo sysctl -w vm.swappiness=10",
+       "output": "vm.swappiness = 10"
+      },
+      {
+       "cmd": "cat /proc/sys/vm/swappiness",
+       "output": "10"
+      },
+      {
+       "cmd": "echo 20 | sudo tee /proc/sys/vm/swappiness",
+       "output": "20"
+      },
+      {
+       "cmd": "sudo sysctl -w vm.swappiness=$orig",
+       "output": "vm.swappiness = 60"
+      }
+     ],
+     "under": "`sysctl` is only a convenience. The kernel registers each parameter in a table (`ctl_table`) with a handler that parses what you write and validates the range. A wrong value returns `Invalid argument`."
+    },
+    {
+     "title": "Make it permanent",
+     "text": "Put the setting in a file under `/etc/sysctl.d/`. At boot, `systemd-sysctl` applies all files in order. `sysctl -p FILE` applies one file immediately.",
+     "run": [
+      {
+       "cmd": "echo 'vm.swappiness = 30' | sudo tee /etc/sysctl.d/90-lab.conf",
+       "output": "vm.swappiness = 30"
+      },
+      {
+       "cmd": "sudo sysctl -p /etc/sysctl.d/90-lab.conf",
+       "output": "vm.swappiness = 30"
+      },
+      {
+       "cmd": "sudo rm /etc/sysctl.d/90-lab.conf; sudo sysctl -w vm.swappiness=$orig",
+       "output": "vm.swappiness = 60"
+      }
+     ]
+    },
+    {
+     "title": "Some parameters belong to a namespace",
+     "text": "Network parameters are **per network namespace**. We create a new namespace with `unshare -n`, change `ip_forward` inside it, and look at the host's value afterwards: it did not change. Containers rely on this (module 37).",
+     "run": [
+      {
+       "cmd": "sysctl -n net.ipv4.ip_forward",
+       "output": "1"
+      },
+      {
+       "cmd": "sudo unshare -n sh -c 'sysctl -w net.ipv4.ip_forward=0; sysctl -n net.ipv4.ip_forward'",
+       "output": "net.ipv4.ip_forward = 0\n0"
+      },
+      {
+       "cmd": "sysctl -n net.ipv4.ip_forward",
+       "output": "1"
+      }
+     ]
+    },
+    {
+     "title": "Errors you will see",
+     "text": "Unknown names and out-of-range values are rejected.",
+     "run": [
+      {
+       "cmd": "sudo sysctl -w vm.swappiness=500 2>&1",
+       "output": "sysctl: setting key \"vm.swappiness\": Invalid argument"
+      },
+      {
+       "cmd": "sudo sysctl -w no.such.key=1 2>&1",
+       "output": "sysctl: cannot stat /proc/sys/no/such/key: No such file or directory"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is `/proc/sys/net/ipv4/ip_forward` as a sysctl name?",
+     "options": [
+      "net/ipv4/ip_forward",
+      "net.ipv4.ip_forward",
+      "ipv4.forward",
+      "net_ip_forward"
+     ],
+     "answer": 1,
+     "explain": "Slashes become dots."
+    },
+    {
+     "q": "A `sysctl -w` change is...",
+     "options": [
+      "Permanent",
+      "Lost at reboot unless saved in /etc/sysctl.d",
+      "Applied after reboot",
+      "Invalid for root"
+     ],
+     "answer": 1,
+     "explain": "Persist it in /etc/sysctl.d/*.conf."
+    },
+    {
+     "q": "You set `net.ipv4.ip_forward=0` inside `unshare -n`. What is the host's value afterwards?",
+     "options": [
+      "0",
+      "Unchanged",
+      "Undefined",
+      "Reset to default"
+     ],
+     "answer": 1,
+     "explain": "Network sysctls are per network namespace."
+    },
+    {
+     "q": "Which tool applies all sysctl files at boot?",
+     "options": [
+      "rc.local",
+      "systemd-sysctl",
+      "cron",
+      "modprobe"
+     ],
+     "answer": 1,
+     "explain": "systemd-sysctl.service."
+    }
+   ],
+   "check": {
+    "scenario": "You raised `net.core.somaxconn` with `sysctl -w` and the problem went away. Two weeks later, after a reboot, it is back. What did you forget?",
+    "answer": "To persist it: put `net.core.somaxconn = 4096` in `/etc/sysctl.d/90-tuning.conf` and apply with `sysctl --system`. Also check that the application itself uses the bigger backlog (it passes its own value to `listen`)."
+   }
+  },
+  {
+   "id": "proc-sys-depth",
+   "title": "/proc and /sys in depth",
+   "level": "advanced",
+   "goal": "Learn the most useful files in `/proc` and `/sys`, what they tell you, and which of them you can write to tune the system.\n\nWhy it matters: every monitoring tool reads them. When tools disagree or are missing, you can read the source yourself.",
+   "setup": {
+    "note": "Steps with sudo load a harmless module (`dummy`) and change one sysctl value, then restore both. Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Per-process files",
+     "text": "`/proc/PID/limits` shows resource limits, `maps` the memory layout, `fd` open files, `environ` the initial environment, `status` the summary.",
+     "run": [
+      {
+       "cmd": "grep -E '^Max (open files|processes|locked memory)' /proc/$$/limits",
+       "output": "Max processes             22227                22227                processes \nMax open files            524288               524288               files     \nMax locked memory         8388608              8388608              bytes     "
+      },
+      {
+       "cmd": "head -n 3 /proc/$$/maps | cut -c1-70",
+       "output": "aaaae6450000-aaaae658b000 r-xp 00000000 fc:00 50349893                \naaaae659c000-aaaae65a0000 r--p 0013c000 fc:00 50349893                \naaaae65a0000-aaaae65a9000 rw-p 00140000 fc:00 50349893                "
+      },
+      {
+       "cmd": "ls /proc/$$/fd | wc -l",
+       "output": "4"
+      }
+     ]
+    },
+    {
+     "title": "System-wide files",
+     "text": "`/proc/uptime` (seconds up, idle seconds), `/proc/loadavg`, `/proc/meminfo`, `/proc/stat` (CPU counters since boot), `/proc/version`, `/proc/filesystems` (supported file systems), `/proc/devices`.",
+     "run": [
+      {
+       "cmd": "cut -d' ' -f1 /proc/uptime | awk '{printf \"up %.0f hours\\n\", $1/3600}'",
+       "output": "up 1124 hours"
+      },
+      {
+       "cmd": "head -n 4 /proc/stat | cut -c1-60",
+       "output": "cpu  23374066 532157 10947492 330126777 30006791 1624625 698\ncpu0 23374066 532157 10947492 330126777 30006791 1624625 698\nintr 4869813071 0 0 0 0 0 0 1 0 0 0 277866362 0 0 0 0 0 0 0 \nctxt 11406360613"
+      },
+      {
+       "cmd": "cut -d'(' -f1 /proc/version",
+       "output": "Linux version 6.12.0-206.104.4.4.el9uek.aarch64 "
+      },
+      {
+       "cmd": "grep -v nodev /proc/filesystems | tr -d '\\t' | tr '\\n' ' '; echo",
+       "output": "ext3 ext4 zonefs btrfs xfs fuseblk vfat "
+      }
+     ]
+    },
+    {
+     "title": "/sys: the device model",
+     "text": "`/sys` is organised by subsystem. `class/` groups devices by type, `block/` has disks, `devices/` is the real tree, `module/` lists loaded modules and their parameters, `kernel/` has kernel features.",
+     "run": [
+      {
+       "cmd": "cat /sys/devices/system/cpu/online",
+       "output": "0"
+      },
+      {
+       "cmd": "cat /sys/class/net/lo/operstate",
+       "output": "unknown"
+      },
+      {
+       "cmd": "ls /sys/block | tr '\\n' ' '; echo",
+       "output": "dm-0 dm-1 loop0 sda "
+      }
+     ]
+    },
+    {
+     "title": "Disk queue settings live in /sys/block",
+     "text": "Each disk exposes its request queue: scheduler, read-ahead, whether it is rotational.",
+     "run": [
+      {
+       "cmd": "cat /sys/block/sda/queue/rotational /sys/block/sda/queue/read_ahead_kb",
+       "output": "1\n2048"
+      },
+      {
+       "cmd": "cat /sys/block/sda/queue/scheduler",
+       "output": "none [mq-deadline] kyber bfq "
+      }
+     ],
+     "under": "The block layer registers these attributes in sysfs with `show` and `store` functions. Reading calls `show`, writing calls `store`. `[mq-deadline]` in brackets marks the active scheduler."
+    },
+    {
+     "title": "Write to tune",
+     "text": "Many `/sys` files accept a write. We write the **same** value back, so nothing changes, to show the mechanism. Changes made this way are lost at reboot; use a udev rule or a tuned profile to persist them.",
+     "run": [
+      {
+       "cmd": "v=$(cat /sys/block/sda/queue/read_ahead_kb); echo $v | sudo tee /sys/block/sda/queue/read_ahead_kb",
+       "output": "2048"
+      },
+      {
+       "cmd": "cat /sys/kernel/mm/transparent_hugepage/enabled",
+       "output": "[always] madvise never"
+      }
+     ]
+    },
+    {
+     "title": "sched_ext and other kernel features show up too",
+     "text": "Optional kernel features register under `/sys/kernel`. If the directory exists, the kernel was built with it.",
+     "run": [
+      {
+       "cmd": "ls /sys/kernel | tr '\\n' ' ' | cut -c1-120; echo",
+       "output": "address_bits btf cgroup config cpu_byteorder debug fscaps iommu_groups irq kexec_crash_loaded kexec_crash_size kexec_loa"
+      },
+      {
+       "cmd": "cat /sys/kernel/sched_ext/state 2>&1",
+       "output": "disabled"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which file shows the resource limits of a process?",
+     "options": [
+      "/proc/PID/status",
+      "/proc/PID/limits",
+      "/proc/PID/stat",
+      "/proc/limits"
+     ],
+     "answer": 1,
+     "explain": "/proc/PID/limits."
+    },
+    {
+     "q": "What does `[mq-deadline]` in `queue/scheduler` mean?",
+     "options": [
+      "It is disabled",
+      "It is the active I/O scheduler",
+      "It is the default for new disks only",
+      "It is a module"
+     ],
+     "answer": 1,
+     "explain": "The bracketed entry is active."
+    },
+    {
+     "q": "A value you write into /sys/...",
+     "options": [
+      "Survives reboot",
+      "Is lost at reboot unless configured elsewhere",
+      "Is written to disk",
+      "Needs a module"
+     ],
+     "answer": 1,
+     "explain": "sysfs is in memory."
+    },
+    {
+     "q": "How do you know the kernel supports sched_ext?",
+     "options": [
+      "/etc/sched",
+      "/sys/kernel/sched_ext exists",
+      "lsmod shows it",
+      "dmesg only"
+     ],
+     "answer": 1,
+     "explain": "Optional features register under /sys/kernel."
+    }
+   ],
+   "check": {
+    "scenario": "`top` is not installed on a broken server. How do you read the load average and the memory use without it?",
+    "answer": "`cat /proc/loadavg` and `grep -E 'MemTotal|MemAvailable' /proc/meminfo`. For the busiest process, `ls /proc | grep '^[0-9]'` plus reading `/proc/PID/stat`, or `ps`. All monitoring tools read these files."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is a kernel module?",
+   "a": "A loadable piece of kernel code (.ko) such as a driver or file system, loaded and unloaded at run time. See [the lesson](#/lesson/13/kernel-modules).",
+   "level": "beginner"
+  },
+  {
+   "q": "modprobe vs insmod?",
+   "a": "insmod loads exactly one .ko file. modprobe resolves dependencies from modules.dep, honours /etc/modprobe.d, and can remove with -r.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you load a module at every boot?",
+   "a": "Create `/etc/modules-load.d/NAME.conf` containing the module name. Module options go in `/etc/modprobe.d/*.conf` (`options NAME key=value`).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you change a kernel parameter permanently?",
+   "a": "Put `name = value` in `/etc/sysctl.d/*.conf` and run `sysctl --system`. `sysctl -w` alone is lost at reboot. See [sysctl](#/lesson/13/sysctl-tuning).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is the difference between /proc and /sys?",
+   "a": "/proc started as process information and became a mix of processes and kernel parameters (/proc/sys). /sys exposes the structured device and driver model, one value per file. See [the lesson](#/lesson/13/proc-sys-depth).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why can't a normal user load modules, and how can modules be restricted further?",
+   "a": "Modules run with full kernel privilege (CAP_SYS_MODULE). Restrict with Secure Boot / module signature enforcement and `kernel.modules_disabled=1`.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Kernel module",
+   "def": "A loadable .ko file that adds code, usually a driver, to the running kernel.",
+   "lesson": "13/kernel-modules"
+  },
+  {
+   "term": "modprobe",
+   "def": "Loads or removes a module together with its dependencies.",
+   "lesson": "13/kernel-modules"
+  },
+  {
+   "term": "sysctl",
+   "def": "The interface to read and write kernel parameters under /proc/sys.",
+   "lesson": "13/sysctl-tuning"
+  },
+  {
+   "term": "Network namespace",
+   "def": "An isolated copy of the network stack, with its own interfaces and sysctls.",
+   "lesson": "13/sysctl-tuning"
+  },
+  {
+   "term": "sysfs",
+   "def": "The pseudo file system at /sys exposing devices, drivers and kernel features.",
+   "lesson": "13/proc-sys-depth"
+  },
+  {
+   "term": "udev",
+   "def": "The device manager that creates /dev entries and applies rules when devices appear.",
+   "lesson": "13/proc-sys-depth"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "lsmod",
+   "desc": "List loaded modules.",
+   "topic": "Kernel",
+   "lesson": "13/kernel-modules"
+  },
+  {
+   "cmd": "modinfo NAME",
+   "desc": "Show information about a module.",
+   "topic": "Kernel",
+   "lesson": "13/kernel-modules"
+  },
+  {
+   "cmd": "sudo modprobe NAME",
+   "desc": "Load a module with dependencies.",
+   "topic": "Kernel",
+   "lesson": "13/kernel-modules"
+  },
+  {
+   "cmd": "sudo modprobe -r NAME",
+   "desc": "Unload a module.",
+   "topic": "Kernel",
+   "lesson": "13/kernel-modules"
+  },
+  {
+   "cmd": "sysctl NAME",
+   "desc": "Read a kernel parameter.",
+   "topic": "Kernel",
+   "lesson": "13/sysctl-tuning"
+  },
+  {
+   "cmd": "sudo sysctl -w NAME=VALUE",
+   "desc": "Set a kernel parameter until reboot.",
+   "topic": "Kernel",
+   "lesson": "13/sysctl-tuning"
+  },
+  {
+   "cmd": "sudo sysctl --system",
+   "desc": "Apply all sysctl configuration files.",
+   "topic": "Kernel",
+   "lesson": "13/sysctl-tuning"
+  },
+  {
+   "cmd": "cat /proc/PID/limits",
+   "desc": "Show the limits of a process.",
+   "topic": "Kernel",
+   "lesson": "13/proc-sys-depth"
+  },
+  {
+   "cmd": "cat /sys/block/DISK/queue/scheduler",
+   "desc": "Show the I/O scheduler of a disk.",
+   "topic": "Kernel",
+   "lesson": "13/proc-sys-depth"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

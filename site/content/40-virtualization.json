@@ -1,0 +1,388 @@
+{
+ "title": "Virtualization",
+ "lessons": [
+  {
+   "id": "kvm-qemu-libvirt",
+   "title": "Virtualization: KVM, QEMU and libvirt",
+   "level": "intermediate",
+   "goal": "Learn the parts of the Linux virtualization stack and what each does, and check what this machine offers.\n\nWhy it matters: most cloud servers are virtual machines on KVM. Knowing the layers helps you read `virsh` and QEMU command lines and understand performance and isolation.",
+   "setup": {
+    "note": "These steps only read information, except for creating disk image files in a scratch directory.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Are we inside a VM?",
+     "text": "`systemd-detect-virt` tells whether this system runs on a hypervisor and which. This machine itself is a **guest** on a cloud hypervisor, so the next question (can it host VMs?) depends on **nested virtualization**.",
+     "run": [
+      {
+       "cmd": "systemd-detect-virt",
+       "output": "kvm"
+      },
+      {
+       "cmd": "[ -e /dev/kvm ] && echo '/dev/kvm exists: this machine can run KVM guests' || echo '/dev/kvm is missing: no hardware virtualization available to this machine'",
+       "output": "/dev/kvm is missing: no hardware virtualization available to this machine"
+      }
+     ]
+    },
+    {
+     "title": "KVM is part of the kernel",
+     "text": "**KVM** (Kernel-based Virtual Machine) turns the Linux kernel into a hypervisor. It uses the CPU's virtualization extensions (Intel VT-x, AMD-V, Arm virtualization extensions) so guest code runs directly on the CPU, and exposes `/dev/kvm` to user space. This kernel was built with KVM support:",
+     "run": [
+      {
+       "cmd": "grep -E '^CONFIG_(KVM|VIRTUALIZATION)=' /boot/config-$(uname -r)",
+       "output": "CONFIG_VIRTUALIZATION=y\nCONFIG_KVM=y"
+      },
+      {
+       "cmd": "lsmod | grep -c '^kvm' | awk '{print $1, \"kvm modules loaded\"}'",
+       "output": "0 kvm modules loaded"
+      }
+     ]
+    },
+    {
+     "title": "The three layers",
+     "text": "- **KVM** (kernel): runs vCPUs and handles memory virtualization. It does not emulate devices.\n- **QEMU** (user space): one process per VM. It emulates or paravirtualizes devices (disk, network, console), calls KVM to run vCPUs. A vCPU is a **thread** of that process; guest RAM is memory mapped into it.\n- **libvirt** (management): a daemon and API (`virsh`, `virt-manager`, `virt-install`) that defines VMs as XML, manages storage and networks and starts QEMU with the right command line.",
+     "run": [
+      {
+       "cmd": "virsh list --all",
+       "explanationOnly": true,
+       "reason": "libvirt is not installed here and this machine has no /dev/kvm"
+      },
+      {
+       "cmd": "sudo virt-install --name demo --memory 1024 --vcpus 1 --disk size=8 --cdrom os.iso",
+       "explanationOnly": true,
+       "reason": "needs libvirt, qemu and /dev/kvm"
+      }
+     ]
+    },
+    {
+     "title": "Paravirtual devices: virtio",
+     "text": "Emulating real hardware (an Intel e1000 network card) is slow. **virtio** devices are designed for VMs: the guest driver and QEMU share queues in memory, so I/O needs few exits. Cloud images use `virtio-blk`/`virtio-scsi` disks and `virtio-net`. Inside a guest you can see which devices are virtio:",
+     "run": [
+      {
+       "cmd": "ls /sys/bus/virtio/devices 2>/dev/null | wc -l | awk '{print $1, \"virtio devices on this machine\"}'",
+       "output": "3 virtio devices on this machine"
+      },
+      {
+       "cmd": "lsblk -d -o NAME,TRAN | awk 'NR>1' | head -n 2",
+       "output": "sda  "
+      }
+     ],
+     "under": "Every sensitive guest action (accessing an unmapped device register, executing a privileged instruction the CPU cannot handle) causes a **VM exit**: the CPU stops the guest and returns to the host. KVM handles some exits itself; others go to QEMU in user space. Fewer exits mean better performance, which is what virtio, vhost-net and hardware features (SR-IOV, IOMMU passthrough) achieve."
+    },
+    {
+     "title": "Container or VM?",
+     "text": "Choose a **VM** for strong isolation, running a different kernel or OS, or untrusted tenants. Choose **containers** for density and speed when the kernel can be shared. Many platforms combine them: lightweight VMs per container (Kata, Firecracker) give VM isolation with container workflows."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does KVM do?",
+     "options": [
+      "Emulates devices",
+      "Makes the Linux kernel a hypervisor using CPU virtualization extensions",
+      "Manages VMs with XML",
+      "Runs containers"
+     ],
+     "answer": 1,
+     "explain": "It runs vCPUs; QEMU emulates devices."
+    },
+    {
+     "q": "What is a vCPU of a QEMU/KVM guest on the host?",
+     "options": [
+      "A kernel module",
+      "A thread of the QEMU process",
+      "A cgroup",
+      "A container"
+     ],
+     "answer": 1,
+     "explain": "Each vCPU is a thread."
+    },
+    {
+     "q": "Why are virtio devices faster than emulated ones?",
+     "options": [
+      "They use less memory",
+      "Guest and host cooperate through shared queues, with fewer VM exits",
+      "They skip the kernel",
+      "They are cached"
+     ],
+     "answer": 1,
+     "explain": "Paravirtualization."
+    },
+    {
+     "q": "Which tool is the libvirt command line client?",
+     "options": [
+      "qemu-img",
+      "virsh",
+      "kvmctl",
+      "xl"
+     ],
+     "answer": 1,
+     "explain": "virsh."
+    }
+   ],
+   "check": {
+    "scenario": "A cloud VM cannot start nested KVM guests: `/dev/kvm` does not exist. What are your options?",
+    "answer": "Use an instance type/bare-metal shape that exposes virtualization extensions (nested virtualization enabled), or run guests under software emulation (QEMU TCG: very slow), or use containers instead. Check with `systemd-detect-virt`, `ls /dev/kvm`, `lscpu` (virtualization flags) and the provider's documentation."
+   }
+  },
+  {
+   "id": "qemu-img-disks",
+   "title": "VM disk images: raw, qcow2, backing files, snapshots",
+   "level": "intermediate",
+   "goal": "Create and inspect virtual disk images with `qemu-img`: sparse files, thin provisioning, copy-on-write overlays and snapshots.\n\nWhy it matters: VM and cloud images are files. Understanding formats explains disk space surprises, fast cloning from a base image, and how snapshots work.",
+   "setup": {
+    "note": "These steps only read information, except for creating disk image files in a scratch directory.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A raw image is a sparse file",
+     "text": "A **raw** image is the disk byte for byte. As a sparse file it uses space only for blocks written. `virtual size` is what the guest sees; `disk size` is what the host spends.",
+     "run": [
+      {
+       "cmd": "qemu-img create -f raw disk.raw 200M | sed 's/fmt=raw //'",
+       "output": "Formatting 'disk.raw', size=209715200"
+      },
+      {
+       "cmd": "qemu-img info disk.raw | grep -E '^(file format|virtual size|disk size)' | sed 's/ (.*//'",
+       "output": "file format: raw\nvirtual size: 200 MiB\ndisk size: 1 MiB"
+      }
+     ]
+    },
+    {
+     "title": "qcow2: thin provisioning, snapshots, backing files",
+     "text": "**qcow2** is QEMU's native format. It allocates clusters on demand, supports compression, encryption, internal **snapshots** and **backing files**. The price is metadata overhead and slightly lower speed than raw.",
+     "run": [
+      {
+       "cmd": "qemu-img create -f qcow2 base.qcow2 200M | sed 's/fmt=qcow2 //; s/lazy_refcounts=off //; s/refcount_bits=16 //'",
+       "output": "Formatting 'base.qcow2', cluster_size=65536 extended_l2=off compression_type=zlib size=209715200 refcount_bits=16"
+      },
+      {
+       "cmd": "qemu-img info base.qcow2 | grep -E '^(file format|virtual size|disk size)' | sed 's/ (.*//'",
+       "output": "file format: qcow2\nvirtual size: 200 MiB\ndisk size: 196 KiB"
+      }
+     ]
+    },
+    {
+     "title": "Put a file system in it and convert",
+     "text": "We format the raw image with ext4, write a file, and convert it to qcow2: the free space is not copied, so the qcow2 file is far smaller than the virtual size.",
+     "run": [
+      {
+       "cmd": "mkfs.ext4 -q -F disk.raw; qemu-img convert -f raw -O qcow2 disk.raw disk.qcow2; qemu-img info disk.qcow2 | grep -E '^(virtual size|disk size)' | sed 's/ (.*//'",
+       "output": "virtual size: 200 MiB\ndisk size: 1.19 MiB"
+      },
+      {
+       "cmd": "ls -ls disk.raw | awk '{print \"raw: apparent\", $6, \"bytes, allocated\", $1, \"KB\"}'",
+       "output": "raw: apparent 209715200 bytes, allocated 14340 KB"
+      }
+     ]
+    },
+    {
+     "title": "A copy-on-write overlay on a base image",
+     "text": "A qcow2 file can use another image as its **backing file**: reads of unchanged blocks come from the base, writes go to the overlay. Creating a VM from a template is then instant and costs space only for the differences. The base must never be modified afterwards.",
+     "run": [
+      {
+       "cmd": "qemu-img create -f qcow2 -b base.qcow2 -F qcow2 overlay.qcow2 > /dev/null; qemu-img info overlay.qcow2 | grep -E '^(backing file|virtual size|disk size)' | sed -E 's/ \\(.*//; s#/tmp/lab/#./#'",
+       "output": "virtual size: 200 MiB\ndisk size: 196 KiB\nbacking file: base.qcow2\nbacking file format: qcow2"
+      }
+     ]
+    },
+    {
+     "title": "Snapshots",
+     "text": "`qemu-img snapshot -c NAME` records the current state **inside** the qcow2 file; `-a` returns to it, `-l` lists. A snapshot is cheap because it only freezes the block map (copy-on-write).",
+     "run": [
+      {
+       "cmd": "qemu-img snapshot -c before-upgrade base.qcow2; qemu-img snapshot -l base.qcow2 | awk 'NR>2 {print $2}'",
+       "output": "before-upgrade"
+      },
+      {
+       "cmd": "qemu-img check base.qcow2 | head -n 1",
+       "output": "No errors were found on the image."
+      }
+     ],
+     "under": "qcow2 maps guest clusters (64 KB by default) to file offsets through two-level tables with reference counts. A snapshot copies the L1 table and increments reference counts; later writes to shared clusters allocate new ones (copy-on-write). A backing-file chain adds one lookup per layer, so long chains slow reads: flatten them with `qemu-img convert`."
+    },
+    {
+     "title": "Clean up",
+     "text": "Remove the image files.",
+     "run": [
+      {
+       "cmd": "rm -f disk.raw disk.qcow2 base.qcow2 overlay.qcow2; echo cleaned",
+       "output": "cleaned"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What is the difference between virtual size and disk size?",
+     "options": [
+      "None",
+      "Virtual size is what the guest sees; disk size is what the file uses on the host",
+      "Disk size is larger",
+      "Virtual size is compressed"
+     ],
+     "answer": 1,
+     "explain": "Thin provisioning."
+    },
+    {
+     "q": "What is a qcow2 backing file?",
+     "options": [
+      "A backup",
+      "A base image that supplies unmodified blocks to an overlay",
+      "A log",
+      "A snapshot of RAM"
+     ],
+     "answer": 1,
+     "explain": "Overlays store only changes."
+    },
+    {
+     "q": "How do you flatten a long backing chain?",
+     "options": [
+      "qemu-img convert",
+      "qemu-img check",
+      "rm",
+      "fsck"
+     ],
+     "answer": 0,
+     "explain": "Convert writes a standalone image."
+    },
+    {
+     "q": "Which format is usually fastest but not thin by itself?",
+     "options": [
+      "qcow2",
+      "raw",
+      "vmdk",
+      "vdi"
+     ],
+     "answer": 1,
+     "explain": "Raw has no metadata layer."
+    }
+   ],
+   "check": {
+    "scenario": "A VM template of 20 GB is cloned 50 times for tests. How do you avoid using 1 TB?",
+    "answer": "Create each VM disk as a qcow2 overlay with the template as backing file (`qemu-img create -f qcow2 -b template.qcow2 -F qcow2 vmN.qcow2`). Each clone uses space only for its changes. Keep the template read-only, and flatten (`convert`) clones that must outlive it."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What are KVM, QEMU and libvirt?",
+   "a": "KVM is the kernel hypervisor using CPU virtualization extensions. QEMU is the user-space VM process emulating devices. libvirt manages VMs, storage and networks through an API and virsh. See [the lesson](#/lesson/40/kvm-qemu-libvirt).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is virtio?",
+   "a": "A family of paravirtual devices (disk, network, console, balloon) where guest and host share queues in memory, giving near-native I/O performance.",
+   "level": "intermediate"
+  },
+  {
+   "q": "raw versus qcow2?",
+   "a": "raw: simple and fast, sparse. qcow2: thin provisioning, snapshots, backing files, compression, encryption, with some overhead. See [the lesson](#/lesson/40/qemu-img-disks).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What is a VM exit?",
+   "a": "The CPU stops running the guest and returns control to the hypervisor, for example on a privileged instruction or device access. Fewer exits mean better performance.",
+   "level": "advanced"
+  },
+  {
+   "q": "Containers versus VMs for multi-tenant isolation?",
+   "a": "VMs isolate with a hypervisor and separate kernels; containers share the host kernel and rely on namespaces, cgroups and LSMs. Untrusted tenants usually need VMs (or microVMs such as Firecracker/Kata).",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "KVM",
+   "def": "Kernel-based Virtual Machine: Linux acting as a hypervisor using hardware virtualization.",
+   "lesson": "40/kvm-qemu-libvirt"
+  },
+  {
+   "term": "QEMU",
+   "def": "The user-space emulator and VM process that works with KVM.",
+   "lesson": "40/kvm-qemu-libvirt"
+  },
+  {
+   "term": "libvirt",
+   "def": "A management layer and API for virtual machines.",
+   "lesson": "40/kvm-qemu-libvirt"
+  },
+  {
+   "term": "virtio",
+   "def": "Paravirtualized device standard for efficient guest I/O.",
+   "lesson": "40/kvm-qemu-libvirt"
+  },
+  {
+   "term": "qcow2",
+   "def": "QEMU's copy-on-write disk image format with snapshots and backing files.",
+   "lesson": "40/qemu-img-disks"
+  },
+  {
+   "term": "Backing file",
+   "def": "A base image supplying unmodified data to a qcow2 overlay.",
+   "lesson": "40/qemu-img-disks"
+  },
+  {
+   "term": "VM exit",
+   "def": "A switch from guest to hypervisor caused by an event the guest cannot handle itself.",
+   "lesson": "40/kvm-qemu-libvirt"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "systemd-detect-virt",
+   "desc": "Detect whether this system is a VM or container.",
+   "topic": "Virtualization",
+   "lesson": "40/kvm-qemu-libvirt"
+  },
+  {
+   "cmd": "ls /dev/kvm",
+   "desc": "Check for KVM support.",
+   "topic": "Virtualization",
+   "lesson": "40/kvm-qemu-libvirt"
+  },
+  {
+   "cmd": "virsh list --all",
+   "desc": "List VMs managed by libvirt.",
+   "topic": "Virtualization",
+   "lesson": "40/kvm-qemu-libvirt"
+  },
+  {
+   "cmd": "qemu-img create -f qcow2 disk.qcow2 20G",
+   "desc": "Create a thin qcow2 disk.",
+   "topic": "Virtualization",
+   "lesson": "40/qemu-img-disks"
+  },
+  {
+   "cmd": "qemu-img info IMAGE",
+   "desc": "Show image format and sizes.",
+   "topic": "Virtualization",
+   "lesson": "40/qemu-img-disks"
+  },
+  {
+   "cmd": "qemu-img create -f qcow2 -b BASE -F qcow2 NEW",
+   "desc": "Create an overlay on a base image.",
+   "topic": "Virtualization",
+   "lesson": "40/qemu-img-disks"
+  },
+  {
+   "cmd": "qemu-img convert -O raw IN OUT",
+   "desc": "Convert between image formats.",
+   "topic": "Virtualization",
+   "lesson": "40/qemu-img-disks"
+  },
+  {
+   "cmd": "qemu-img snapshot -c NAME IMAGE",
+   "desc": "Create a snapshot inside a qcow2.",
+   "topic": "Virtualization",
+   "lesson": "40/qemu-img-disks"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

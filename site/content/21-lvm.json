@@ -1,0 +1,360 @@
+{
+ "title": "LVM",
+ "lessons": [
+  {
+   "id": "lvm-basics",
+   "title": "LVM: physical volumes, volume groups, logical volumes",
+   "level": "intermediate",
+   "goal": "Learn the three layers of LVM and use them: build a volume, put a file system on it, and **grow it while mounted**.\n\nWhy it matters: LVM lets you resize storage, combine disks and take snapshots without repartitioning. Most enterprise Linux servers (including this one) have their root file system on LVM.",
+   "setup": {
+    "note": "These steps use sudo and loop devices (image files acting as disks). They create a volume group called `labvg` and remove it at the end. They never touch real disks.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Three layers",
+     "text": "- **PV** (physical volume): a disk or partition prepared for LVM.\n- **VG** (volume group): a pool made from one or more PVs.\n- **LV** (logical volume): a slice of the pool that looks like a disk. You put a file system on it.\n\nOur practice \"disks\" are two 100 MB loop devices.",
+     "run": [
+      {
+       "cmd": "truncate -s 100M p1.img p2.img; L1=$(sudo losetup -f --show p1.img); L2=$(sudo losetup -f --show p2.img); echo $L1 $L2",
+       "output": "/dev/loop0 /dev/loop1"
+      },
+      {
+       "cmd": "sudo pvcreate $L1 $L2 2>&1 | sed 's#/dev/loop[0-9]*#PV#'",
+       "output": "  Physical volume \"PV\" successfully created.\n  Physical volume \"PV\" successfully created.\n  Not creating system devices file due to existing VGs."
+      }
+     ]
+    },
+    {
+     "title": "Create the volume group",
+     "text": "`vgcreate` pools the PVs into `labvg`.",
+     "run": [
+      {
+       "cmd": "sudo vgcreate labvg $L1 $L2 2>&1",
+       "output": "  Not creating system devices file due to existing VGs.\n  Volume group \"labvg\" successfully created"
+      },
+      {
+       "cmd": "sudo vgs --units m labvg",
+       "output": "  VG    #PV #LV #SN Attr   VSize   VFree  \n  labvg   2   0   0 wz--n- 192.00m 192.00m"
+      },
+      {
+       "cmd": "sudo pvs --units m -o pv_name,vg_name,pv_size,pv_free | grep -E 'PV|labvg' | sed -E 's#/dev/loop[0-9]+#PV#'",
+       "output": "  PV         VG        PSize     PFree \n  PV labvg        96.00m 96.00m\n  PV labvg        96.00m 96.00m"
+      }
+     ]
+    },
+    {
+     "title": "Create a logical volume and use it",
+     "text": "`lvcreate -L 40M -n data labvg` makes a 40 MB volume. It appears as `/dev/labvg/data` (a link to `/dev/mapper/labvg-data`). Format and mount it like any disk.",
+     "run": [
+      {
+       "cmd": "sudo lvcreate -L 40M -n data labvg 2>&1",
+       "output": "  Logical volume \"data\" created."
+      },
+      {
+       "cmd": "ls -l /dev/labvg/data | awk '{print $9, $10, $11}'",
+       "output": "/dev/labvg/data -> ../dm-2"
+      },
+      {
+       "cmd": "sudo mkfs.ext4 -q /dev/labvg/data; sudo mkdir -p /tmp/lab/lv && sudo mount /dev/labvg/data /tmp/lab/lv && sudo chown $(id -un): /tmp/lab/lv",
+       "output": ""
+      },
+      {
+       "cmd": "echo important > /tmp/lab/lv/file.txt; df -h --output=size,used,avail /tmp/lab/lv | tail -n 1",
+       "output": "  33M   15K   30M"
+      }
+     ]
+    },
+    {
+     "title": "Grow it while it is mounted",
+     "text": "`lvextend -r -L +60M` adds 60 MB to the volume **and** resizes the file system (`-r`) in one step. Nothing is unmounted and the file is untouched. This is why LVM is popular: running out of space becomes a one-line operation if the VG has free extents.",
+     "run": [
+      {
+       "cmd": "sudo lvextend -r -L +60M labvg/data 2>&1 | grep -E 'Size of logical volume|resized|Extending'",
+       "output": "  Size of logical volume labvg/data changed from 40.00 MiB (10 extents) to 100.00 MiB (25 extents).\n  Extending file system ext4 to 100.00 MiB (104857600 bytes) on labvg/data...\n  Logical volume labvg/data successfully resized."
+      },
+      {
+       "cmd": "df -h --output=size,used,avail /tmp/lab/lv | tail -n 1; cat /tmp/lab/lv/file.txt",
+       "output": "  88M   15K   83M\nimportant"
+      },
+      {
+       "cmd": "sudo vgs --units m -o vg_name,vg_size,vg_free labvg",
+       "output": "  VG    VSize   VFree \n  labvg 192.00m 92.00m"
+      }
+     ]
+    },
+    {
+     "title": "Clean up",
+     "text": "Unmount, then remove from the top down: LV, VG, PV, loop devices.",
+     "run": [
+      {
+       "cmd": "sudo umount /tmp/lab/lv; sudo lvremove -f labvg/data 2>&1 | tail -n 1; sudo vgremove -f labvg 2>&1 | tail -n 1; sudo pvremove -f $L1 $L2 2>&1 | sed 's#/dev/loop[0-9]*#PV#' | tail -n 2; sudo losetup -d $L1 $L2; echo done",
+       "output": "  Logical volume \"data\" successfully removed.\n  Volume group \"labvg\" successfully removed\n  Labels on physical volume \"PV\" successfully wiped.\n  Labels on physical volume \"PV\" successfully wiped.\ndone"
+      }
+     ],
+     "under": "LVM splits the VG into **extents** (4 MiB by default). An LV is a list of extents, possibly from several PVs. Extending adds extents and then asks the file system to use them (`resize2fs` for ext4, `xfs_growfs` for xfs). Shrinking is the reverse and riskier: shrink the file system first, then the LV."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What are the LVM layers, bottom to top?",
+     "options": [
+      "LV, VG, PV",
+      "PV, VG, LV",
+      "VG, PV, LV",
+      "PV, LV, VG"
+     ],
+     "answer": 1,
+     "explain": "Physical volume, volume group, logical volume."
+    },
+    {
+     "q": "What does `lvextend -r` do beyond extending the LV?",
+     "options": [
+      "Reboots",
+      "Resizes the file system as well",
+      "Removes the LV",
+      "Creates a snapshot"
+     ],
+     "answer": 1,
+     "explain": "The -r flag runs the file system resize."
+    },
+    {
+     "q": "Where does a logical volume appear?",
+     "options": [
+      "/dev/labvg/data (and /dev/mapper/labvg-data)",
+      "/proc/lvm",
+      "/etc/lvm",
+      "/sys/lv"
+     ],
+     "answer": 0,
+     "explain": "Both names point to the device-mapper device."
+    },
+    {
+     "q": "Which file system cannot be shrunk after `lvreduce` planning?",
+     "options": [
+      "ext4",
+      "xfs",
+      "btrfs",
+      "ext3"
+     ],
+     "answer": 1,
+     "explain": "xfs cannot shrink, so do not plan to reduce it."
+    }
+   ],
+   "check": {
+    "scenario": "`/var` is at 98% on a server whose root VG has 20 GB free. Give the exact commands to add 10 GB without downtime.",
+    "answer": "`lvs` to find the LV name, then `lvextend -r -L +10G /dev/VG/var` (the `-r` grows the file system, ext4 or xfs, online). Verify with `df -h /var` and `vgs`."
+   }
+  },
+  {
+   "id": "lvm-snapshots-devicemapper",
+   "title": "LVM snapshots and the device mapper",
+   "level": "advanced",
+   "goal": "Take a point-in-time snapshot of a volume, see that it keeps the old data while the original changes, and look at the kernel layer that makes LVM work: the device mapper.\n\nWhy it matters: snapshots give consistent backups and quick rollbacks, and `dmsetup` shows what is really mapped when LVM tools misbehave.",
+   "setup": {
+    "note": "These steps use sudo and loop devices (image files acting as disks). They create a volume group called `labvg` and remove it at the end. They never touch real disks.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Prepare a volume with some data",
+     "text": "A fresh VG and a 40 MB LV with one file.",
+     "run": [
+      {
+       "cmd": "truncate -s 200M p1.img; L1=$(sudo losetup -f --show p1.img); sudo pvcreate -q $L1 && sudo vgcreate -q labvg $L1 && sudo lvcreate -q -L 40M -n data labvg",
+       "output": "  Physical volume \"/dev/loop0\" successfully created.\n  Not creating system devices file due to existing VGs.\n  Not creating system devices file due to existing VGs.\n  Volume group \"labvg\" successfully created\n  Logical volume \"data\" created."
+      },
+      {
+       "cmd": "sudo mkfs.ext4 -q /dev/labvg/data; sudo mkdir -p /tmp/lab/lv /tmp/lab/snap && sudo mount /dev/labvg/data /tmp/lab/lv && sudo chown $(id -un): /tmp/lab/lv; echo 'version 1' > /tmp/lab/lv/config.txt; sync; cat /tmp/lab/lv/config.txt",
+       "output": "version 1"
+      }
+     ]
+    },
+    {
+     "title": "Create a snapshot",
+     "text": "`lvcreate -s` makes a **copy-on-write snapshot**. It needs space only for blocks that change after the snapshot (here 20 MB). Creating it takes a moment, whatever the size of the origin.",
+     "run": [
+      {
+       "cmd": "sudo lvcreate -q -s -n before -L 20M labvg/data 2>&1 | tail -n 1",
+       "output": "  Logical volume \"before\" created."
+      },
+      {
+       "cmd": "sudo lvs --units m -o lv_name,lv_size,origin,snap_percent labvg | sed 's/  */ /g'",
+       "output": " LV LSize Origin Snap% \n before 20.00m data 0.06 \n data 40.00m "
+      }
+     ]
+    },
+    {
+     "title": "Change the origin; the snapshot keeps the past",
+     "text": "We overwrite the file in the origin. The snapshot still shows the old content. Mount it read-only to look.",
+     "run": [
+      {
+       "cmd": "echo 'version 2 (oops)' > /tmp/lab/lv/config.txt; sync; cat /tmp/lab/lv/config.txt",
+       "output": "version 2 (oops)"
+      },
+      {
+       "cmd": "sudo mount -o ro /dev/labvg/before /tmp/lab/snap && cat /tmp/lab/snap/config.txt",
+       "output": "version 1"
+      },
+      {
+       "cmd": "sudo lvs --units m -o lv_name,snap_percent labvg | sed 's/  */ /g'",
+       "output": " LV Snap% \n before 0.18 \n data "
+      }
+     ],
+     "after": "The snapshot holds `version 1`. `Snap%` grew because the changed blocks were saved there first."
+    },
+    {
+     "title": "Under the hood: device mapper",
+     "text": "LVM only configures the kernel's **device mapper** (dm). Each LV is a dm device with a **table**: ranges of sectors mapped by a **target** (linear, snapshot, mirror, thin, crypt...). `dmsetup` shows it.",
+     "run": [
+      {
+       "cmd": "sudo dmsetup ls | grep labvg | sed 's/(.*//' | tr '\\n' ' '; echo",
+       "output": "labvg-before\t labvg-before-cow\t labvg-data\t labvg-data-real\t "
+      },
+      {
+       "cmd": "sudo dmsetup table labvg-data | sed -E 's/[0-9]+:[0-9]+/MAJ:MIN/'",
+       "output": "0 81920 snapshot-origin MAJ:MIN"
+      },
+      {
+       "cmd": "sudo dmsetup status labvg-before | cut -d' ' -f1-4",
+       "output": "0 81920 snapshot 5208/40960"
+      }
+     ],
+     "under": "`linear` means \"sectors 0..N of this device map to sectors S..S+N of that device\". A snapshot is two targets: `snapshot-origin` (writes to the origin first copy the old block to the snapshot's exception store) and `snapshot` (reads come from the store if the block was copied, else from the origin). The same dm layer implements disk encryption (dm-crypt/LUKS), multipath and thin provisioning."
+    },
+    {
+     "title": "Roll back (merge) or discard",
+     "text": "To discard a snapshot: `lvremove`. To roll the origin back to the snapshot state use `lvconvert --merge` (done on the next activation of the origin). We just discard and clean up.",
+     "run": [
+      {
+       "cmd": "sudo umount /tmp/lab/snap /tmp/lab/lv; sudo lvremove -q -f labvg/before labvg/data 2>&1 | tail -n 1; sudo vgremove -q -f labvg; sudo pvremove -q -f $L1; sudo losetup -d $L1; echo cleaned",
+       "output": "  Logical volume \"data\" successfully removed.\n  Volume group \"labvg\" successfully removed\n  Labels on physical volume \"/dev/loop0\" successfully wiped.\ncleaned"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does an LVM snapshot store?",
+     "options": [
+      "A full copy of the volume",
+      "Blocks of the origin that changed since the snapshot (copy-on-write)",
+      "Only metadata",
+      "Nothing"
+     ],
+     "answer": 1,
+     "explain": "It is space-efficient."
+    },
+    {
+     "q": "What happens when a snapshot's space is used up?",
+     "options": [
+      "Nothing",
+      "The snapshot becomes invalid",
+      "The origin is deleted",
+      "It grows automatically always"
+     ],
+     "answer": 1,
+     "explain": "A full classic snapshot is invalidated; monitor Snap%."
+    },
+    {
+     "q": "What kernel layer implements LVM volumes?",
+     "options": [
+      "VFS",
+      "Device mapper",
+      "udev",
+      "netfilter"
+     ],
+     "answer": 1,
+     "explain": "Device mapper (dm)."
+    },
+    {
+     "q": "Which tool shows the raw mapping tables?",
+     "options": [
+      "lvs",
+      "dmsetup table",
+      "pvs",
+      "lsblk -f"
+     ],
+     "answer": 1,
+     "explain": "dmsetup talks to the device mapper directly."
+    }
+   ],
+   "check": {
+    "scenario": "You must back up a busy database volume consistently with minimal downtime. How do snapshots help and what must you do around them?",
+    "answer": "Quiesce the database briefly (flush/lock, or use its backup mode), create the snapshot (instant), release the lock, then back up from the **mounted read-only snapshot** at leisure, and remove the snapshot afterwards so it does not fill. Size the snapshot for the changes expected during the backup."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "Explain PV, VG and LV.",
+   "a": "A physical volume is a disk prepared for LVM, a volume group pools PVs, a logical volume is a slice of the pool that holds a file system. See [the lesson](#/lesson/21/lvm-basics).",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you extend /var online using LVM?",
+   "a": "`lvextend -r -L +SIZE /dev/VG/var` (the -r resizes ext4 or xfs). Needs free extents in the VG; if none, add a PV with `vgextend` first.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How does an LVM snapshot work?",
+   "a": "Copy-on-write: before an origin block is changed the old data is copied to the snapshot's store. The snapshot sees the old data. See [the lesson](#/lesson/21/lvm-snapshots-devicemapper).",
+   "level": "advanced"
+  },
+  {
+   "q": "What is the device mapper?",
+   "a": "A kernel framework that maps virtual block devices onto other devices through tables and targets (linear, snapshot, crypt, thin, multipath). LVM, LUKS and multipath use it.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [],
+ "commands": [
+  {
+   "cmd": "sudo pvcreate DEV",
+   "desc": "Initialise a device for LVM.",
+   "topic": "LVM",
+   "lesson": "21/lvm-basics"
+  },
+  {
+   "cmd": "sudo vgcreate VG DEV...",
+   "desc": "Create a volume group.",
+   "topic": "LVM",
+   "lesson": "21/lvm-basics"
+  },
+  {
+   "cmd": "sudo lvcreate -L 10G -n NAME VG",
+   "desc": "Create a logical volume.",
+   "topic": "LVM",
+   "lesson": "21/lvm-basics"
+  },
+  {
+   "cmd": "sudo lvextend -r -L +10G VG/LV",
+   "desc": "Grow an LV and its file system.",
+   "topic": "LVM",
+   "lesson": "21/lvm-basics"
+  },
+  {
+   "cmd": "sudo lvcreate -s -n SNAP -L 5G VG/LV",
+   "desc": "Create a snapshot.",
+   "topic": "LVM",
+   "lesson": "21/lvm-snapshots-devicemapper"
+  },
+  {
+   "cmd": "pvs; vgs; lvs",
+   "desc": "Show PVs, VGs and LVs.",
+   "topic": "LVM",
+   "lesson": "21/lvm-basics"
+  },
+  {
+   "cmd": "sudo dmsetup table",
+   "desc": "Show device-mapper tables.",
+   "topic": "LVM",
+   "lesson": "21/lvm-snapshots-devicemapper"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

@@ -1,0 +1,402 @@
+{
+ "title": "Containers from scratch",
+ "lessons": [
+  {
+   "id": "container-by-hand",
+   "title": "A container from scratch: rootfs, namespaces, cgroup",
+   "level": "advanced",
+   "goal": "Build a container without Docker's runtime: a root file system, new namespaces, and a cgroup, then compare with what Docker creates.\n\nWhy it matters: once you can do this, you can debug any container runtime, explain the isolation limits honestly, and see why \"containers share the host kernel\" has security consequences.",
+   "setup": {
+    "note": "These steps use sudo and Docker only to obtain an Alpine root file system, then build a container **by hand**. They remove everything at the end. Needs Docker (or any way to get a root file system tarball).",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo docker rm -f lab-d >/dev/null 2>&1; sudo systemctl stop lab-ctr 2>/dev/null; sudo systemctl reset-failed lab-ctr 2>/dev/null; sudo rm -rf /tmp/lab/rootfs; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Step 1: a root file system",
+     "text": "A container image is mostly a tarball of a small Linux root file system. We take Alpine's from Docker (`export` writes a container's files as a tar stream).",
+     "run": [
+      {
+       "cmd": "mkdir rootfs; id=$(sudo docker create alpine); sudo docker export $id | sudo tar -x -C rootfs; sudo docker rm $id > /dev/null",
+       "output": ""
+      },
+      {
+       "cmd": "ls rootfs | tr '\\n' ' '; echo",
+       "output": "bin dev etc home lib media mnt opt proc root run sbin srv sys tmp usr var "
+      },
+      {
+       "cmd": "head -n 2 rootfs/etc/os-release | cut -d= -f2 | tr '\\n' ' '; echo",
+       "output": "\"Alpine Linux\" alpine "
+      }
+     ]
+    },
+    {
+     "title": "Step 2: chroot changes the root directory",
+     "text": "`chroot DIR CMD` makes DIR the root for the command. The program now sees Alpine's files instead of ours: a different distribution, same kernel. But it still sees the host's processes, network and hostname.",
+     "run": [
+      {
+       "cmd": "sudo chroot rootfs /bin/sh -c 'head -n 1 /etc/os-release; ls / | wc -l | awk \"{print \\$1, \\\"entries in /\\\"}\"'",
+       "output": "NAME=\"Alpine Linux\"\n17 entries in /"
+      },
+      {
+       "cmd": "sudo chroot rootfs /bin/sh -c 'uname -sr | cut -d- -f1'; uname -sr | cut -d- -f1",
+       "output": "Linux 6.12.0\nLinux 6.12.0"
+      }
+     ],
+     "after": "The kernel version is identical inside and outside: **there is no second kernel**."
+    },
+    {
+     "title": "Step 3: add the namespaces",
+     "text": "Now isolate what the process can see: new mount, UTS (hostname), IPC, network and PID namespaces, and inside mount a fresh `/proc` so `ps` shows only our view.",
+     "run": [
+      {
+       "cmd": "sudo unshare --mount --uts --ipc --net --pid --fork chroot rootfs /bin/sh -c 'mount -t proc proc /proc; hostname lab-ctr; echo \"hostname: $(hostname)\"; echo \"my pid: $$\"; echo \"processes visible: $(ps | tail -n +2 | wc -l)\"; echo \"network links: $(ip -o link | wc -l)\"'",
+       "output": "hostname: lab-ctr\nmy pid: 1\nprocesses visible: 3\nnetwork links: 1"
+      }
+     ],
+     "under": "This is the essence of `docker run`: `clone()` with the namespace flags, `pivot_root`/`chroot` into the image, mount `/proc`, `/sys` and `/dev`, set up network (a veth pair joined to a bridge), then `exec` the command. runc does exactly this, driven by a JSON `config.json`."
+    },
+    {
+     "title": "Step 4: a cgroup for limits",
+     "text": "We run the container as a transient systemd service so that systemd creates its cgroup, and give it a memory limit. From the host we then look at the processes, the cgroup and what the root of the process is.",
+     "run": [
+      {
+       "cmd": "sudo systemd-run --unit=lab-ctr -q -p MemoryMax=30M unshare --mount --uts --pid --fork chroot /tmp/lab/rootfs /bin/sleep 60; sleep 1; systemctl show lab-ctr -p MemoryMax | tr '\\n' ' '; echo",
+       "output": "MemoryMax=31457280 "
+      },
+      {
+       "cmd": "cat /sys/fs/cgroup/system.slice/lab-ctr.service/cgroup.procs | wc -l | awk '{print $1, \"processes in the container cgroup\"}'",
+       "output": "2 processes in the container cgroup"
+      },
+      {
+       "cmd": "p=$(tail -n 1 /sys/fs/cgroup/system.slice/lab-ctr.service/cgroup.procs); sudo readlink /proc/$p/root; sudo cat /proc/$p/comm",
+       "output": "/tmp/lab/rootfs\nsleep"
+      }
+     ],
+     "after": "From the host the container's `sleep` is a normal process: it has a host PID, lives in the cgroup, and its root directory is our `rootfs`. Nothing hides it from the host."
+    },
+    {
+     "title": "Compare with Docker's container",
+     "text": "`docker run` adds image layers, a network bridge and many defaults, but uses the same kernel features. We start one with limits and read its cgroup files.",
+     "run": [
+      {
+       "cmd": "sudo docker run -d --name lab-d --hostname lab-docker --memory 30m --cpus 0.5 alpine sleep 60 > /dev/null; sleep 1; pid=$(sudo docker inspect -f '{{.State.Pid}}' lab-d); sudo ls /proc/$pid/ns | tr '\\n' ' '; echo",
+       "output": "cgroup ipc mnt net pid pid_for_children time time_for_children user uts "
+      },
+      {
+       "cmd": "pid=$(sudo docker inspect -f '{{.State.Pid}}' lab-d); cg=$(sudo cat /proc/$pid/cgroup | cut -d: -f3); echo \"memory.max: $(cat /sys/fs/cgroup$cg/memory.max)\"; echo \"cpu.max: $(cat /sys/fs/cgroup$cg/cpu.max)\"",
+       "output": "memory.max: 31457280\ncpu.max: 50000 100000"
+      }
+     ],
+     "under": "`--memory 30m` became `memory.max = 31457280` and `--cpus 0.5` became `cpu.max = 50000 100000`. Docker is a convenient front end that writes these files and sets up namespaces. This also shows why container isolation is weaker than VM isolation: a kernel vulnerability reachable from inside is a host vulnerability."
+    },
+    {
+     "title": "Clean up",
+     "text": "Stop both containers and delete the root file system.",
+     "run": [
+      {
+       "cmd": "sudo docker rm -f lab-d > /dev/null; sudo systemctl stop lab-ctr; sudo rm -rf rootfs; echo cleaned",
+       "output": "cleaned"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which statement about containers is correct?",
+     "options": [
+      "Each container runs its own kernel",
+      "Containers share the host kernel and are isolated by namespaces and cgroups",
+      "Containers need a hypervisor",
+      "Containers are always rootless"
+     ],
+     "answer": 1,
+     "explain": "Step 2: same kernel version inside and outside."
+    },
+    {
+     "q": "What does `docker run --memory 30m` end up as?",
+     "options": [
+      "A ulimit",
+      "memory.max in the container's cgroup",
+      "A swap file",
+      "A mount option"
+     ],
+     "answer": 1,
+     "explain": "A cgroup limit."
+    },
+    {
+     "q": "What does chroot alone isolate?",
+     "options": [
+      "Processes",
+      "The view of the file system root only",
+      "Network",
+      "Users"
+     ],
+     "answer": 1,
+     "explain": "It is not a security boundary by itself."
+    },
+    {
+     "q": "Which tool in Docker's stack performs the namespace and cgroup setup?",
+     "options": [
+      "runc (an OCI runtime)",
+      "iptables",
+      "systemd-journald",
+      "udev"
+     ],
+     "answer": 0,
+     "explain": "runc."
+    }
+   ],
+   "check": {
+    "scenario": "A security review asks: \"a root process in a container escapes. What are the consequences compared with a VM?\" Answer in terms of what you built.",
+    "answer": "A container is a process on the **host kernel**. If root in the container finds a kernel bug (or has too many capabilities, a mounted Docker socket or `--privileged`), it can reach the host and all other containers, which share that kernel. A VM escape must break the hypervisor and virtual device emulation, a much smaller attack surface. Mitigate with rootless containers, dropped capabilities, seccomp, SELinux/AppArmor, read-only roots and user namespaces."
+   }
+  },
+  {
+   "id": "rootless-and-layers",
+   "title": "Rootless containers and image layers",
+   "level": "advanced",
+   "goal": "Create mount, PID and user namespaces as an **ordinary user**, and build an image-style layered file system with `overlayfs` by hand.\n\nWhy it matters: rootless containers (Podman, rootless Docker) are the safer default, and layered images explain why pulling is fast, why images are read-only, and why deleting a file in a layer does not shrink the image.",
+   "setup": {
+    "note": "Overlay mounts need sudo. The user-namespace steps need no root. Everything is removed at the end.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo umount /tmp/lab/merged 2>/dev/null; sudo rm -rf /tmp/lab/lower /tmp/lab/upper /tmp/lab/work /tmp/lab/merged; true"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Namespaces without root",
+     "text": "A **user namespace** lets an unprivileged user become UID 0 *inside*. In that namespace the user may create mount and PID namespaces and mount a tmpfs, because the privileges apply only to namespace-owned resources. No sudo.",
+     "run": [
+      {
+       "cmd": "unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c 'echo \"uid inside: $(id -u)\"; mount -t tmpfs tmpfs /mnt && echo \"mounted a tmpfs as an ordinary user\"; echo \"processes visible: $(ps -e | tail -n +2 | wc -l)\"'",
+       "output": "uid inside: 0\nmounted a tmpfs as an ordinary user\nprocesses visible: 5"
+      }
+     ]
+    },
+    {
+     "title": "The ID mapping",
+     "text": "Only your own UID is mapped (to 0). Files owned by anyone else show up as `nobody` inside, and you cannot become another user. Real rootless runtimes use `newuidmap` and the ranges in `/etc/subuid` to map thousands of IDs.",
+     "run": [
+      {
+       "cmd": "unshare -Ur sh -c 'cat /proc/self/uid_map | tr -s \" \" \" \"; ls -ln /etc/passwd | awk \"{print \\\"/etc/passwd owner inside: \\\", \\$3}\"'",
+       "output": " 0 1000 1\n/etc/passwd owner inside:  65534"
+      },
+      {
+       "cmd": "grep -c '^opc:' /etc/subuid 2>/dev/null; sysctl user.max_user_namespaces | tr -s ' ' ' '",
+       "output": "1\nuser.max_user_namespaces = 22227"
+      }
+     ],
+     "after": "`0 1000 1` reads: UID 0 inside = UID 1000 outside, 1 ID long. `/etc/passwd` belongs to root (UID 0 outside), which is **not mapped**, so it appears as 65534 (`nobody`)."
+    },
+    {
+     "title": "Image layers with overlayfs",
+     "text": "A container image is a stack of read-only **layers**. **overlayfs** merges `lowerdir` (read-only) with an `upperdir` (the writable layer) into a `merged` view. Writes go to the upper layer (**copy-up**); the lower stays untouched, so many containers share one image.",
+     "run": [
+      {
+       "cmd": "mkdir lower upper work merged; echo base > lower/base.txt; echo old > lower/config.txt",
+       "output": ""
+      },
+      {
+       "cmd": "sudo mount -t overlay overlay -o lowerdir=lower,upperdir=upper,workdir=work merged; ls merged | tr '\\n' ' '; echo",
+       "output": "base.txt config.txt "
+      }
+     ]
+    },
+    {
+     "title": "Writes land in the upper layer",
+     "text": "We modify one file and create another through the merged view.",
+     "run": [
+      {
+       "cmd": "echo new > merged/config.txt; echo extra > merged/added.txt",
+       "output": ""
+      },
+      {
+       "cmd": "echo \"lower: $(cat lower/config.txt)  merged: $(cat merged/config.txt)\"",
+       "output": "lower: old  merged: new"
+      },
+      {
+       "cmd": "ls upper | tr '\\n' ' '; echo",
+       "output": "added.txt config.txt "
+      }
+     ]
+    },
+    {
+     "title": "Deleting makes a whiteout",
+     "text": "Removing a file from a lower layer cannot change the lower layer. overlayfs creates a **whiteout**: a character device with number 0/0 in the upper layer that hides the name. That is why deleting a big file in a later Dockerfile layer does not make the image smaller.",
+     "run": [
+      {
+       "cmd": "rm merged/base.txt; ls merged | tr '\\n' ' '; ls lower | tr '\\n' ' '; echo",
+       "output": "added.txt config.txt base.txt config.txt "
+      },
+      {
+       "cmd": "ls -l upper/base.txt | cut -c1-10; stat -c 'device %t:%T' upper/base.txt",
+       "output": "c---------\ndevice 0:0"
+      }
+     ],
+     "under": "Docker keeps image layers under `/var/lib/docker/overlay2`, one directory per layer, and mounts them as `lowerdir=layerN:layerN-1:...` with a per-container upper layer. `docker commit` or `build` turns an upper layer into a new lower layer. Pulling shares layers that are already present, by their content hash."
+    },
+    {
+     "title": "Clean up",
+     "text": "Unmount and remove the directories.",
+     "run": [
+      {
+       "cmd": "sudo umount merged; sudo rm -rf lower upper work merged; echo cleaned",
+       "output": "cleaned"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Why can an unprivileged user create a mount namespace inside a user namespace?",
+     "options": [
+      "It is a bug",
+      "The privileges apply only to resources owned by the namespace",
+      "Linux ignores permissions there",
+      "Because of sudo"
+     ],
+     "answer": 1,
+     "explain": "Capabilities in a user namespace are scoped to it."
+    },
+    {
+     "q": "What is a whiteout in overlayfs?",
+     "options": [
+      "A compressed file",
+      "A 0/0 character device in the upper layer that hides a lower file",
+      "A backup",
+      "A symlink"
+     ],
+     "answer": 1,
+     "explain": "It marks a deleted file."
+    },
+    {
+     "q": "Why does deleting a file in a later image layer not shrink the image?",
+     "options": [
+      "Docker bug",
+      "The data stays in the earlier, read-only layer",
+      "Cache",
+      "Compression"
+     ],
+     "answer": 1,
+     "explain": "Layers are immutable."
+    },
+    {
+     "q": "What does `/etc/subuid` configure?",
+     "options": [
+      "Passwords",
+      "Ranges of extra UIDs a user may map in user namespaces",
+      "sudo rules",
+      "SELinux users"
+     ],
+     "answer": 1,
+     "explain": "Rootless runtimes map those ranges."
+    }
+   ],
+   "check": {
+    "scenario": "Why would you run containers rootless, and what limits do you accept?",
+    "answer": "A container escape lands as an ordinary user, not root, and a compromised runtime cannot take over the host. Accept: no binding to ports below 1024 without a sysctl or proxy, slower networking (slirp4netns/pasta), restricted features (some filesystems, `ping` needs sysctl), and the need for subuid/subgid ranges."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is a container, technically?",
+   "a": "A process in new namespaces and a cgroup, with a root file system from an image. It shares the host kernel. See [the lesson](#/lesson/39/container-by-hand).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How is a container different from a VM?",
+   "a": "A VM has its own kernel on virtual hardware under a hypervisor; a container shares the host kernel. Containers start faster and are lighter but isolate less.",
+   "level": "beginner"
+  },
+  {
+   "q": "What does docker run actually set up?",
+   "a": "Namespaces (pid, net, mnt, uts, ipc, optionally user), a cgroup with limits, a root file system from layered image storage (overlayfs), network (veth + bridge/NAT), capabilities, seccomp and LSM profiles.",
+   "level": "advanced"
+  },
+  {
+   "q": "What are rootless containers?",
+   "a": "Containers run by an unprivileged user using user namespaces, so a breakout does not give root on the host. See [the lesson](#/lesson/39/rootless-and-layers).",
+   "level": "advanced"
+  },
+  {
+   "q": "Why does deleting a file in a Dockerfile layer not reduce image size?",
+   "a": "Layers are read-only and stacked; deletion adds a whiteout in a new layer while the data stays in the old one.",
+   "level": "advanced"
+  },
+  {
+   "q": "How do you find a container's cgroup limits from the host?",
+   "a": "Get its host PID (`docker inspect`), read `/proc/PID/cgroup`, then `memory.max`, `cpu.max` in that cgroup directory.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Container",
+   "def": "A process isolated by namespaces and limited by cgroups, running from an image's root file system.",
+   "lesson": "39/container-by-hand"
+  },
+  {
+   "term": "Image layer",
+   "def": "A read-only file system layer; images are stacks of layers.",
+   "lesson": "39/rootless-and-layers"
+  },
+  {
+   "term": "overlayfs",
+   "def": "A union file system that merges a read-only lower layer with a writable upper layer.",
+   "lesson": "39/rootless-and-layers"
+  },
+  {
+   "term": "Whiteout",
+   "def": "A marker in an upper layer that hides a file of a lower layer.",
+   "lesson": "39/rootless-and-layers"
+  },
+  {
+   "term": "runc",
+   "def": "The reference OCI runtime that creates containers from a config.json.",
+   "lesson": "39/container-by-hand"
+  },
+  {
+   "term": "Rootless container",
+   "def": "A container run by an unprivileged user via user namespaces.",
+   "lesson": "39/rootless-and-layers"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "sudo chroot DIR CMD",
+   "desc": "Run CMD with DIR as the root.",
+   "topic": "Containers",
+   "lesson": "39/container-by-hand"
+  },
+  {
+   "cmd": "sudo docker export ID | tar -x -C DIR",
+   "desc": "Extract a container's file system.",
+   "topic": "Containers",
+   "lesson": "39/container-by-hand"
+  },
+  {
+   "cmd": "sudo docker inspect -f '{{.State.Pid}}' NAME",
+   "desc": "Get a container's host PID.",
+   "topic": "Containers",
+   "lesson": "39/container-by-hand"
+  },
+  {
+   "cmd": "unshare --user --map-root-user --mount CMD",
+   "desc": "Create a user and mount namespace without root.",
+   "topic": "Containers",
+   "lesson": "39/rootless-and-layers"
+  },
+  {
+   "cmd": "sudo mount -t overlay overlay -o lowerdir=L,upperdir=U,workdir=W M",
+   "desc": "Mount a layered file system.",
+   "topic": "Containers",
+   "lesson": "39/rootless-and-layers"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

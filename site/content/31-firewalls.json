@@ -1,0 +1,465 @@
+{
+ "title": "Firewalls",
+ "lessons": [
+  {
+   "id": "netfilter-nftables",
+   "title": "netfilter and nftables: default drop, allow, reject",
+   "level": "intermediate",
+   "goal": "Learn how the kernel's packet filter works, write nftables rules with a default-drop policy, and see the difference between DROP (silence) and REJECT (an answer).\n\nWhy it matters: a firewall mistake is either an outage (you block yourself) or a hole. Seeing the exact effect of each rule type prepares you for both.",
+   "setup": {
+    "note": "A client namespace `lab-c` (10.200.5.1) talks to a server namespace `lab-s` (10.200.5.2) that runs a small web server on port 8080. The firewall rules are written **inside `lab-s` only**, so your real firewall is not touched. Needs sudo, nft and curl.",
+    "commands": [
+     "for n in lab-c lab-s; do sudo ip netns del $n 2>/dev/null; done; true",
+     "sudo ip netns add lab-c; sudo ip netns add lab-s; sudo ip link add vc type veth peer name vs; sudo ip link set vc netns lab-c; sudo ip link set vs netns lab-s",
+     "sudo ip -n lab-c addr add 10.200.5.1/24 dev vc; sudo ip -n lab-s addr add 10.200.5.2/24 dev vs; for n in lab-c lab-s; do sudo ip -n $n link set lo up; done; sudo ip -n lab-c link set vc up; sudo ip -n lab-s link set vs up",
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "netfilter and nftables",
+     "text": "**netfilter** is the kernel framework with **hooks** along the path of a packet (prerouting, input, forward, output, postrouting). Rules attached to those hooks can accept, drop, reject, modify or count packets. **nftables** (`nft`) is the modern way to write the rules; **iptables** is the older front end for the same hooks. A rule is stored in a **chain** inside a **table**; a chain declared with a hook and a **policy** is a *base chain*.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-s python3 -m http.server 8080 --bind 10.200.5.2 > /dev/null 2>&1 & echo $! > srv.pid; sleep 1; echo server started",
+       "output": "[1] 3480173\nserver started"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-c curl -s -m 2 -o /dev/null -w '%{http_code}\\n' http://10.200.5.2:8080/",
+       "output": "200"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-s nft list ruleset | wc -l | awk '{print $1, \"rules loaded in lab-s\"}'",
+       "output": "0 rules loaded in lab-s"
+      }
+     ]
+    },
+    {
+     "title": "Default drop",
+     "text": "We create a table and an `input` chain on the **input** hook (packets addressed to this host) with `policy drop`: anything not explicitly accepted is silently discarded. The client now gets no answer at all and times out.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-s nft add table inet filter",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-s nft 'add chain inet filter input { type filter hook input priority 0; policy drop; }'",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-c curl -s -m 2 -o /dev/null -w 'http=%{http_code} time=%{time_total}s\\n' http://10.200.5.2:8080/; echo \"curl exit code: $?\"",
+       "output": "http=000 time=2.000991s\ncurl exit code: 28"
+      }
+     ],
+     "after": "Exit code 28 means a timeout. From the client's side a dropped packet looks exactly like a dead host."
+    },
+    {
+     "title": "Allow what is needed",
+     "text": "Typical base rules: accept replies to connections we started (`ct state established,related`), accept loopback, then the services you offer. Each rule can have a `counter`.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-s nft add rule inet filter input ct state established,related accept",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-s nft add rule inet filter input iif lo accept",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-s nft add rule inet filter input tcp dport 8080 counter accept",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-c curl -s -m 2 -o /dev/null -w 'http=%{http_code}\\n' http://10.200.5.2:8080/",
+       "output": "http=200"
+      }
+     ]
+    },
+    {
+     "title": "The rule set and its counters",
+     "text": "`nft list ruleset` prints everything. The counter on the `tcp dport 8080` rule counted the packets of the new connection that matched it. Packets of the same connection afterwards match the `established` rule.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-s nft list ruleset | sed -E 's/packets [0-9]+ bytes [0-9]+/packets N bytes N/'",
+       "output": "table inet filter {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t\tct state established,related accept\n\t\tiif \"lo\" accept\n\t\ttcp dport 8080 counter packets N bytes N accept\n\t}\n}"
+      }
+     ],
+     "under": "netfilter tracks connections with **conntrack**: the first packet of a flow is `new`, later ones are `established`. That is why one `established,related accept` rule suffices for return traffic, and why stateful firewalls cost memory (the conntrack table size is `net.netfilter.nf_conntrack_max`)."
+    },
+    {
+     "title": "DROP versus REJECT",
+     "text": "`reject` sends back an error (TCP reset or ICMP unreachable), so the client fails **at once** with `Connection refused`. `drop` makes it wait for the full timeout. REJECT is friendlier for internal services, DROP gives scanners less information. We insert a reject rule above the accept rule.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-s nft insert rule inet filter input tcp dport 8080 counter reject with tcp reset",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-c curl -s -m 5 -o /dev/null -w 'http=%{http_code} time=%{time_total}s\\n' http://10.200.5.2:8080/; echo \"curl exit code: $?\"",
+       "output": "http=000 time=0.000155s\ncurl exit code: 7"
+      }
+     ],
+     "after": "Exit code 7 is `connection refused`, and it came back immediately (time near zero) instead of after 2 seconds."
+    },
+    {
+     "title": "Clean up",
+     "text": "Stop the server and remove the namespaces.",
+     "run": [
+      {
+       "cmd": "sudo kill $(cat srv.pid) 2>/dev/null; sleep 0.3; for n in lab-c lab-s; do sudo ip netns del $n; done; echo removed",
+       "output": "removed"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does a base chain with `policy drop` do with packets no rule accepts?",
+     "options": [
+      "Accepts them",
+      "Silently discards them",
+      "Rejects them with an error",
+      "Logs them only"
+     ],
+     "answer": 1,
+     "explain": "Default drop."
+    },
+    {
+     "q": "What is the client's view of a DROP rule?",
+     "options": [
+      "Connection refused at once",
+      "A timeout",
+      "A redirect",
+      "Success"
+     ],
+     "answer": 1,
+     "explain": "No answer at all."
+    },
+    {
+     "q": "Why do firewalls usually start with `ct state established,related accept`?",
+     "options": [
+      "It is faster only",
+      "Replies to connections you opened and related traffic must be allowed back",
+      "It enables NAT",
+      "It resets the table"
+     ],
+     "answer": 1,
+     "explain": "Return traffic would otherwise be dropped."
+    },
+    {
+     "q": "Which tool is the modern front end for netfilter?",
+     "options": [
+      "ipchains",
+      "nftables (nft)",
+      "ifconfig",
+      "tc"
+     ],
+     "answer": 1,
+     "explain": "nft replaces iptables."
+    }
+   ],
+   "check": {
+    "scenario": "You are logged in over SSH and must tighten the firewall to default-drop remotely. How do you avoid locking yourself out?",
+    "answer": "Put the `accept` rules for SSH (and `established,related`) in place **before** switching the policy to drop, apply the change with an automatic rollback (`nft -f new.rules` inside `timeout 60 ... || nft -f old.rules`, or `at now + 2 minutes` to flush), test in a second session, and keep console access."
+   }
+  },
+  {
+   "id": "nat-and-firewalld",
+   "title": "NAT with nftables, iptables compatibility and firewalld",
+   "level": "advanced",
+   "goal": "Publish a server behind a router with destination NAT (port forwarding), see that `iptables` rules are stored by nftables underneath, and read a firewalld configuration.\n\nWhy it matters: port forwarding, masquerading and container networking are all NAT rules. firewalld is the default front end on Red Hat systems, so you need to read what it generates.",
+   "setup": {
+    "note": "These steps reuse the three-namespace lab: lab-a (10.200.1.1) - lab-b, a router with two addresses - lab-c (10.200.2.2). A web server runs in lab-c; the router publishes it on its own address with NAT. The last step reads (and does not change) the real firewalld of this machine. Needs sudo, nft and curl.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "for n in lab-a lab-b lab-c; do sudo ip netns del $n 2>/dev/null; done; true",
+     "for n in lab-a lab-b lab-c; do sudo ip netns add $n; sudo ip -n $n link set lo up; done",
+     "sudo ip link add va type veth peer name vb1; sudo ip link set va netns lab-a; sudo ip link set vb1 netns lab-b",
+     "sudo ip link add vb2 type veth peer name vc; sudo ip link set vb2 netns lab-b; sudo ip link set vc netns lab-c",
+     "sudo ip -n lab-a addr add 10.200.1.1/24 dev va; sudo ip -n lab-b addr add 10.200.1.2/24 dev vb1; sudo ip -n lab-b addr add 10.200.2.1/24 dev vb2; sudo ip -n lab-c addr add 10.200.2.2/24 dev vc",
+     "sudo ip -n lab-a link set va up; sudo ip -n lab-b link set vb1 up; sudo ip -n lab-b link set vb2 up; sudo ip -n lab-c link set vc up",
+     "sudo ip netns exec lab-b sysctl -qw net.ipv4.ip_forward=1",
+     "sudo ip -n lab-a route add 10.200.2.0/24 via 10.200.1.2; sudo ip -n lab-c route add 10.200.1.0/24 via 10.200.2.1"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The server behind the router",
+     "text": "The web server listens on `lab-c` (10.200.2.2:8080). `lab-a` can reach it directly because `lab-b` routes. We want `lab-a` to reach it through the router's address instead: `10.200.1.2:9090`.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-c python3 -m http.server 8080 --bind 10.200.2.2 > /dev/null 2>&1 & echo $! > srv.pid; sleep 1",
+       "output": "[1] 3480355"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a curl -s -m 2 -o /dev/null -w 'direct: http=%{http_code}\\n' http://10.200.2.2:8080/",
+       "output": "direct: http=200"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a curl -s -m 2 -o /dev/null -w 'via router: http=%{http_code}\\n' http://10.200.1.2:9090/; echo \"curl exit code: $?\"",
+       "output": "via router: http=000\ncurl exit code: 7"
+      }
+     ]
+    },
+    {
+     "title": "Destination NAT (port forwarding)",
+     "text": "A rule in the **prerouting** hook of a `nat` table rewrites the destination of arriving packets **before** the routing decision. Packets for `10.200.1.2:9090` get the new destination `10.200.2.2:8080`. The kernel remembers the translation in conntrack and rewrites the replies back automatically.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-b nft add table ip nat",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-b nft 'add chain ip nat prerouting { type nat hook prerouting priority -100; }'",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-b nft add rule ip nat prerouting ip daddr 10.200.1.2 tcp dport 9090 counter dnat to 10.200.2.2:8080",
+       "output": ""
+      },
+      {
+       "cmd": "sudo ip netns exec lab-a curl -s -m 2 -o /dev/null -w 'via router: http=%{http_code}\\n' http://10.200.1.2:9090/",
+       "output": "via router: http=200"
+      }
+     ],
+     "under": "The packet is never rewritten again by you: conntrack stores the original and translated tuples. The reply from 10.200.2.2:8080 is translated back to 10.200.1.2:9090 on its way out, so the client believes it talked to the router. **Source NAT / masquerade** does the opposite for outgoing traffic: it rewrites the source address to the router's public one (how a home router or a container host shares one address)."
+    },
+    {
+     "title": "See the translation",
+     "text": "The conntrack table lists the original and the reply direction of each tracked flow, if the tool is installed. The nftables counter proves the rule matched.",
+     "run": [
+      {
+       "cmd": "sudo ip netns exec lab-b nft list ruleset | sed -E 's/packets [0-9]+ bytes [0-9]+/packets N bytes N/'",
+       "output": "table ip nat {\n\tchain prerouting {\n\t\ttype nat hook prerouting priority dstnat; policy accept;\n\t\tip daddr 10.200.1.2 tcp dport 9090 counter packets N bytes N dnat to 10.200.2.2:8080\n\t}\n}"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-b cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null | awk '{print \"tracked flows in lab-b:\", ($1 >= 0)}'",
+       "output": "tracked flows in lab-b: 1"
+      }
+     ]
+    },
+    {
+     "title": "iptables is a front end for the same hooks",
+     "text": "On current distributions `iptables` is a compatibility program that translates its rules into nftables. A rule added with `iptables` therefore shows up in `nft list ruleset`.",
+     "run": [
+      {
+       "cmd": "iptables --version | sed -E 's/ v[0-9.]+//'",
+       "output": "iptables (nf_tables)"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-b iptables -A FORWARD -p tcp --dport 8080 -j ACCEPT; sudo ip netns exec lab-b iptables -S FORWARD",
+       "output": "-P FORWARD ACCEPT\n-A FORWARD -p tcp -m tcp --dport 8080 -j ACCEPT"
+      },
+      {
+       "cmd": "sudo ip netns exec lab-b nft list ruleset | grep -B1 -A4 'chain FORWARD' | head -n 7",
+       "output": "table ip filter {\n\tchain FORWARD {\n\t\ttype filter hook forward priority filter; policy accept;\n\t\ttcp dport 8080 counter packets 0 bytes 0 accept\n\t}\n}"
+      }
+     ]
+    },
+    {
+     "title": "firewalld: the usual front end",
+     "text": "firewalld groups interfaces into **zones**, each with allowed services and ports. It generates nftables rules. Changes have a **runtime** and a **permanent** configuration. We only read this machine's firewall.",
+     "run": [
+      {
+       "cmd": "sudo firewall-cmd --state",
+       "output": "running"
+      },
+      {
+       "cmd": "sudo firewall-cmd --get-default-zone",
+       "output": "public"
+      },
+      {
+       "cmd": "sudo firewall-cmd --list-services",
+       "output": "dhcpv6-client ssh"
+      },
+      {
+       "cmd": "sudo firewall-cmd --permanent --add-port=8080/tcp && sudo firewall-cmd --reload",
+       "explanationOnly": true,
+       "reason": "it would open a port on this machine; shown as the command you would run"
+      }
+     ]
+    },
+    {
+     "title": "Clean up",
+     "text": "Stop the server and remove the namespaces.",
+     "run": [
+      {
+       "cmd": "sudo kill $(cat srv.pid) 2>/dev/null; sleep 0.3; for n in lab-a lab-b lab-c; do sudo ip netns del $n; done; ip netns list | wc -l | awk '{print $1, \"namespaces left\"}'",
+       "output": "0 namespaces left"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which hook is used for destination NAT (port forwarding)?",
+     "options": [
+      "postrouting",
+      "prerouting",
+      "output only",
+      "ingress"
+     ],
+     "answer": 1,
+     "explain": "Before routing, so the new destination is routed."
+    },
+    {
+     "q": "What does masquerade do?",
+     "options": [
+      "Hides the packet payload",
+      "Rewrites the source address of outgoing packets to the outgoing interface's address",
+      "Blocks outgoing traffic",
+      "Rewrites MAC addresses"
+     ],
+     "answer": 1,
+     "explain": "Source NAT for dynamic addresses."
+    },
+    {
+     "q": "Where do rules added with `iptables` end up on a modern system?",
+     "options": [
+      "In /etc/iptables only",
+      "In the kernel's nftables ruleset",
+      "In firewalld only",
+      "Nowhere"
+     ],
+     "answer": 1,
+     "explain": "iptables-nft translates to nftables."
+    },
+    {
+     "q": "Which command line shows firewalld's active zones and their rules?",
+     "options": [
+      "firewall-cmd --list-all",
+      "iptables -t nat",
+      "ip route",
+      "ss -l"
+     ],
+     "answer": 0,
+     "explain": "`firewall-cmd --list-all`."
+    }
+   ],
+   "check": {
+    "scenario": "A container published with `-p 8080:80` is reachable from the host but not from other machines. Where do you look?",
+    "answer": "At the host's firewall: the **FORWARD** and the **INPUT/zone** rules (firewalld zone, `iptables -S`/`nft list ruleset` for DOCKER chains), `net.ipv4.ip_forward`, whether the port is bound to `127.0.0.1` only (`ss -ltnp`), and the cloud security group. Check the NAT rule exists (`nft list table ip nat` or `iptables -t nat -S`) and watch counters while testing."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is netfilter?",
+   "a": "The packet-filtering framework in the Linux kernel: hooks on the packet path where rules (nftables/iptables) can accept, drop, modify or track packets. See [the lesson](#/lesson/31/netfilter-nftables).",
+   "level": "beginner"
+  },
+  {
+   "q": "nftables or iptables?",
+   "a": "nftables is the current framework (one tool, sets, atomic rule replacement). iptables is a compatibility front end that now creates nftables rules.",
+   "level": "intermediate"
+  },
+  {
+   "q": "DROP versus REJECT?",
+   "a": "DROP discards silently (client waits for a timeout). REJECT sends an error (reset or ICMP), so the client fails immediately.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How do you write a safe default-deny firewall?",
+   "a": "Accept established/related, loopback and the services you offer first; then set policy drop. Keep a way back (console, timed rollback). See [the lesson](#/lesson/31/netfilter-nftables).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What are DNAT and SNAT/masquerade?",
+   "a": "DNAT rewrites the destination (port forwarding) in prerouting; SNAT/masquerade rewrites the source (sharing an address) in postrouting. Conntrack translates replies back. See [the NAT lesson](#/lesson/31/nat-and-firewalld).",
+   "level": "advanced"
+  },
+  {
+   "q": "How does firewalld relate to nftables?",
+   "a": "firewalld is a manager with zones, services and runtime/permanent config; it generates nftables rules. Do not mix manual nft rules with firewalld unless you know the order.",
+   "level": "intermediate"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "netfilter",
+   "def": "The kernel's packet-filtering and NAT framework.",
+   "lesson": "31/netfilter-nftables"
+  },
+  {
+   "term": "nftables",
+   "def": "The current tool and rule language for netfilter.",
+   "lesson": "31/netfilter-nftables"
+  },
+  {
+   "term": "Chain",
+   "def": "An ordered list of rules in a table; a base chain is attached to a hook.",
+   "lesson": "31/netfilter-nftables"
+  },
+  {
+   "term": "conntrack",
+   "def": "Connection tracking: the kernel table that remembers flows for stateful rules and NAT.",
+   "lesson": "31/netfilter-nftables"
+  },
+  {
+   "term": "DNAT",
+   "def": "Destination NAT: rewriting the destination of packets (port forwarding).",
+   "lesson": "31/nat-and-firewalld"
+  },
+  {
+   "term": "Masquerade",
+   "def": "Source NAT using the address of the outgoing interface.",
+   "lesson": "31/nat-and-firewalld"
+  },
+  {
+   "term": "firewalld",
+   "def": "A firewall manager with zones, services and runtime/permanent configuration.",
+   "lesson": "31/nat-and-firewalld"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "sudo nft list ruleset",
+   "desc": "Show all nftables rules.",
+   "topic": "Firewall",
+   "lesson": "31/netfilter-nftables"
+  },
+  {
+   "cmd": "sudo nft add table inet filter",
+   "desc": "Create a table.",
+   "topic": "Firewall",
+   "lesson": "31/netfilter-nftables"
+  },
+  {
+   "cmd": "sudo nft add rule inet filter input tcp dport 22 accept",
+   "desc": "Allow SSH.",
+   "topic": "Firewall",
+   "lesson": "31/netfilter-nftables"
+  },
+  {
+   "cmd": "sudo nft flush ruleset",
+   "desc": "Remove all rules.",
+   "topic": "Firewall",
+   "lesson": "31/netfilter-nftables"
+  },
+  {
+   "cmd": "sudo iptables -S",
+   "desc": "List iptables rules in command form.",
+   "topic": "Firewall",
+   "lesson": "31/nat-and-firewalld"
+  },
+  {
+   "cmd": "sudo firewall-cmd --list-all",
+   "desc": "Show the active zone configuration.",
+   "topic": "Firewall",
+   "lesson": "31/nat-and-firewalld"
+  },
+  {
+   "cmd": "sudo firewall-cmd --permanent --add-service=http",
+   "desc": "Allow a service permanently.",
+   "topic": "Firewall",
+   "lesson": "31/nat-and-firewalld"
+  },
+  {
+   "cmd": "sudo firewall-cmd --reload",
+   "desc": "Apply the permanent configuration.",
+   "topic": "Firewall",
+   "lesson": "31/nat-and-firewalld"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

@@ -1,0 +1,618 @@
+{
+ "title": "Package management",
+ "lessons": [
+  {
+   "id": "rpm-dnf",
+   "title": "Packages on Red Hat family systems: rpm and dnf",
+   "level": "beginner",
+   "goal": "Learn how to ask which package owns a file, inspect a package, and install and remove software with `dnf`.\n\nWhy it matters: installing from a package manager gives you dependency resolution, verification and clean removal. Copying files by hand gives you none of that.",
+   "setup": {
+    "note": "Steps with sudo change the system (they install and remove one small package). Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "rpm: the low-level tool",
+     "text": "An **rpm** file is an archive of files plus metadata (name, version, dependencies, scripts). `rpm` installs and queries individual files, and it keeps a database of what is installed.",
+     "run": [
+      {
+       "cmd": "rpm -q bash",
+       "output": "bash-5.1.8-9.el9.aarch64"
+      },
+      {
+       "cmd": "rpm -qf /usr/bin/ls",
+       "output": "coreutils-8.32-41.0.1.el9_8.aarch64"
+      },
+      {
+       "cmd": "rpm -qi coreutils | grep -E '^(Name|Version|Architecture|License|Summary)'",
+       "output": "Name        : coreutils\nVersion     : 8.32\nArchitecture: aarch64\nLicense     : GPLv3+\nSummary     : A set of basic GNU tools commonly used in shell scripts"
+      }
+     ]
+    },
+    {
+     "title": "What is inside a package",
+     "text": "`rpm -ql` lists the files a package installed. `rpm -qR` lists what it requires.",
+     "run": [
+      {
+       "cmd": "rpm -ql tree | head -n 4",
+       "output": "/usr/bin/tree\n/usr/lib/.build-id\n/usr/lib/.build-id/fb\n/usr/lib/.build-id/fb/4a4487866056a49f965ff6e9895f24675b014b"
+      },
+      {
+       "cmd": "rpm -qR bash | head -n 4",
+       "output": "/usr/bin/sh\nconfig(bash) = 5.1.8-9.el9\nfilesystem >= 3\nld-linux-aarch64.so.1()(64bit)"
+      }
+     ]
+    },
+    {
+     "title": "Verify that files are unchanged",
+     "text": "`rpm -V` compares the installed files with the database (size, checksum, mode, owner). No output means everything matches. A letter in the output marks a difference.",
+     "run": [
+      {
+       "cmd": "rpm -V tree; echo \"exit code: $?\"",
+       "output": "exit code: 0"
+      },
+      {
+       "cmd": "sudo sh -c 'echo x >> /usr/bin/tree'; rpm -V tree | cut -c1-12; sudo dnf -q -y reinstall tree 2>&1 | tail -n 1; rpm -V tree; echo \"exit code: $?\"",
+       "output": "S.5....T.   \n\nexit code: 0"
+      }
+     ],
+     "after": "`S.5....T.` means: Size, md5/sha digest and mtime changed. After the reinstall the file is original again."
+    },
+    {
+     "title": "dnf: the high-level tool",
+     "text": "`dnf` reads **repositories** (online catalogs of packages), solves dependencies, downloads and calls rpm. `dnf repolist` lists the enabled repositories. The option `-C` means \"use the cached metadata\", which is much faster than refreshing it every time.",
+     "run": [
+      {
+       "cmd": "dnf -C -q repolist | awk '{print $1}' | head -n 4",
+       "output": "repo\ndocker-ce-stable\nol9_UEKR8\nol9_addons"
+      },
+      {
+       "cmd": "dnf -C -q info dos2unix | grep -E '^(Name|Version|Repository|Summary)'",
+       "output": "Name         : dos2unix\nVersion      : 7.4.2\nRepository   : ol9_baseos_latest\nSummary      : Text file format converters\nName         : dos2unix\nVersion      : 7.4.2\nRepository   : ol9_baseos_latest\nSummary      : Text file format converters"
+      }
+     ]
+    },
+    {
+     "title": "Install and remove",
+     "text": "`dnf install` brings in the package and everything it needs. `dnf remove` takes out the package. `rpm -q` shows whether it is installed.",
+     "run": [
+      {
+       "cmd": "sudo dnf -q -y install dos2unix 2>&1 | tail -n 2; rpm -q dos2unix",
+       "output": "  dos2unix-7.4.2-4.el9.aarch64                                                  \n\ndos2unix-7.4.2-4.el9.aarch64"
+      },
+      {
+       "cmd": "rpm -ql dos2unix | grep bin",
+       "output": "/usr/bin/dos2unix\n/usr/bin/mac2unix\n/usr/bin/unix2dos\n/usr/bin/unix2mac"
+      },
+      {
+       "cmd": "sudo dnf -q -y remove dos2unix 2>&1 | tail -n 1; rpm -q dos2unix",
+       "output": "\npackage dos2unix is not installed"
+      }
+     ]
+    },
+    {
+     "title": "Which package provides a file?",
+     "text": "When a command is missing, find out which package contains it. `dnf provides` searches the repositories, including packages that are not installed.",
+     "run": [
+      {
+       "cmd": "dnf -C -q provides '*/bin/dos2unix' 2>&1 | head -n 2",
+       "output": "dos2unix-7.4.2-4.el9.aarch64 : Text file format converters\nRepo        : ol9_baseos_latest"
+      }
+     ],
+     "under": "Installed packages are recorded in the rpm database under `/var/lib/rpm`. The dependency solver (libsolv) loads the metadata of all enabled repositories and finds a set of packages that satisfies every requirement without conflicts. That is why you should not delete package files by hand: the database would still list them."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which command shows the package that owns `/usr/bin/ls`?",
+     "options": [
+      "rpm -ql ls",
+      "rpm -qf /usr/bin/ls",
+      "dnf list ls",
+      "rpm -V /usr/bin/ls"
+     ],
+     "answer": 1,
+     "explain": "`-qf` queries by file."
+    },
+    {
+     "q": "What does `rpm -V PKG` print when nothing changed?",
+     "options": [
+      "OK",
+      "Nothing",
+      "The version",
+      "All files"
+     ],
+     "answer": 1,
+     "explain": "Silence means the installed files match the database."
+    },
+    {
+     "q": "What does dnf do that plain rpm does not?",
+     "options": [
+      "Resolves dependencies from repositories",
+      "Reads .rpm files",
+      "Verifies files",
+      "Lists files"
+     ],
+     "answer": 0,
+     "explain": "dnf downloads and installs what is needed."
+    },
+    {
+     "q": "A command is not found. How do you find the package that provides it?",
+     "options": [
+      "dnf provides '*/bin/NAME'",
+      "rpm -qf NAME",
+      "dnf list",
+      "which NAME"
+     ],
+     "answer": 0,
+     "explain": "`dnf provides` also searches uninstalled packages."
+    }
+   ],
+   "check": {
+    "scenario": "You suspect someone replaced /usr/bin/ssh with a trojan. How do you check on an RPM system, and what is the limit of that check?",
+    "answer": "`rpm -Vf /usr/bin/ssh` (or `rpm -Va` for everything) compares the file with the database; changed size or digest shows up. The limit: an attacker with root can also change the database or the `rpm` binary. For a trusted check boot from known-good media or compare against the vendor package (`rpm -K`, `dnf reinstall` and compare)."
+   }
+  },
+  {
+   "id": "dpkg-apt",
+   "title": "Packages on Debian family systems: dpkg and apt",
+   "level": "intermediate",
+   "goal": "Learn the Debian equivalents of rpm and dnf and how to translate between the two worlds.\n\nWhy it matters: many servers run Ubuntu or Debian. The concepts are identical, only the commands differ.",
+   "setup": {
+    "note": "This lesson uses an Ubuntu container so you can see the Debian tools. If you have an Ubuntu or Debian machine, skip the first line and run the commands there without `sudo docker exec ubu`.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo docker rm -f ubu >/dev/null 2>&1; sudo docker run -d --name ubu ubuntu:24.04 sleep 3600 >/dev/null"
+    ]
+   },
+   "steps": [
+    {
+     "title": "dpkg: the low-level tool",
+     "text": "`.deb` packages are installed and queried by `dpkg`. `dpkg -S FILE` finds the owner of a file (like `rpm -qf`), `dpkg -L PKG` lists files (like `rpm -ql`).",
+     "run": [
+      {
+       "cmd": "sudo docker exec ubu dpkg -S /bin/ls",
+       "output": "dpkg-query: no path found matching pattern /bin/ls"
+      },
+      {
+       "cmd": "sudo docker exec ubu dpkg -l bash | tail -n 1 | awk '{print $1, $2, $3}'",
+       "output": "ii bash 5.2.21-2ubuntu4"
+      },
+      {
+       "cmd": "sudo docker exec ubu dpkg -L coreutils | head -n 3",
+       "output": "/.\n/usr\n/usr/bin"
+      }
+     ]
+    },
+    {
+     "title": "apt: repositories and dependencies",
+     "text": "`apt` is the high-level tool. Repositories are listed in `/etc/apt/sources.list.d/`. `apt-get update` downloads the package lists. Nothing is installed by it.",
+     "run": [
+      {
+       "cmd": "sudo docker exec ubu sh -c 'grep -E \"^(Types|URIs|Suites)\" /etc/apt/sources.list.d/ubuntu.sources | head -n 3'",
+       "output": "Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports/\nSuites: noble noble-updates noble-backports"
+      },
+      {
+       "cmd": "sudo docker exec ubu sh -c 'apt-get update -qq 2>&1 | tail -n 2; echo \"update exit: $?\"'",
+       "output": "update exit: 0"
+      }
+     ]
+    },
+    {
+     "title": "Install, inspect, remove",
+     "text": "`apt-get install` resolves and installs dependencies. `apt-cache depends` shows what a package needs.",
+     "run": [
+      {
+       "cmd": "sudo docker exec ubu sh -c 'apt-get install -y -qq tree > /dev/null 2>&1; dpkg -l tree | tail -n 1 | awk \"{print \\$1, \\$2}\"'",
+       "output": "ii tree"
+      },
+      {
+       "cmd": "sudo docker exec ubu apt-cache depends tree | head -n 3",
+       "output": "tree\n  Depends: libc6"
+      },
+      {
+       "cmd": "sudo docker exec ubu sh -c 'apt-get remove -y -qq tree > /dev/null 2>&1; dpkg -l tree | tail -n 1 | awk \"{print \\$1, \\$2}\"'",
+       "output": "dpkg-query: no packages found matching tree"
+      }
+     ],
+     "after": "After `remove` the state is `rc`: the package is gone but its configuration files remain. `purge` would delete them too."
+    },
+    {
+     "title": "The translation table",
+     "text": "The concepts map one to one.\n\n- Owner of a file: `rpm -qf FILE` / `dpkg -S FILE`\n- Files of a package: `rpm -ql PKG` / `dpkg -L PKG`\n- Installed list: `rpm -qa` / `dpkg -l`\n- Refresh metadata: `dnf makecache` / `apt-get update`\n- Install: `dnf install PKG` / `apt-get install PKG`\n- Remove: `dnf remove PKG` / `apt-get remove PKG`\n- Search: `dnf search WORD` / `apt-cache search WORD`\n- Upgrade all: `dnf upgrade` / `apt-get upgrade`",
+     "run": [
+      {
+       "cmd": "sudo docker exec ubu sh -c 'apt-cache search \"directory listing\" | head -n 2 | cut -c1-70'",
+       "output": "libfile-listing-perl - module to parse directory listings\nhttpdirfs - filesystem client for HTTP directory listings"
+      }
+     ],
+     "under": "Both systems keep a **database of installed files and versions** (`/var/lib/dpkg/status` and `/var/lib/rpm`) and a **dependency solver** over repository metadata. Package scripts (preinst, postinst) run as root, which is why you only add repositories you trust."
+    },
+    {
+     "title": "Clean up",
+     "text": "Remove the helper container.",
+     "run": [
+      {
+       "cmd": "sudo docker rm -f ubu",
+       "output": "ubu"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which command finds the package that owns /bin/ls on Debian?",
+     "options": [
+      "dpkg -S /bin/ls",
+      "dpkg -L ls",
+      "apt list ls",
+      "rpm -qf /bin/ls"
+     ],
+     "answer": 0,
+     "explain": "`dpkg -S` is the equivalent of `rpm -qf`."
+    },
+    {
+     "q": "What does `apt-get update` do?",
+     "options": [
+      "Upgrades all packages",
+      "Downloads the package lists from the repositories",
+      "Installs updates",
+      "Cleans the cache"
+     ],
+     "answer": 1,
+     "explain": "It refreshes metadata only."
+    },
+    {
+     "q": "After `apt-get remove`, config files...",
+     "options": [
+      "are deleted",
+      "remain (state rc)",
+      "are encrypted",
+      "move to /tmp"
+     ],
+     "answer": 1,
+     "explain": "Use `purge` to delete them too."
+    },
+    {
+     "q": "Which is the Debian counterpart of `dnf provides`?",
+     "options": [
+      "apt-file search",
+      "dpkg -i",
+      "apt-get clean",
+      "dpkg --configure"
+     ],
+     "answer": 0,
+     "explain": "`apt-file search` (package apt-file) searches files in all repository packages."
+    }
+   ],
+   "check": {
+    "scenario": "An Ubuntu server shows `E: Unable to locate package foo`. List the likely causes.",
+    "answer": "1. You did not run `apt-get update`, so the package lists are empty or stale.\n2. The package is in a repository that is not enabled (for example `universe`).\n3. The name is wrong or differs by release.\n4. No network or proxy to the mirror."
+   }
+  },
+  {
+   "id": "build-from-source",
+   "title": "Building from source with make",
+   "level": "advanced",
+   "goal": "Learn what happens in `./configure && make && make install`, how `make` decides what to rebuild, and why a source install is invisible to the package manager.\n\nWhy it matters: sometimes no package exists. You should know how to build safely, where the files go, and how to avoid a mess.",
+   "setup": {
+    "note": "Steps with sudo change the system (they install and remove one small package). Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab"
+    ]
+   },
+   "steps": [
+    {
+     "title": "A tiny project: the source",
+     "text": "`hello.c` is a program with one job. Save it as `hello.c`.",
+     "code": {
+      "file": "hello.c",
+      "lang": "c",
+      "src": "#include <stdio.h>\n\nint main(void) {\n    puts(\"hello from source\");\n    return 0;\n}\n"
+     },
+     "run": [
+      {
+       "cmd": "cat hello.c",
+       "output": "#include <stdio.h>\n\nint main(void) {\n    puts(\"hello from source\");\n    return 0;\n}"
+      }
+     ]
+    },
+    {
+     "title": "The Makefile",
+     "text": "A **Makefile** lists **targets**, their **prerequisites** and the command to build each (the recipe). A recipe line must start with a TAB, not spaces. `make` rebuilds a target when a prerequisite is newer than it.",
+     "code": {
+      "file": "Makefile",
+      "lang": "make",
+      "src": "PREFIX ?= /usr/local\nCFLAGS ?= -O2 -Wall\n\nhello: hello.o\n\t$(CC) -o $@ $<\n\nhello.o: hello.c\n\t$(CC) $(CFLAGS) -c -o $@ $<\n\ninstall: hello\n\tinstall -D -m 755 hello $(DESTDIR)$(PREFIX)/bin/hello\n\nclean:\n\trm -f hello hello.o\n"
+     },
+     "run": [
+      {
+       "cmd": "cat -A Makefile | sed -n '5,6p'",
+       "output": "^I$(CC) -o $@ $<$\n$"
+      }
+     ]
+    },
+    {
+     "title": "Build",
+     "text": "`make` builds the first target, `hello`. It sees that `hello` needs `hello.o`, and `hello.o` needs `hello.c`, so it compiles first and links second.",
+     "run": [
+      {
+       "cmd": "ls",
+       "output": "hello.c\nMakefile"
+      },
+      {
+       "cmd": "make",
+       "output": "cc -O2 -Wall -c -o hello.o hello.c\ncc -o hello hello.o"
+      },
+      {
+       "cmd": "./hello",
+       "output": "hello from source"
+      }
+     ]
+    },
+    {
+     "title": "make rebuilds only what changed",
+     "text": "A second `make` does nothing. After you change the source, only the affected steps run. `make -n` shows what it would do without doing it.",
+     "run": [
+      {
+       "cmd": "make",
+       "output": "make: 'hello' is up to date."
+      },
+      {
+       "cmd": "touch hello.c; make -n",
+       "output": "cc -O2 -Wall -c -o hello.o hello.c\ncc -o hello hello.o"
+      },
+      {
+       "cmd": "make",
+       "output": "cc -O2 -Wall -c -o hello.o hello.c\ncc -o hello hello.o"
+      }
+     ]
+    },
+    {
+     "title": "Install into a prefix, not the system",
+     "text": "`PREFIX` says where the program goes. `DESTDIR` is a staging root that packagers use. Installing under your own directory needs no root and is easy to remove.",
+     "run": [
+      {
+       "cmd": "make install PREFIX=/usr/local DESTDIR=/tmp/lab/stage",
+       "output": "install -D -m 755 hello /tmp/lab/stage/usr/local/bin/hello"
+      },
+      {
+       "cmd": "find /tmp/lab/stage -type f",
+       "output": "/tmp/lab/stage/usr/local/bin/hello"
+      },
+      {
+       "cmd": "/tmp/lab/stage/usr/local/bin/hello",
+       "output": "hello from source"
+      }
+     ]
+    },
+    {
+     "title": "The package manager does not know about it",
+     "text": "Files you installed by hand are not in the rpm database. `rpm -qf` cannot find an owner, so updates and removal are your job.",
+     "run": [
+      {
+       "cmd": "rpm -qf /tmp/lab/stage/usr/local/bin/hello",
+       "output": "file /tmp/lab/stage/usr/local/bin/hello is not owned by any package"
+      },
+      {
+       "cmd": "ldd hello | awk '{print $1}' | head -n 3",
+       "output": "linux-vdso.so.1\nlibc.so.6\n/lib/ld-linux-aarch64.so.1"
+      },
+      {
+       "cmd": "file hello | cut -d, -f1-2",
+       "output": "hello: ELF 64-bit LSB executable, ARM aarch64"
+      }
+     ],
+     "under": "`make` compares **modification times** of files. If the clock is wrong or files are copied with wrong times, builds go stale. The classic `./configure` script (autotools) checks your system and writes a Makefile; then `make` builds and `make install` copies the files. Prefer a package (`rpmbuild` or `checkinstall`) or a prefix such as `/opt/NAME` so uninstall is simple."
+    },
+    {
+     "title": "The autotools recipe",
+     "text": "Most open-source tarballs use this sequence. The commands are shown here only; they need a project to build.",
+     "run": [
+      {
+       "cmd": "tar xf project-1.0.tar.gz && cd project-1.0 && ./configure --prefix=/opt/project && make -j\"$(nproc)\" && sudo make install",
+       "explanationOnly": true,
+       "reason": "needs a real source tarball; the Makefile steps above show the same stages"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "When does `make` rebuild a target?",
+     "options": [
+      "Always",
+      "When a prerequisite is newer than the target",
+      "Only with -B",
+      "Once a day"
+     ],
+     "answer": 1,
+     "explain": "It compares modification times."
+    },
+    {
+     "q": "What is DESTDIR for?",
+     "options": [
+      "Choosing the compiler",
+      "A staging root in front of the install paths",
+      "The build directory",
+      "The man page path"
+     ],
+     "answer": 1,
+     "explain": "Packagers install into a staging tree and then archive it."
+    },
+    {
+     "q": "Why is `make install` into /usr/local a maintenance problem?",
+     "options": [
+      "It is slow",
+      "The package manager cannot track or remove the files",
+      "It needs a reboot",
+      "It deletes system files"
+     ],
+     "answer": 1,
+     "explain": "`rpm -qf` showed no owner."
+    },
+    {
+     "q": "What character must start a Makefile recipe line?",
+     "options": [
+      "A space",
+      "A TAB",
+      "A hash",
+      "A dollar sign"
+     ],
+     "answer": 1,
+     "explain": "Recipes are indented with a TAB."
+    }
+   ],
+   "check": {
+    "scenario": "You must install a newer tool than your distribution offers, on 20 servers, and be able to remove it cleanly. What do you do instead of `make install` on each server?",
+    "answer": "Build once and make a **package** (rpm or deb, for example with `rpmbuild`, `fpm` or `checkinstall`) or install under `/opt/TOOL-VERSION` with a symlink, and distribute that artifact with your config management. Then install, upgrade and removal are tracked."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is the difference between rpm and dnf?",
+   "a": "rpm works on single package files and the local database. dnf adds repositories, dependency resolution and downloads, and calls rpm. See [the lesson](#/lesson/7/rpm-dnf).",
+   "level": "beginner"
+  },
+  {
+   "q": "How do you find which package owns a file, on RPM and on Debian?",
+   "a": "`rpm -qf FILE` and `dpkg -S FILE`. See [the translation table](#/lesson/7/dpkg-apt).",
+   "level": "beginner"
+  },
+  {
+   "q": "How can you check that installed files were not modified?",
+   "a": "`rpm -V PKG` (RPM) or `debsums` (Debian). It compares size, digest, mode and owner with the package database. See [rpm -V](#/lesson/7/rpm-dnf).",
+   "level": "intermediate"
+  },
+  {
+   "q": "What does `./configure && make && make install` do?",
+   "a": "configure probes the system and writes a Makefile, make compiles, make install copies files to the prefix. See [the lesson](#/lesson/7/build-from-source).",
+   "level": "intermediate"
+  },
+  {
+   "q": "Why is installing from source into /usr/local risky on a managed server?",
+   "a": "The package manager does not track the files, so upgrades, conflicts and removal become manual. Use a package or an /opt prefix.",
+   "level": "advanced"
+  },
+  {
+   "q": "What does apt-get update do and what does it not do?",
+   "a": "It downloads repository package lists only. It installs and upgrades nothing.",
+   "level": "beginner"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Package",
+   "def": "An archive of files plus metadata and scripts, installed and tracked by a package manager.",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "term": "Repository",
+   "def": "An online catalog of packages with signed metadata.",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "term": "Dependency",
+   "def": "Another package or library a package needs in order to work.",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "term": "rpm",
+   "def": "Low-level package tool and format of Red Hat family distributions.",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "term": "dpkg",
+   "def": "Low-level package tool of Debian family distributions (.deb).",
+   "lesson": "7/dpkg-apt"
+  },
+  {
+   "term": "Makefile",
+   "def": "A file that lists build targets, prerequisites and recipes for make.",
+   "lesson": "7/build-from-source"
+  },
+  {
+   "term": "DESTDIR",
+   "def": "A staging root put in front of install paths so a build can be packaged without touching the system.",
+   "lesson": "7/build-from-source"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "rpm -qf FILE",
+   "desc": "Find the package that owns FILE.",
+   "topic": "Packages",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "cmd": "rpm -ql PKG",
+   "desc": "List files of a package.",
+   "topic": "Packages",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "cmd": "rpm -V PKG",
+   "desc": "Verify installed files of a package.",
+   "topic": "Packages",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "cmd": "dnf install PKG",
+   "desc": "Install PKG with dependencies.",
+   "topic": "Packages",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "cmd": "dnf remove PKG",
+   "desc": "Remove PKG.",
+   "topic": "Packages",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "cmd": "dnf provides '*/bin/NAME'",
+   "desc": "Find the package providing a command.",
+   "topic": "Packages",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "cmd": "dnf repolist",
+   "desc": "List enabled repositories.",
+   "topic": "Packages",
+   "lesson": "7/rpm-dnf"
+  },
+  {
+   "cmd": "dpkg -S FILE",
+   "desc": "Find the Debian package owning FILE.",
+   "topic": "Packages",
+   "lesson": "7/dpkg-apt"
+  },
+  {
+   "cmd": "apt-get update",
+   "desc": "Refresh package lists.",
+   "topic": "Packages",
+   "lesson": "7/dpkg-apt"
+  },
+  {
+   "cmd": "apt-get install PKG",
+   "desc": "Install PKG on Debian/Ubuntu.",
+   "topic": "Packages",
+   "lesson": "7/dpkg-apt"
+  },
+  {
+   "cmd": "make -n",
+   "desc": "Show what make would do.",
+   "topic": "Build",
+   "lesson": "7/build-from-source"
+  },
+  {
+   "cmd": "make install DESTDIR=/stage PREFIX=/usr",
+   "desc": "Install into a staging root.",
+   "topic": "Build",
+   "lesson": "7/build-from-source"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}

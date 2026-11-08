@@ -1,0 +1,589 @@
+{
+ "title": "systemd in depth",
+ "lessons": [
+  {
+   "id": "units-and-systemctl",
+   "title": "systemd units and systemctl",
+   "level": "beginner",
+   "goal": "Learn what a systemd unit is, the unit types, and the everyday `systemctl` commands to look at and control services.\n\nWhy it matters: systemd is PID 1 on almost every distribution. Every service, mount, timer and socket is a unit, and `systemctl` is how you manage them.",
+   "setup": {
+    "note": "Steps with sudo create and remove small `lab-*` services. Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo systemctl stop lab-hello lab-app lab-db 2>/dev/null; sudo rm -f /etc/systemd/system/lab-*.service /usr/local/bin/lab-hello.sh; sudo systemctl daemon-reload"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Units describe things to manage",
+     "text": "A **unit** is a text file describing something systemd manages. The type is the file's suffix: `.service` (a daemon), `.socket` (a listening socket that starts a service on demand), `.timer` (schedule), `.mount` (a mount), `.target` (a group, like a runlevel), `.path`, `.slice` (cgroup).",
+     "run": [
+      {
+       "cmd": "systemctl list-unit-files --no-legend --no-pager | awk '{print $1}' | sed 's/.*\\.//' | sort | uniq -c | sort -rn | head -n 6",
+       "output": "    274 service\n     82 target\n     35 socket\n     31 timer\n     14 mount\n      7 scope"
+      }
+     ]
+    },
+    {
+     "title": "Look at a service",
+     "text": "`systemctl cat` prints the unit file(s). `status` summarises state, main PID, the control group and recent log lines.",
+     "run": [
+      {
+       "cmd": "systemctl cat crond --no-pager | grep -vE '^(#|$)' | head -n 10",
+       "output": "[Unit]\nDescription=Command Scheduler\nAfter=auditd.service nss-user-lookup.target systemd-user-sessions.service time-sync.target ypbind.service autofs.service\n[Service]\nEnvironmentFile=/etc/sysconfig/crond\nExecStart=/usr/sbin/crond -n $CRONDARGS\nExecReload=/bin/kill -HUP $MAINPID\nKillMode=process\nRestart=on-failure\nRestartSec=30s"
+      },
+      {
+       "cmd": "systemctl status crond --no-pager | sed -n '1,4p' | cut -c1-100",
+       "output": "● crond.service - Command Scheduler\n     Loaded: loaded (/usr/lib/systemd/system/crond.service; enabled; preset: enabled)\n     Active: active (running) since Tue 2026-09-22 15:31:02 GMT; 1 month 16 days ago\n   Main PID: 2344 (crond)"
+      }
+     ]
+    },
+    {
+     "title": "Ask simple questions with scripts in mind",
+     "text": "`is-active`, `is-enabled` and `is-failed` print one word and set the exit code, so scripts can use them.",
+     "run": [
+      {
+       "cmd": "systemctl is-active crond; echo \"exit code: $?\"",
+       "output": "active\nexit code: 0"
+      },
+      {
+       "cmd": "systemctl is-enabled crond",
+       "output": "enabled"
+      },
+      {
+       "cmd": "systemctl is-active no-such-service; echo \"exit code: $?\"",
+       "output": "inactive\nexit code: 3"
+      }
+     ]
+    },
+    {
+     "title": "Start, stop, restart, reload, enable",
+     "text": "- `start` / `stop` act now.\n- `restart` stops and starts; `reload` asks the daemon to re-read its configuration (SIGHUP or its own command) without stopping.\n- `enable` makes it start at boot (a symlink, see the next lesson); `disable` removes it; `enable --now` does both.\n\nThese change the system, so we show them on a service we create in the next lesson.",
+     "run": [
+      {
+       "cmd": "systemctl list-units --type=service --state=running --no-legend --no-pager | wc -l | awk '{print $1, \"services running\"}'",
+       "output": "41 services running"
+      }
+     ],
+     "under": "`systemctl` does not start anything itself. It sends a request over D-Bus (or a private socket) to PID 1, which does the work: it forks, sets up the cgroup, namespaces and credentials from the unit file, and then `exec`s the service binary."
+    },
+    {
+     "title": "Targets and dependencies",
+     "text": "A target is a unit that only groups others. `list-dependencies` shows the tree. `default.target` points to the target reached at boot.",
+     "run": [
+      {
+       "cmd": "systemctl get-default",
+       "output": "multi-user.target"
+      },
+      {
+       "cmd": "systemctl list-dependencies sysinit.target --no-pager | sed -n '1,6p' | cut -c1-60",
+       "output": "sysinit.target\n● ├─dev-hugepages.mount\n● ├─dev-mqueue.mount\n● ├─dracut-shutdown.service\n○ ├─iscsi-onboot.service\n● ├─iscsi-starter.service"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "Which suffix marks a systemd timer?",
+     "options": [
+      ".service",
+      ".timer",
+      ".target",
+      ".mount"
+     ],
+     "answer": 1,
+     "explain": "`.timer`."
+    },
+    {
+     "q": "What does `systemctl is-active X` return for a stopped service?",
+     "options": [
+      "Exit code 0",
+      "A non-zero exit code and `inactive`",
+      "An error",
+      "Nothing"
+     ],
+     "answer": 1,
+     "explain": "Scripts can test it."
+    },
+    {
+     "q": "What is the difference between restart and reload?",
+     "options": [
+      "None",
+      "reload asks the daemon to re-read config without stopping",
+      "restart keeps connections",
+      "reload reboots"
+     ],
+     "answer": 1,
+     "explain": "Reload does not interrupt service if the daemon supports it."
+    },
+    {
+     "q": "What process carries out `systemctl start`?",
+     "options": [
+      "systemctl itself",
+      "PID 1 (systemd)",
+      "bash",
+      "udev"
+     ],
+     "answer": 1,
+     "explain": "systemctl only sends the request."
+    }
+   ],
+   "check": {
+    "scenario": "You edited a unit file in `/etc/systemd/system/` and `systemctl restart` still runs the old command. What did you forget?",
+    "answer": "`systemctl daemon-reload`: systemd caches unit files, and a reload makes it read the changed file. (systemd warns: \"unit file changed on disk\".)"
+   }
+  },
+  {
+   "id": "write-a-service",
+   "title": "Writing a service: unit file, logs and restart",
+   "level": "intermediate",
+   "goal": "Create a service from scratch, start it, read its logs, watch systemd restart it after a crash, and enable it at boot.\n\nWhy it matters: this replaces cron `@reboot` hacks, `nohup` and init scripts. You get supervision, logging and resource control for free.",
+   "setup": {
+    "note": "Steps with sudo create and remove small `lab-*` services. Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo systemctl stop lab-hello lab-app lab-db 2>/dev/null; sudo rm -f /etc/systemd/system/lab-*.service /usr/local/bin/lab-hello.sh; sudo systemctl daemon-reload"
+    ]
+   },
+   "steps": [
+    {
+     "title": "The program",
+     "text": "A tiny script that logs a line every second. Install it where service binaries belong (`/usr/local/bin`) so SELinux labels it correctly.",
+     "code": {
+      "file": "hello.sh",
+      "lang": "sh",
+      "src": "#!/bin/bash\necho \"lab-hello started, pid $$\"\nn=0\nwhile true; do\n    n=$((n + 1))\n    echo \"tick $n\"\n    sleep 1\ndone\n"
+     },
+     "run": [
+      {
+       "cmd": "sudo install -m 755 hello.sh /usr/local/bin/lab-hello.sh",
+       "output": ""
+      },
+      {
+       "cmd": "ls -l /usr/local/bin/lab-hello.sh | cut -c1-10",
+       "output": "-rwxr-xr-x"
+      }
+     ]
+    },
+    {
+     "title": "The unit file",
+     "text": "Sections: `[Unit]` (description and ordering), `[Service]` (how to run) and `[Install]` (what `enable` does). `Restart=on-failure` makes systemd restart it when it dies abnormally. `User=nobody` drops privileges. Save as `/etc/systemd/system/lab-hello.service`.",
+     "code": {
+      "file": "lab-hello.service",
+      "lang": "ini",
+      "src": "[Unit]\nDescription=Lab hello service\nAfter=network.target\n\n[Service]\nExecStart=/usr/local/bin/lab-hello.sh\nRestart=on-failure\nRestartSec=1\nUser=nobody\n\n[Install]\nWantedBy=multi-user.target\n"
+     },
+     "run": [
+      {
+       "cmd": "sudo cp lab-hello.service /etc/systemd/system/lab-hello.service; sudo systemctl daemon-reload",
+       "output": ""
+      },
+      {
+       "cmd": "systemd-analyze verify /etc/systemd/system/lab-hello.service; echo \"verify exit code: $?\"",
+       "output": "/etc/systemd/system/lab-hello.service:9: Special user nobody configured, this is not safe!\nverify exit code: 0"
+      }
+     ],
+     "after": "`systemd-analyze verify` checks the syntax. Its warning about the user `nobody` is real: sharing one account between services is weak isolation. `DynamicUser=yes` (next lesson) is better."
+    },
+    {
+     "title": "Start it and look",
+     "text": "`status` shows that it is active, its main PID and the cgroup it runs in.",
+     "run": [
+      {
+       "cmd": "sudo systemctl start lab-hello; sleep 3; systemctl is-active lab-hello",
+       "output": "active"
+      },
+      {
+       "cmd": "systemctl status lab-hello --no-pager | sed -n '2,3p' | cut -c1-96",
+       "output": "     Loaded: loaded (/etc/systemd/system/lab-hello.service; disabled; preset: disabled)\n     Active: active (running) since Sun 2026-11-08 11:24:35 GMT; 3s ago"
+      },
+      {
+       "cmd": "systemctl show lab-hello -p User,Restart,Type | tr '\\n' ' '; echo",
+       "output": "Type=simple Restart=on-failure User=nobody "
+      }
+     ]
+    },
+    {
+     "title": "Its output goes to the journal",
+     "text": "stdout and stderr of the service are captured by journald, tagged with the unit name. `-u` selects the unit and `-o cat` prints only the message.",
+     "run": [
+      {
+       "cmd": "journalctl -u lab-hello -o cat --no-pager | tail -n 4",
+       "output": "tick 2\ntick 3\ntick 4\ntick 5"
+      }
+     ]
+    },
+    {
+     "title": "systemd restarts it",
+     "text": "We kill the main process with SIGKILL, like a crash. systemd notices, waits `RestartSec` and starts it again. The new process has a new PID.",
+     "run": [
+      {
+       "cmd": "old=$(systemctl show -p MainPID --value lab-hello); sudo kill -9 $old; sleep 3; new=$(systemctl show -p MainPID --value lab-hello); [ \"$new\" != \"$old\" ] && [ \"$new\" -gt 0 ] && echo 'restarted with a new PID'",
+       "output": "restarted with a new PID"
+      },
+      {
+       "cmd": "journalctl -u lab-hello -o cat --no-pager | grep -E 'Main process exited|Scheduled restart|Failed with result' | sed -E 's/[0-9]{3,}/<n>/g'",
+       "output": "lab-hello.service: Main process exited, code=killed, status=9/KILL\nlab-hello.service: Failed with result 'signal'.\nlab-hello.service: Scheduled restart job, restart counter is at 1.\nlab-hello.service: Main process exited, code=killed, status=9/KILL\nlab-hello.service: Failed with result 'signal'.\nlab-hello.service: Scheduled restart job, restart counter is at 1."
+      }
+     ]
+    },
+    {
+     "title": "Enable at boot, then clean up",
+     "text": "`enable` creates a symlink from the target's `.wants` directory to the unit file, as the `[Install]` section says. That is all that \"enabled\" means.",
+     "run": [
+      {
+       "cmd": "sudo systemctl enable lab-hello 2>&1 | sed 's/ -> .*//'; systemctl is-enabled lab-hello",
+       "output": "Created symlink /etc/systemd/system/multi-user.target.wants/lab-hello.service → /etc/systemd/system/lab-hello.service.\nenabled"
+      },
+      {
+       "cmd": "ls -l /etc/systemd/system/multi-user.target.wants/lab-hello.service | awk '{print $9, $10, $11}'",
+       "output": "/etc/systemd/system/multi-user.target.wants/lab-hello.service -> /etc/systemd/system/lab-hello.service"
+      },
+      {
+       "cmd": "sudo systemctl disable --now lab-hello 2>&1 | sed 's/ -> .*//'; sudo rm /etc/systemd/system/lab-hello.service /usr/local/bin/lab-hello.sh; sudo systemctl daemon-reload; systemctl is-active lab-hello",
+       "output": "Removed \"/etc/systemd/system/multi-user.target.wants/lab-hello.service\".\ninactive"
+      }
+     ],
+     "under": "At boot, systemd starts `multi-user.target`, which **Wants** everything in `multi-user.target.wants/`. The symlink is the only difference between enabled and disabled. `Type=simple` (the default) means the process started by `ExecStart` is the service. Old-style daemons that fork into the background need `Type=forking` and a `PIDFile=`."
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `Restart=on-failure` do?",
+     "options": [
+      "Reboots the machine",
+      "Restarts the service after an abnormal exit",
+      "Restarts when the file changes",
+      "Restarts every hour"
+     ],
+     "answer": 1,
+     "explain": "Crashes, non-zero exit, signals and timeouts count as failure."
+    },
+    {
+     "q": "What does `systemctl enable` do?",
+     "options": [
+      "Starts the service now",
+      "Creates the symlink so the service starts at boot",
+      "Reloads systemd",
+      "Checks syntax"
+     ],
+     "answer": 1,
+     "explain": "Step 6 showed the link."
+    },
+    {
+     "q": "Where should local unit files be placed?",
+     "options": [
+      "/usr/lib/systemd/system",
+      "/etc/systemd/system",
+      "/var/lib/systemd",
+      "/run/systemd/system"
+     ],
+     "answer": 1,
+     "explain": "/etc overrides vendor units in /usr/lib."
+    },
+    {
+     "q": "Which command shows a unit's log lines?",
+     "options": [
+      "journalctl -u NAME",
+      "systemctl log NAME",
+      "dmesg NAME",
+      "tail NAME"
+     ],
+     "answer": 0,
+     "explain": "`journalctl -u`."
+    }
+   ],
+   "check": {
+    "scenario": "A Python app is started by systemd as `ExecStart=/usr/bin/python3 app.py` and always shows `inactive (dead)` right after start, though the script works by hand. What do you check?",
+    "answer": "`journalctl -u NAME -b` for the error, then: a relative path in `ExecStart` (systemd needs absolute paths) or `WorkingDirectory=`; missing environment variables (set `Environment=` or `EnvironmentFile=`); the `User=` cannot read the files; SELinux denial (`ausearch -m avc -ts recent`); or the script forks and exits, which needs `Type=forking` or fixing the script to stay in the foreground."
+   }
+  },
+  {
+   "id": "dependencies-and-sandboxing",
+   "title": "Dependencies, ordering and sandboxing",
+   "level": "advanced",
+   "goal": "Learn the difference between \"needs\" and \"starts after\" in systemd, and use the sandboxing options that make a service safer.\n\nWhy it matters: wrong dependencies cause race conditions at boot and cascading stops. Sandboxing limits the damage when a service is compromised.",
+   "setup": {
+    "note": "Steps with sudo create and remove small `lab-*` services. Use a throwaway machine.",
+    "commands": [
+     "mkdir -p /tmp/lab && cd /tmp/lab",
+     "sudo systemctl stop lab-hello lab-app lab-db 2>/dev/null; sudo rm -f /etc/systemd/system/lab-*.service /usr/local/bin/lab-hello.sh; sudo systemctl daemon-reload"
+    ]
+   },
+   "steps": [
+    {
+     "title": "Two units: the database",
+     "text": "`lab-db` is a stand-in database that prints a line and sleeps.",
+     "code": {
+      "file": "lab-db.service",
+      "lang": "ini",
+      "src": "[Unit]\nDescription=Lab database\n\n[Service]\nExecStart=/bin/sh -c 'echo db-up; exec sleep 300'\n"
+     },
+     "run": [
+      {
+       "cmd": "cat lab-db.service | tail -n 2",
+       "output": "[Service]\nExecStart=/bin/sh -c 'echo db-up; exec sleep 300'"
+      }
+     ]
+    },
+    {
+     "title": "The application unit",
+     "text": "Two separate ideas: `Requires=` is a **dependency** (pull the other unit in; stop me if it stops). `After=` is **ordering** (start me later). They are independent, so you normally write both.",
+     "code": {
+      "file": "lab-app.service",
+      "lang": "ini",
+      "src": "[Unit]\nDescription=Lab application\nRequires=lab-db.service\nAfter=lab-db.service\n\n[Service]\nExecStart=/bin/sh -c 'echo app-up; exec sleep 300'\n"
+     },
+     "run": [
+      {
+       "cmd": "sudo cp lab-db.service lab-app.service /etc/systemd/system/; sudo systemctl daemon-reload; cat lab-app.service | sed -n '3,4p'",
+       "output": "Requires=lab-db.service\nAfter=lab-db.service"
+      }
+     ]
+    },
+    {
+     "title": "Starting the app pulls in the database",
+     "text": "We start only `lab-app`. systemd starts `lab-db` first because of `Requires` and `After`.",
+     "run": [
+      {
+       "cmd": "sudo systemctl start lab-app; sleep 1; systemctl is-active lab-db lab-app | tr '\\n' ' '; echo",
+       "output": "active active "
+      },
+      {
+       "cmd": "journalctl -u lab-db -u lab-app -o cat --no-pager | tail -n 2",
+       "output": "app-up\ndb-up"
+      },
+      {
+       "cmd": "systemctl list-dependencies lab-app --no-pager | sed -n '1,3p'",
+       "output": "lab-app.service\n● ├─lab-db.service\n● ├─system.slice"
+      }
+     ]
+    },
+    {
+     "title": "Stopping the database stops the app",
+     "text": "`Requires` propagates stops. With `Wants=` (a weaker dependency) the app would keep running.",
+     "run": [
+      {
+       "cmd": "sudo systemctl stop lab-db; sleep 1; systemctl is-active lab-app lab-db | tr '\\n' ' '; echo",
+       "output": "inactive inactive "
+      }
+     ],
+     "under": "systemd builds a **transaction** from the requested unit, its dependencies and the ordering edges, checks for cycles, and then runs the jobs in parallel where ordering allows. Ordering and dependency are separate graphs: ordering only matters between units that are both in the transaction."
+    },
+    {
+     "title": "Sandbox a service",
+     "text": "Options such as `ProtectSystem=strict` (the file system is read-only for the service), `PrivateTmp=yes` (its own empty `/tmp`) and `NoNewPrivileges=yes` apply namespaces and restrictions. `systemd-run` runs a command as a transient unit with such options.",
+     "run": [
+      {
+       "cmd": "sudo systemd-run --pipe --wait --collect -q -p ProtectSystem=strict sh -c 'touch /usr/lab-test 2>&1; echo \"exit=$?\"'",
+       "output": "touch: cannot touch '/usr/lab-test': Read-only file system\nexit=1"
+      },
+      {
+       "cmd": "touch /tmp/lab/visible.txt; sudo systemd-run --pipe --wait --collect -q -p PrivateTmp=yes sh -c 'ls /tmp | wc -l'; ls /tmp | wc -l | awk '{print \"host /tmp entries (more than 0):\", ($1 > 0)}'",
+       "output": "0\nhost /tmp entries (more than 0): 1"
+      },
+      {
+       "cmd": "sudo systemd-run --pipe --wait --collect -q -p DynamicUser=yes sh -c 'id -un | cut -c1-4'",
+       "output": "run-"
+      }
+     ]
+    },
+    {
+     "title": "Score a unit",
+     "text": "`systemd-analyze security` rates a unit's exposure from 0 (very safe) to 10 (UNSAFE) based on how many protections it uses. Compare the plain unit with a hardened one.",
+     "run": [
+      {
+       "cmd": "sudo systemd-analyze security lab-app --no-pager | tail -n 1 | sed 's/^→ //' | cut -c1-70",
+       "output": "Overall exposure level for lab-app.service: 9.6 UNSAFE 😨"
+      },
+      {
+       "cmd": "sudo sed -i '/^\\[Service\\]/a ProtectSystem=strict\\nProtectHome=yes\\nPrivateTmp=yes\\nNoNewPrivileges=yes\\nPrivateDevices=yes\\nDynamicUser=yes' /etc/systemd/system/lab-app.service; sudo systemctl daemon-reload; sudo systemd-analyze security lab-app --no-pager | tail -n 1 | sed 's/^→ //' | cut -c1-70",
+       "output": "Overall exposure level for lab-app.service: 7.5 EXPOSED 🙁"
+      },
+      {
+       "cmd": "sudo rm /etc/systemd/system/lab-app.service /etc/systemd/system/lab-db.service; sudo systemctl daemon-reload; echo cleaned",
+       "output": "cleaned"
+      }
+     ]
+    }
+   ],
+   "quiz": [
+    {
+     "q": "What does `Requires=` express?",
+     "options": [
+      "Start order",
+      "A dependency: the other unit is started and a failure or stop propagates",
+      "A timer",
+      "A mount"
+     ],
+     "answer": 1,
+     "explain": "Order is separate (After/Before)."
+    },
+    {
+     "q": "What does `After=lab-db.service` alone do?",
+     "options": [
+      "Starts lab-db",
+      "Orders the start only if both are being started",
+      "Stops lab-db",
+      "Nothing"
+     ],
+     "answer": 1,
+     "explain": "It does not pull lab-db in."
+    },
+    {
+     "q": "What does `PrivateTmp=yes` provide?",
+     "options": [
+      "A bigger /tmp",
+      "A private empty /tmp for the service",
+      "Encrypted /tmp",
+      "A tmpfs for /var"
+     ],
+     "answer": 1,
+     "explain": "The service cannot see or interfere with other processes' temp files."
+    },
+    {
+     "q": "Which command rates a unit's sandboxing?",
+     "options": [
+      "systemd-analyze security",
+      "systemctl harden",
+      "journalctl -S",
+      "sestatus"
+     ],
+     "answer": 0,
+     "explain": "It gives an exposure level."
+    }
+   ],
+   "check": {
+    "scenario": "A nightly import job runs as root via a unit and parses files uploaded by customers. How do you reduce the damage of an exploit in the parser?",
+    "answer": "Run it as an unprivileged user (`User=` or `DynamicUser=yes`), `ProtectSystem=strict` with `ReadWritePaths=` only for its data directory, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `CapabilityBoundingSet=` empty, `SystemCallFilter=@system-service`, `RestrictAddressFamilies=`, and measure with `systemd-analyze security`."
+   }
+  }
+ ],
+ "interview": [
+  {
+   "q": "What is a systemd unit?",
+   "a": "A configuration file describing something systemd manages: service, socket, timer, mount, target, path, slice. See [the lesson](#/lesson/25/units-and-systemctl).",
+   "level": "beginner"
+  },
+  {
+   "q": "What do the sections of a service unit do?",
+   "a": "[Unit] describes and orders it, [Service] says how to run it, [Install] says which target wants it when enabled. See [writing a service](#/lesson/25/write-a-service).",
+   "level": "beginner"
+  },
+  {
+   "q": "What does `systemctl enable` actually do?",
+   "a": "Creates a symlink in the target's .wants directory, as the [Install] section says. Starting at boot follows from that link.",
+   "level": "intermediate"
+  },
+  {
+   "q": "Difference between Requires, Wants and After?",
+   "a": "Requires and Wants are dependencies (hard and soft); After/Before is ordering. They are independent. See [dependencies](#/lesson/25/dependencies-and-sandboxing).",
+   "level": "intermediate"
+  },
+  {
+   "q": "How does systemd restart a crashed service?",
+   "a": "With `Restart=` (on-failure, always...) and `RestartSec=`. Limits (`StartLimitBurst`) stop endless loops.",
+   "level": "intermediate"
+  },
+  {
+   "q": "How can you reduce the attack surface of a service?",
+   "a": "Run unprivileged and use sandbox options: ProtectSystem, ProtectHome, PrivateTmp, NoNewPrivileges, capability and syscall filters; check with systemd-analyze security.",
+   "level": "advanced"
+  }
+ ],
+ "glossary": [
+  {
+   "term": "Unit",
+   "def": "A systemd configuration object: service, timer, socket, mount, target...",
+   "lesson": "25/units-and-systemctl"
+  },
+  {
+   "term": "Service unit",
+   "def": "A unit that describes a process to start and supervise.",
+   "lesson": "25/write-a-service"
+  },
+  {
+   "term": "Target",
+   "def": "A unit that groups other units to define a system state.",
+   "lesson": "25/units-and-systemctl"
+  },
+  {
+   "term": "daemon-reload",
+   "def": "Makes systemd re-read unit files from disk.",
+   "lesson": "25/units-and-systemctl"
+  },
+  {
+   "term": "Requires",
+   "def": "Hard dependency: the other unit is started and stops propagate.",
+   "lesson": "25/dependencies-and-sandboxing"
+  },
+  {
+   "term": "Sandboxing",
+   "def": "Restricting a service with namespaces and filters (ProtectSystem, PrivateTmp, ...).",
+   "lesson": "25/dependencies-and-sandboxing"
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "systemctl status UNIT",
+   "desc": "Show state, PID and recent log of a unit.",
+   "topic": "systemd",
+   "lesson": "25/units-and-systemctl"
+  },
+  {
+   "cmd": "systemctl start|stop|restart|reload UNIT",
+   "desc": "Control a unit.",
+   "topic": "systemd",
+   "lesson": "25/units-and-systemctl"
+  },
+  {
+   "cmd": "systemctl enable --now UNIT",
+   "desc": "Enable at boot and start now.",
+   "topic": "systemd",
+   "lesson": "25/write-a-service"
+  },
+  {
+   "cmd": "systemctl cat UNIT",
+   "desc": "Print the unit file and drop-ins.",
+   "topic": "systemd",
+   "lesson": "25/units-and-systemctl"
+  },
+  {
+   "cmd": "systemctl daemon-reload",
+   "desc": "Re-read unit files.",
+   "topic": "systemd",
+   "lesson": "25/units-and-systemctl"
+  },
+  {
+   "cmd": "journalctl -u UNIT -o cat",
+   "desc": "Show a unit's messages.",
+   "topic": "systemd",
+   "lesson": "25/write-a-service"
+  },
+  {
+   "cmd": "systemd-analyze verify FILE",
+   "desc": "Check a unit file.",
+   "topic": "systemd",
+   "lesson": "25/write-a-service"
+  },
+  {
+   "cmd": "systemctl list-dependencies UNIT",
+   "desc": "Show what a unit depends on.",
+   "topic": "systemd",
+   "lesson": "25/dependencies-and-sandboxing"
+  },
+  {
+   "cmd": "systemd-run -p ProtectSystem=strict CMD",
+   "desc": "Run CMD as a sandboxed transient unit.",
+   "topic": "systemd",
+   "lesson": "25/dependencies-and-sandboxing"
+  },
+  {
+   "cmd": "systemd-analyze security UNIT",
+   "desc": "Rate the sandboxing of a unit.",
+   "topic": "systemd",
+   "lesson": "25/dependencies-and-sandboxing"
+  }
+ ],
+ "env": "Oracle Linux Server 9.8, kernel 6.12.0-206.104.4.4.el9uek.aarch64 (aarch64), bash 5.1.8(1)-release"
+}
